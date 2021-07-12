@@ -23,6 +23,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.NiFiServer;
 import org.apache.nifi.bundle.Bundle;
 import org.apache.nifi.bundle.BundleDetails;
+import org.apache.nifi.controller.DecommissionTask;
 import org.apache.nifi.controller.UninheritableFlowException;
 import org.apache.nifi.controller.serialization.FlowSerializationException;
 import org.apache.nifi.controller.serialization.FlowSynchronizationException;
@@ -58,6 +59,7 @@ import org.apache.nifi.web.security.headers.XContentTypeOptionsFilter;
 import org.apache.nifi.web.security.headers.XFrameOptionsFilter;
 import org.apache.nifi.web.security.headers.XSSProtectionFilter;
 import org.apache.nifi.web.security.requests.ContentLengthFilter;
+import org.apache.nifi.web.server.util.TrustStoreScanner;
 import org.eclipse.jetty.annotations.AnnotationConfiguration;
 import org.eclipse.jetty.deploy.App;
 import org.eclipse.jetty.deploy.DeploymentManager;
@@ -77,6 +79,7 @@ import org.eclipse.jetty.servlet.DefaultServlet;
 import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.servlets.DoSFilter;
+import org.eclipse.jetty.util.ssl.KeyStoreScanner;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.eclipse.jetty.webapp.Configuration;
@@ -138,6 +141,10 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
         return nameToTest.endsWith(".war") && pathname.isFile();
     };
 
+    // property parsing util
+    private static final String REGEX_SPLIT_PROPERTY = ",\\s*";
+    protected static final String JOIN_ARRAY = ", ";
+
     private Server server;
     private NiFiProperties props;
 
@@ -146,6 +153,8 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
     private ExtensionMapping extensionMapping;
     private NarAutoLoader narAutoLoader;
     private DiagnosticsFactory diagnosticsFactory;
+    private SslContextFactory.Server sslContextFactory;
+    private DecommissionTask decommissionTask;
 
     private WebAppContext webApiContext;
     private WebAppContext webDocsContext;
@@ -310,6 +319,7 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
         // deploy the web apps
         return gzip(webAppContextHandlers);
     }
+
 
     @Override
     public void loadExtensionUis(final Set<Bundle> bundles) {
@@ -876,6 +886,29 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
         ServerConnectorCreator<Server, HttpConfiguration, ServerConnector> scc = (s, c) -> createUnconfiguredSslServerConnector(s, c, port);
 
         configureGenericConnector(server, httpConfiguration, hostname, port, connectorLabel, httpsNetworkInterfaces, scc);
+
+        if (props.isSecurityAutoReloadEnabled()) {
+            configureSslContextFactoryReloading(server);
+        }
+    }
+
+    /**
+     * Configures a KeyStoreScanner and TrustStoreScanner at the configured reload intervals.  This will
+     * reload the SSLContextFactory if any changes are detected to the keystore or truststore.
+     * @param server The Jetty server
+     */
+    private void configureSslContextFactoryReloading(Server server) {
+        final int scanIntervalSeconds = Double.valueOf(FormatUtils.getPreciseTimeDuration(
+                props.getSecurityAutoReloadInterval(), TimeUnit.SECONDS))
+                .intValue();
+
+        final KeyStoreScanner keyStoreScanner = new KeyStoreScanner(sslContextFactory);
+        keyStoreScanner.setScanInterval(scanIntervalSeconds);
+        server.addBean(keyStoreScanner);
+
+        final TrustStoreScanner trustStoreScanner = new TrustStoreScanner(sslContextFactory);
+        trustStoreScanner.setScanInterval(scanIntervalSeconds);
+        server.addBean(trustStoreScanner);
     }
 
     /**
@@ -1004,6 +1037,7 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
     private SslContextFactory createSslContextFactory() {
         final SslContextFactory.Server serverContextFactory = new SslContextFactory.Server();
         configureSslContextFactory(serverContextFactory, props);
+        this.sslContextFactory = serverContextFactory;
         return serverContextFactory;
     }
 
@@ -1011,6 +1045,22 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
         // Explicitly exclude legacy TLS protocol versions
         contextFactory.setIncludeProtocols(TlsConfiguration.getCurrentSupportedTlsProtocolVersions());
         contextFactory.setExcludeProtocols("TLS", "TLSv1", "TLSv1.1", "SSL", "SSLv2", "SSLv2Hello", "SSLv3");
+
+        // on configuration, replace default application cipher suites with those configured
+        final String includeCipherSuitesProps = props.getProperty(NiFiProperties.WEB_HTTPS_CIPHERSUITES_INCLUDE);
+        if (StringUtils.isNotEmpty(includeCipherSuitesProps)) {
+            final String[] includeCipherSuites = includeCipherSuitesProps.split(REGEX_SPLIT_PROPERTY);
+            logger.info("Setting include cipher suites from configuration; parsed property = [{}].",
+                    StringUtils.join(includeCipherSuites, JOIN_ARRAY));
+            contextFactory.setIncludeCipherSuites(includeCipherSuites);
+        }
+        final String excludeCipherSuitesProps = props.getProperty(NiFiProperties.WEB_HTTPS_CIPHERSUITES_EXCLUDE);
+        if (StringUtils.isNotEmpty(excludeCipherSuitesProps)) {
+            final String[] excludeCipherSuites = excludeCipherSuitesProps.split(REGEX_SPLIT_PROPERTY);
+            logger.info("Setting exclude cipher suites from configuration; parsed property = [{}].",
+                    StringUtils.join(excludeCipherSuites, JOIN_ARRAY));
+            contextFactory.setExcludeCipherSuites(excludeCipherSuites);
+        }
 
         // require client auth when not supporting login, Kerberos service, or anonymous access
         if (props.isClientAuthRequiredForRestApi()) {
@@ -1124,6 +1174,7 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
                 }
 
                 diagnosticsFactory = webApplicationContext.getBean("diagnosticsFactory", DiagnosticsFactory.class);
+                decommissionTask = webApplicationContext.getBean("decommissionTask", DecommissionTask.class);
             }
 
             // ensure the web document war was loaded and provide the extension mapping
@@ -1174,7 +1225,7 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
                     extensionMapping,
                     this);
 
-            narAutoLoader = new NarAutoLoader(props.getNarAutoLoadDirectory(), narLoader);
+            narAutoLoader = new NarAutoLoader(props, narLoader, extensionManager);
             narAutoLoader.start();
 
             // dump the application url after confirming everything started successfully
@@ -1195,6 +1246,11 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
     @Override
     public DiagnosticsFactory getThreadDumpFactory() {
         return new ThreadDumpDiagnosticsFactory();
+    }
+
+    @Override
+    public DecommissionTask getDecommissionTask() {
+        return decommissionTask;
     }
 
     private void performInjectionForComponentUis(final Collection<WebAppContext> componentUiExtensionWebContexts,

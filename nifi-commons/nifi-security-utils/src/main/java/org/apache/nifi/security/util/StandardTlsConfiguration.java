@@ -16,16 +16,18 @@
  */
 package org.apache.nifi.security.util;
 
+import org.apache.nifi.util.NiFiProperties;
+import org.apache.nifi.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.net.MalformedURLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import org.apache.nifi.util.NiFiProperties;
-import org.apache.nifi.util.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.Properties;
 
 
 /**
@@ -172,15 +174,25 @@ public class StandardTlsConfiguration implements TlsConfiguration {
     // Static factory method from NiFiProperties
 
     /**
-     * Returns a {@link org.apache.nifi.security.util.TlsConfiguration} instantiated from the relevant {@link NiFiProperties} properties.
+     * Returns a {@link org.apache.nifi.security.util.TlsConfiguration} instantiated from the relevant NiFi properties.
      *
      * @param niFiProperties the NiFi properties
      * @return a populated TlsConfiguration container object
      */
-    public static StandardTlsConfiguration fromNiFiProperties(NiFiProperties niFiProperties) {
-        if (niFiProperties == null) {
-            throw new IllegalArgumentException("The NiFi properties cannot be null");
-        }
+    public static TlsConfiguration fromNiFiProperties(final NiFiProperties niFiProperties) {
+        final Properties properties = new Properties();
+        niFiProperties.getPropertyKeys().forEach(key -> properties.setProperty(key, niFiProperties.getProperty(key)));
+        return fromNiFiProperties(properties);
+    }
+
+    /**
+     * Returns a {@link org.apache.nifi.security.util.TlsConfiguration} instantiated from the relevant NiFi properties.
+     *
+     * @param niFiProperties the NiFi properties, as a simple java.util.Properties object
+     * @return a populated TlsConfiguration container object
+     */
+    public static TlsConfiguration fromNiFiProperties(final Properties niFiProperties) {
+        Objects.requireNonNull("The NiFi properties cannot be null");
 
         String keystorePath = niFiProperties.getProperty(NiFiProperties.SECURITY_KEYSTORE);
         String keystorePassword = niFiProperties.getProperty(NiFiProperties.SECURITY_KEYSTORE_PASSWD);
@@ -194,11 +206,6 @@ public class StandardTlsConfiguration implements TlsConfiguration {
         final StandardTlsConfiguration tlsConfiguration = new StandardTlsConfiguration(keystorePath, keystorePassword, keyPassword,
                 keystoreType, truststorePath, truststorePassword,
                 truststoreType, protocol);
-        if (logger.isDebugEnabled()) {
-            logger.debug("Instantiating TlsConfiguration from NiFi properties: {}, {}, {}, {}, {}, {}, {}, {}",
-                    keystorePath, tlsConfiguration.getKeystorePasswordForLogging(), tlsConfiguration.getKeyPasswordForLogging(), keystoreType,
-                    truststorePath, tlsConfiguration.getTruststorePasswordForLogging(), truststoreType, protocol);
-        }
 
         return tlsConfiguration;
     }
