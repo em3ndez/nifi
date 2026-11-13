@@ -18,37 +18,41 @@ package org.apache.nifi.toolkit.cli.impl.client;
 
 import org.apache.commons.cli.MissingOptionException;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.registry.security.util.KeystoreType;
 import org.apache.nifi.toolkit.cli.api.ClientFactory;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.AccessClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ConnectionClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ControllerClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ControllerServicesClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.CountersClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.FlowClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.InputPortClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientConfig;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.OutputPortClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ParamContextClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.PoliciesClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ProcessGroupClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ProcessorClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ProvenanceClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.RemoteProcessGroupClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ReportingTasksClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.RequestConfig;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.TemplatesClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.TenantsClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.VersionsClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.impl.JerseyNiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.impl.request.BasicAuthRequestConfig;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.impl.request.BearerTokenRequestConfig;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.impl.request.ProxiedEntityRequestConfig;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
+import org.apache.nifi.toolkit.client.AccessClient;
+import org.apache.nifi.toolkit.client.ConnectionClient;
+import org.apache.nifi.toolkit.client.ConnectorClient;
+import org.apache.nifi.toolkit.client.ControllerClient;
+import org.apache.nifi.toolkit.client.ControllerServicesClient;
+import org.apache.nifi.toolkit.client.CountersClient;
+import org.apache.nifi.toolkit.client.FlowClient;
+import org.apache.nifi.toolkit.client.InputPortClient;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientConfig;
+import org.apache.nifi.toolkit.client.OutputPortClient;
+import org.apache.nifi.toolkit.client.ParamContextClient;
+import org.apache.nifi.toolkit.client.ParamProviderClient;
+import org.apache.nifi.toolkit.client.PoliciesClient;
+import org.apache.nifi.toolkit.client.ProcessGroupClient;
+import org.apache.nifi.toolkit.client.ProcessorClient;
+import org.apache.nifi.toolkit.client.ProvenanceClient;
+import org.apache.nifi.toolkit.client.RemoteProcessGroupClient;
+import org.apache.nifi.toolkit.client.ReportingTasksClient;
+import org.apache.nifi.toolkit.client.RequestConfig;
+import org.apache.nifi.toolkit.client.SnippetClient;
+import org.apache.nifi.toolkit.client.SystemDiagnosticsClient;
+import org.apache.nifi.toolkit.client.TenantsClient;
+import org.apache.nifi.toolkit.client.VersionsClient;
+import org.apache.nifi.toolkit.client.impl.JerseyNiFiClient;
+import org.apache.nifi.toolkit.client.impl.request.BasicAuthRequestConfig;
+import org.apache.nifi.toolkit.client.impl.request.BearerTokenRequestConfig;
+import org.apache.nifi.toolkit.client.impl.request.OIDCClientCredentialsRequestConfig;
+import org.apache.nifi.toolkit.client.impl.request.ProxiedEntityRequestConfig;
 
 import java.io.IOException;
+import java.util.Objects;
 import java.util.Properties;
 
 /**
@@ -81,14 +85,17 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
         final String basicAuthUsername = properties.getProperty(CommandOption.BASIC_AUTH_USER.getLongName());
         final String basicAuthPassword = properties.getProperty(CommandOption.BASIC_AUTH_PASSWORD.getLongName());
 
+        final String oidcTokenUrl = properties.getProperty(CommandOption.OIDC_TOKEN_URL.getLongName());
+        final String oidcClientId = properties.getProperty(CommandOption.OIDC_CLIENT_ID.getLongName());
+        final String oidcClientSecret = properties.getProperty(CommandOption.OIDC_CLIENT_SECRET.getLongName());
+
         final String bearerToken = properties.getProperty(CommandOption.BEARER_TOKEN.getLongName());
 
         final boolean secureUrl = url.startsWith("https");
 
         if (secureUrl && (StringUtils.isBlank(truststore)
                 || StringUtils.isBlank(truststoreType)
-                || StringUtils.isBlank(truststorePasswd))
-                ) {
+                || StringUtils.isBlank(truststorePasswd))) {
             throw new MissingOptionException(CommandOption.TRUSTSTORE.getLongName() + ", " + CommandOption.TRUSTSTORE_TYPE.getLongName()
                     + ", and " + CommandOption.TRUSTSTORE_PASSWORD.getLongName() + " are required when using an https url");
         }
@@ -114,6 +121,16 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
         if (!StringUtils.isBlank(basicAuthPassword) && StringUtils.isBlank(basicAuthUsername)) {
             throw new MissingOptionException(CommandOption.BASIC_AUTH_USER.getLongName()
                     + " is required when specifying " + CommandOption.BASIC_AUTH_PASSWORD.getLongName());
+        }
+
+        if (!StringUtils.isBlank(oidcTokenUrl) && StringUtils.isBlank(oidcClientId)) {
+            throw new MissingOptionException(CommandOption.OIDC_CLIENT_ID.getLongName()
+                    + " is required when specifying " + CommandOption.OIDC_TOKEN_URL.getLongName());
+        }
+
+        if (!StringUtils.isBlank(oidcTokenUrl) && StringUtils.isBlank(oidcClientSecret)) {
+            throw new MissingOptionException(CommandOption.OIDC_CLIENT_SECRET.getLongName()
+                    + " is required when specifying " + CommandOption.OIDC_TOKEN_URL.getLongName());
         }
 
         final NiFiClientConfig.Builder clientConfigBuilder = new NiFiClientConfig.Builder()
@@ -150,7 +167,7 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
             try {
                 Integer timeout = Integer.valueOf(connectionTimeout);
                 clientConfigBuilder.connectTimeout(timeout);
-            } catch(Exception e) {
+            } catch (Exception e) {
                 throw new MissingOptionException("connectionTimeout has to be an integer");
             }
         }
@@ -159,14 +176,15 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
             try {
                 Integer timeout = Integer.valueOf(readTimeout);
                 clientConfigBuilder.readTimeout(timeout);
-            } catch(Exception e) {
+            } catch (Exception e) {
                 throw new MissingOptionException("readTimeout has to be an integer");
             }
         }
 
         final NiFiClient client = new JerseyNiFiClient.Builder().config(clientConfigBuilder.build()).build();
 
-        // return a wrapped client based which arguments were provided, otherwise return the regular client
+        // return a wrapped client based which arguments were provided, otherwise return
+        // the regular client
 
         if (!StringUtils.isBlank(proxiedEntity)) {
             final RequestConfig proxiedEntityConfig = new ProxiedEntityRequestConfig(proxiedEntity);
@@ -177,14 +195,18 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
         } else if (!StringUtils.isBlank(basicAuthUsername) && !StringUtils.isBlank(basicAuthPassword)) {
             final RequestConfig basicAuthConfig = new BasicAuthRequestConfig(basicAuthUsername, basicAuthPassword);
             return new NiFiClientWithRequestConfig(client, basicAuthConfig);
+        } else if (!StringUtils.isBlank(oidcTokenUrl) && !StringUtils.isBlank(oidcClientId) && !StringUtils.isBlank(oidcClientSecret)) {
+            final RequestConfig oidcAuthConfig = new OIDCClientCredentialsRequestConfig(clientConfigBuilder.build(), oidcTokenUrl, oidcClientId, oidcClientSecret);
+            return new NiFiClientWithRequestConfig(client, oidcAuthConfig);
         } else {
             return client;
         }
     }
 
     /**
-     * Wraps a NiFiClient and ensures that all methods to obtain a more specific client will
-     * call the RequestConfig variation so that callers don't have to pass in the config on every call.
+     * Wraps a NiFiClient and ensures that all methods to obtain a more specific
+     * client will call the RequestConfig variation so that callers don't have to
+     * pass in the config on every call.
      */
     private static class NiFiClientWithRequestConfig implements NiFiClient {
 
@@ -193,7 +215,7 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
 
         public NiFiClientWithRequestConfig(final NiFiClient wrappedClient, final RequestConfig requestConfig) {
             this.wrappedClient = wrappedClient;
-            this.requestConfig = Validate.notNull(requestConfig);
+            this.requestConfig = Objects.requireNonNull(requestConfig);
         }
 
         @Override
@@ -277,16 +299,6 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
         }
 
         @Override
-        public TemplatesClient getTemplatesClient() {
-            return wrappedClient.getTemplatesClient(requestConfig);
-        }
-
-        @Override
-        public TemplatesClient getTemplatesClient(RequestConfig requestConfig) {
-            return wrappedClient.getTemplatesClient(requestConfig);
-        }
-
-        @Override
         public ReportingTasksClient getReportingTasksClient() {
             return wrappedClient.getReportingTasksClient(requestConfig);
         }
@@ -294,6 +306,16 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
         @Override
         public ReportingTasksClient getReportingTasksClient(RequestConfig requestConfig) {
             return wrappedClient.getReportingTasksClient(requestConfig);
+        }
+
+        @Override
+        public ParamProviderClient getParamProviderClient() {
+            return wrappedClient.getParamProviderClient();
+        }
+
+        @Override
+        public ParamProviderClient getParamProviderClient(RequestConfig requestConfig) {
+            return wrappedClient.getParamProviderClient(requestConfig);
         }
 
         @Override
@@ -369,6 +391,36 @@ public class NiFiClientFactory implements ClientFactory<NiFiClient> {
         @Override
         public AccessClient getAccessClient() {
             return wrappedClient.getAccessClient();
+        }
+
+        @Override
+        public SnippetClient getSnippetClient() {
+            return wrappedClient.getSnippetClient();
+        }
+
+        @Override
+        public SnippetClient getSnippetClient(final RequestConfig requestConfig) {
+            return wrappedClient.getSnippetClient(requestConfig);
+        }
+
+        @Override
+        public SystemDiagnosticsClient getSystemsDiagnosticsClient() {
+            return wrappedClient.getSystemsDiagnosticsClient();
+        }
+
+        @Override
+        public SystemDiagnosticsClient getSystemsDiagnosticsClient(final RequestConfig requestConfig) {
+            return wrappedClient.getSystemsDiagnosticsClient(requestConfig);
+        }
+
+        @Override
+        public ConnectorClient getConnectorClient() {
+            return wrappedClient.getConnectorClient();
+        }
+
+        @Override
+        public ConnectorClient getConnectorClient(final RequestConfig requestConfig) {
+            return wrappedClient.getConnectorClient(requestConfig);
         }
 
         @Override

@@ -20,22 +20,25 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 public class InstanceConfiguration {
     private final File bootstrapConfigFile;
     private final File instanceDirectory;
-    private final File flowXmlGz;
+    private final File flowJsonGz;
     private final File stateDirectory;
     private final boolean autoStart;
     private final Map<String, String> nifiPropertiesOverrides;
+    private final boolean unpackPythonExtensions;
 
     private InstanceConfiguration(Builder builder) {
         this.bootstrapConfigFile = builder.bootstrapConfigFile;
         this.instanceDirectory = builder.instanceDirectory;
-        this.flowXmlGz = builder.flowXmlGz;
+        this.flowJsonGz = builder.flowJsonGz;
         this.stateDirectory = builder.stateDirectory;
         this.autoStart = builder.autoStart;
         this.nifiPropertiesOverrides = builder.nifiPropertiesOverrides;
+        this.unpackPythonExtensions = builder.unpackPythonExtensions;
     }
 
     public File getBootstrapConfigFile() {
@@ -46,8 +49,8 @@ public class InstanceConfiguration {
         return instanceDirectory;
     }
 
-    public File getFlowXmlGz() {
-        return flowXmlGz;
+    public File getFlowJsonGz() {
+        return flowJsonGz;
     }
 
     public File getStateDirectory() {
@@ -58,16 +61,42 @@ public class InstanceConfiguration {
         return autoStart;
     }
 
+    public boolean isUnpackPythonExtensions() {
+        return unpackPythonExtensions;
+    }
+
     public Map<String, String> getNifiPropertiesOverrides() {
         return nifiPropertiesOverrides;
+    }
+
+    @Override
+    public boolean equals(final Object other) {
+        if (this == other) {
+            return true;
+        }
+
+        if (other == null || getClass() != other.getClass()) {
+            return false;
+        }
+
+        final InstanceConfiguration that = (InstanceConfiguration) other;
+        return autoStart == that.autoStart && unpackPythonExtensions == that.unpackPythonExtensions && Objects.equals(bootstrapConfigFile, that.bootstrapConfigFile)
+            && Objects.equals(instanceDirectory, that.instanceDirectory) && Objects.equals(flowJsonGz, that.flowJsonGz)
+            && Objects.equals(stateDirectory, that.stateDirectory) && Objects.equals(nifiPropertiesOverrides, that.nifiPropertiesOverrides);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(bootstrapConfigFile, instanceDirectory, flowJsonGz, stateDirectory, autoStart, nifiPropertiesOverrides, unpackPythonExtensions);
     }
 
     public static class Builder {
         private File bootstrapConfigFile;
         private File instanceDirectory;
-        private File flowXmlGz;
+        private File flowJsonGz;
         private File stateDirectory;
         private boolean autoStart = true;
+        private boolean unpackPythonExtensions = false;
         private final Map<String, String> nifiPropertiesOverrides = new HashMap<>();
 
         public Builder overrideNifiProperties(final Map<String, String> overrides) {
@@ -101,13 +130,13 @@ public class InstanceConfiguration {
             return instanceDirectory(new File(instanceDirName));
         }
 
-        public Builder flowXml(final File flowXml) {
-            this.flowXmlGz = flowXml;
+        public Builder flowJson(final File flowJsonGz) {
+            this.flowJsonGz = flowJsonGz;
             return this;
         }
 
-        public Builder flowXml(final String flowXmlFilename) {
-            return flowXml(new File(flowXmlFilename));
+        public Builder flowJson(final String flowJsonFilename) {
+            return flowJson(new File(flowJsonFilename));
         }
 
         public Builder stateDirectory(final File stateDirectory) {
@@ -129,6 +158,11 @@ public class InstanceConfiguration {
 
         public Builder autoStart(boolean autoStart) {
             this.autoStart = autoStart;
+            return this;
+        }
+
+        public Builder unpackPythonExtensions(final boolean unpackPythonExtensions) {
+            this.unpackPythonExtensions = unpackPythonExtensions;
             return this;
         }
 

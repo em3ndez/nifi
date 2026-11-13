@@ -18,9 +18,9 @@
 package org.apache.nifi.toolkit.cli.impl.command.nifi;
 
 import org.apache.nifi.toolkit.cli.api.CommandException;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
 import org.apache.nifi.toolkit.cli.impl.result.VoidResult;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.dto.RevisionDTO;
 import org.apache.nifi.web.api.entity.ComponentEntity;
 import org.apache.nifi.web.api.entity.ComponentRunStatusEntity;
@@ -77,7 +77,7 @@ public abstract class AbstractNiFiActivateCommand<C extends ComponentEntity, S e
             }
         }
 
-        if (exceptions.size() > 0) {
+        if (!exceptions.isEmpty()) {
             throw new CommandException(exceptions.size() + " components could not be " + state.toLowerCase() + ", " +
                     "run command with -verbose to obtain more details");
         }

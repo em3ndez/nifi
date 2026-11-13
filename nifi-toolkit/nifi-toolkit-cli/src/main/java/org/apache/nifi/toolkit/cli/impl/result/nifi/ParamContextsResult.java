@@ -16,7 +16,6 @@
  */
 package org.apache.nifi.toolkit.cli.impl.result.nifi;
 
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.Context;
 import org.apache.nifi.toolkit.cli.api.ReferenceResolver;
 import org.apache.nifi.toolkit.cli.api.Referenceable;
@@ -38,8 +37,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 public class ParamContextsResult extends AbstractWritableResult<ParameterContextsEntity> implements Referenceable {
 
@@ -48,7 +49,7 @@ public class ParamContextsResult extends AbstractWritableResult<ParameterContext
 
     public ParamContextsResult(final ResultType resultType, final ParameterContextsEntity parameterContexts) {
         super(resultType);
-        this.parameterContexts = Validate.notNull(parameterContexts);
+        this.parameterContexts = Objects.requireNonNull(parameterContexts);
         this.results = new ArrayList<>();
 
         // If there is a param context that the user doesn't have permissions to then the entity will be returned with
@@ -75,12 +76,17 @@ public class ParamContextsResult extends AbstractWritableResult<ParameterContext
                 .column("#", 3, 3, false)
                 .column("Id", 36, 36, false)
                 .column("Name", 20, 60, true)
+                .column("Inherited Param Contexts", 20, 60, true)
+                .column("Parameter Provider", 20, 60, false)
                 .column("Description", 40, 60, true)
                 .build();
 
         for (int i = 0; i < results.size(); i++) {
             final ParameterContextDTO r = results.get(i);
-            table.addRow("" + (i+1), r.getId(), r.getName(), r.getDescription());
+            final String parameterProviderId = r.getParameterProviderConfiguration() == null ? "" : r.getParameterProviderConfiguration().getComponent().getParameterProviderId();
+            final String inheritedParamContexts = r.getInheritedParameterContexts() == null ? ""
+                    : r.getInheritedParameterContexts().stream().map(pc -> pc.getComponent().getName()).collect(Collectors.joining(", "));
+            table.addRow("" + (i + 1), r.getId(), r.getName(), inheritedParamContexts, parameterProviderId, r.getDescription());
         }
 
         final TableWriter tableWriter = new DynamicTableWriter();

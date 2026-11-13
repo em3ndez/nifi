@@ -16,30 +16,30 @@
  */
 package org.apache.nifi.remote.util;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Iterator;
 import java.util.Set;
 
-import static org.apache.nifi.remote.util.SiteToSiteRestApiClient.parseClusterUrls;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.apache.nifi.remote.util.ClusterUrlParser.parseClusterUrls;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestSiteToSiteRestApiClient {
 
     private static void assertSingleUri(final String expected, final Set<String> urls) {
-        Assert.assertEquals(1, urls.size());
-        Assert.assertEquals(expected, urls.iterator().next().toString());
+        assertEquals(1, urls.size());
+        assertEquals(expected, urls.iterator().next());
     }
 
     @Test
-    public void testResolveBaseUrlHttp() throws Exception{
+    public void testResolveBaseUrlHttp() {
         assertSingleUri("http://nifi.example.com/nifi-api", parseClusterUrls("http://nifi.example.com/nifi"));
     }
 
     @Test
-    public void testResolveBaseUrlHttpSub() throws Exception{
+    public void testResolveBaseUrlHttpSub() {
         assertSingleUri("http://nifi.example.com/foo/bar/baz/nifi-api", parseClusterUrls("http://nifi.example.com/foo/bar/baz/nifi"));
     }
 
@@ -49,7 +49,7 @@ public class TestSiteToSiteRestApiClient {
     }
 
     @Test
-    public void testResolveBaseUrlHttps() throws Exception{
+    public void testResolveBaseUrlHttps() {
         assertSingleUri("https://nifi.example.com/nifi-api", parseClusterUrls("https://nifi.example.com/nifi"));
     }
 
@@ -121,58 +121,43 @@ public class TestSiteToSiteRestApiClient {
     }
 
     @Test
-    public void testGetUrlsEmpty() throws Exception {
-        try {
-            parseClusterUrls(null);
-            fail("Should fail if cluster URL was not specified.");
-        } catch (IllegalArgumentException e) {
-        }
+    public void testGetUrlsEmpty() {
+        assertThrows(IllegalArgumentException.class, () -> parseClusterUrls(null));
 
-        try {
-            parseClusterUrls("");
-            fail("Should fail if cluster URL was not specified.");
-        } catch (IllegalArgumentException e) {
-        }
+        assertThrows(IllegalArgumentException.class, () -> parseClusterUrls(""));
     }
 
     @Test
-    public void testGetUrlsOne() throws Exception {
+    public void testGetUrlsOne() {
         final Set<String> urls = parseClusterUrls("http://localhost:8080/nifi");
 
-        Assert.assertEquals(1, urls.size());
-        Assert.assertEquals("http://localhost:8080/nifi-api", urls.iterator().next());
+        assertEquals(1, urls.size());
+        assertEquals("http://localhost:8080/nifi-api", urls.iterator().next());
     }
 
     @Test
-    public void testGetUrlsThree() throws Exception {
+    public void testGetUrlsThree() {
         final Set<String> urls = parseClusterUrls("http://host1:8080/nifi,http://host2:8080/nifi,http://host3:8080/nifi");
 
-        Assert.assertEquals(3, urls.size());
+        assertEquals(3, urls.size());
         final Iterator<String> iterator = urls.iterator();
-        Assert.assertEquals("http://host1:8080/nifi-api", iterator.next());
-        Assert.assertEquals("http://host2:8080/nifi-api", iterator.next());
-        Assert.assertEquals("http://host3:8080/nifi-api", iterator.next());
+        assertEquals("http://host1:8080/nifi-api", iterator.next());
+        assertEquals("http://host2:8080/nifi-api", iterator.next());
+        assertEquals("http://host3:8080/nifi-api", iterator.next());
     }
 
     @Test
-    public void testGetUrlsDifferentProtocols() throws Exception {
+    public void testGetUrlsDifferentProtocols() {
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> parseClusterUrls("http://host1:8080/nifi,https://host2:8080/nifi,http://host3:8080/nifi"));
 
-        try {
-            parseClusterUrls("http://host1:8080/nifi,https://host2:8080/nifi,http://host3:8080/nifi");
-            fail("Should fail if cluster URLs contain different protocols.");
-        } catch (IllegalArgumentException e) {
-            assertTrue(e.getMessage().contains("Different protocols"));
-        }
+        assertTrue(exception.getMessage().contains("Different protocols"));
     }
 
     @Test
-    public void testGetUrlsMalformed() throws Exception {
-
-        try {
-            parseClusterUrls("http://host1:8080/nifi,host&2:8080,http://host3:8080/nifi");
-            fail("Should fail if cluster URLs contain illegal URL.");
-        } catch (IllegalArgumentException e) {
-            assertTrue(e.getMessage().contains("malformed"));
-        }
+    public void testGetUrlsMalformed() {
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> parseClusterUrls("http://host1:8080/nifi,host&2:8080,http://host3:8080/nifi"));
+        assertTrue(exception.getMessage().contains("malformed"));
     }
 }

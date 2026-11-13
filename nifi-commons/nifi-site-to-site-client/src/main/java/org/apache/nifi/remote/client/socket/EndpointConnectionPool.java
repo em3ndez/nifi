@@ -16,38 +16,12 @@
  */
 package org.apache.nifi.remote.client.socket;
 
-import static org.apache.nifi.remote.util.EventReportUtil.error;
-import static org.apache.nifi.remote.util.EventReportUtil.warn;
-
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.net.URI;
-import java.security.cert.CertificateException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
-import javax.net.ssl.SSLContext;
-import org.apache.nifi.events.EventReporter;
 import org.apache.nifi.remote.Peer;
 import org.apache.nifi.remote.PeerDescription;
 import org.apache.nifi.remote.PeerStatus;
-import org.apache.nifi.remote.RemoteDestination;
 import org.apache.nifi.remote.RemoteResourceInitiator;
+import org.apache.nifi.remote.SiteToSiteDestination;
+import org.apache.nifi.remote.SiteToSiteEventReporter;
 import org.apache.nifi.remote.TransferDirection;
 import org.apache.nifi.remote.client.PeerPersistence;
 import org.apache.nifi.remote.client.PeerSelector;
@@ -64,23 +38,51 @@ import org.apache.nifi.remote.io.socket.SocketCommunicationsSession;
 import org.apache.nifi.remote.protocol.CommunicationsSession;
 import org.apache.nifi.remote.protocol.SiteToSiteTransportProtocol;
 import org.apache.nifi.remote.protocol.socket.SocketClientProtocol;
-import org.apache.nifi.security.util.CertificateUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import javax.net.ssl.SSLContext;
+
+import static org.apache.nifi.remote.util.EventReportUtil.error;
+import static org.apache.nifi.remote.util.EventReportUtil.warn;
 
 public class EndpointConnectionPool implements PeerStatusProvider {
 
     private static final Logger logger = LoggerFactory.getLogger(EndpointConnectionPool.class);
 
+    private static final SocketPeerIdentityProvider socketPeerIdentityProvider = new StandardSocketPeerIdentityProvider();
+
     private final ConcurrentMap<PeerDescription, BlockingQueue<EndpointConnection>> connectionQueueMap = new ConcurrentHashMap<>();
 
     private final Set<EndpointConnection> activeConnections = Collections.synchronizedSet(new HashSet<>());
 
-    private final EventReporter eventReporter;
+    private final SiteToSiteEventReporter eventReporter;
     private final SSLContext sslContext;
     private final ScheduledExecutorService taskExecutor;
     private final int idleExpirationMillis;
-    private final RemoteDestination remoteDestination;
+    private final SiteToSiteDestination remoteDestination;
 
     private volatile int commsTimeout;
     private volatile boolean shutdown = false;
@@ -89,8 +91,8 @@ public class EndpointConnectionPool implements PeerStatusProvider {
     private final PeerSelector peerSelector;
     private final InetAddress localAddress;
 
-    public EndpointConnectionPool(final RemoteDestination remoteDestination, final int commsTimeoutMillis, final int idleExpirationMillis,
-                                  final SSLContext sslContext, final EventReporter eventReporter,
+    public EndpointConnectionPool(final SiteToSiteDestination remoteDestination, final int commsTimeoutMillis, final int idleExpirationMillis,
+                                  final SSLContext sslContext, final SiteToSiteEventReporter eventReporter,
                                   final PeerPersistence peerPersistence, final SiteInfoProvider siteInfoProvider,
                                   final InetAddress localAddress) {
         Objects.requireNonNull(remoteDestination, "Remote Destination/Port Identifier cannot be null");
@@ -195,7 +197,7 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                 if (connection == null) {
                     logger.debug("{} No Connection available for Port {}; creating new Connection", this, portId);
                     protocol = new SocketClientProtocol();
-                    protocol.setDestination(new IdEnrichedRemoteDestination(remoteDestination, portId));
+                    protocol.setDestination(new IdEnrichedSiteToSiteDestination(remoteDestination, portId));
                     protocol.setEventReporter(eventReporter);
 
                     final long penalizationMillis = remoteDestination.getYieldPeriod(TimeUnit.MILLISECONDS);
@@ -244,18 +246,18 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                             peerSelector.penalize(peer, penalizationMillis);
                             try {
                                 peer.close();
-                            } catch (final IOException ioe) {
+                            } catch (final IOException ignored) {
                             }
 
                             continue;
                         } else if (protocol.isPortInvalid()) {
                             peerSelector.penalize(peer, penalizationMillis);
                             cleanup(protocol, peer);
-                            throw new PortNotRunningException(peer.toString() + " indicates that port " + portId + " is not running");
+                            throw new PortNotRunningException(String.format("%s indicates that port %s is not running", peer, portId));
                         } else if (protocol.isPortUnknown()) {
                             peerSelector.penalize(peer, penalizationMillis);
                             cleanup(protocol, peer);
-                            throw new UnknownPortException(peer.toString() + " indicates that port " + portId + " is not known");
+                            throw new UnknownPortException(String.format("%s indicates that port %s is not known", peer, portId));
                         }
 
                         // negotiate the FlowFileCodec to use
@@ -268,7 +270,7 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                         peerSelector.penalize(peer, penalizationMillis);
                         cleanup(protocol, peer);
 
-                        final String message = String.format("%s failed to communicate with %s due to %s", this, peer == null ? clusterUrl : peer, e.toString());
+                        final String message = String.format("%s failed to communicate with %s due to %s", this, peer == null ? clusterUrl : peer, e);
                         error(logger, eventReporter, message);
                         if (logger.isDebugEnabled()) {
                             logger.error("", e);
@@ -295,7 +297,7 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                 if (commsSession != null) {
                     try {
                         commsSession.close();
-                    } catch (final IOException ioe) {
+                    } catch (final IOException ignored) {
                     }
                 }
 
@@ -340,8 +342,8 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                 protocol.shutdown(peer);
             } catch (final TransmissionDisabledException e) {
                 // User disabled transmission.... do nothing.
-                logger.debug(this + " Transmission Disabled by User");
-            } catch (IOException e1) {
+                logger.debug("{} Transmission Disabled by User", this);
+            } catch (IOException ignored) {
             }
         }
 
@@ -350,8 +352,8 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                 peer.close();
             } catch (final TransmissionDisabledException e) {
                 // User disabled transmission.... do nothing.
-                logger.debug(this + " Transmission Disabled by User");
-            } catch (IOException e1) {
+                logger.debug("{} Transmission Disabled by User", this);
+            } catch (IOException ignored) {
             }
         }
     }
@@ -404,7 +406,7 @@ public class EndpointConnectionPool implements PeerStatusProvider {
         try {
             clientProtocol.shutdown(peer);
         } catch (final IOException e) {
-            final String message = String.format("%s Failed to shutdown protocol when updating list of peers due to %s", this, e.toString());
+            final String message = String.format("%s Failed to shutdown protocol when updating list of peers due to %s", this, e);
             warn(logger, eventReporter, message);
             if (logger.isDebugEnabled()) {
                 logger.warn("", e);
@@ -414,7 +416,7 @@ public class EndpointConnectionPool implements PeerStatusProvider {
         try {
             peer.close();
         } catch (final IOException e) {
-            final String message = String.format("%s Failed to close resources when updating list of peers due to %s", this, e.toString());
+            final String message = String.format("%s Failed to close resources when updating list of peers due to %s", this, e);
             warn(logger, eventReporter, message);
             if (logger.isDebugEnabled()) {
                 logger.warn("", e);
@@ -449,11 +451,12 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                 socket.setSoTimeout(commsTimeout);
                 commsSession = new SocketCommunicationsSession(socket);
 
-                try {
-                    final String dn = CertificateUtils.extractPeerDNFromSSLSocket(socket);
-                    commsSession.setUserDn(dn);
-                } catch (final CertificateException ex) {
-                    throw new IOException(ex);
+                final Optional<String> peerIdentity = socketPeerIdentityProvider.getPeerIdentity(socket);
+                if (peerIdentity.isPresent()) {
+                    final String userDn = peerIdentity.get();
+                    commsSession.setUserDn(userDn);
+                } else {
+                    throw new IOException(String.format("Site-to-Site Peer [%s] Identity not found", socket.getRemoteSocketAddress()));
                 }
             } else {
 
@@ -488,7 +491,7 @@ public class EndpointConnectionPool implements PeerStatusProvider {
                     try {
                         connection.getSocketClientProtocol().shutdown(connection.getPeer());
                     } catch (final Exception e) {
-                        logger.debug("Failed to shut down {} using {} due to {}",
+                        logger.debug("Failed to shut down {} using {}",
                                 connection.getSocketClientProtocol(), connection.getPeer(), e);
                     }
 
@@ -526,15 +529,15 @@ public class EndpointConnectionPool implements PeerStatusProvider {
 
     @Override
     public String toString() {
-        return "EndpointConnectionPool[Cluster URL=" + siteInfoProvider.getClusterUrls() + "]";
+        return "EndpointConnectionPool[Cluster URL=" + siteInfoProvider.getClusterUrls() + " LocalAddress=" + localAddress + "]";
     }
 
-    private class IdEnrichedRemoteDestination implements RemoteDestination {
+    private static class IdEnrichedSiteToSiteDestination implements SiteToSiteDestination {
 
-        private final RemoteDestination original;
+        private final SiteToSiteDestination original;
         private final String identifier;
 
-        public IdEnrichedRemoteDestination(final RemoteDestination original, final String identifier) {
+        public IdEnrichedSiteToSiteDestination(final SiteToSiteDestination original, final String identifier) {
             this.original = original;
             this.identifier = identifier;
         }

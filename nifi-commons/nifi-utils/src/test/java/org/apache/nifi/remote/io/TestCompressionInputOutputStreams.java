@@ -16,18 +16,15 @@
  */
 package org.apache.nifi.remote.io;
 
-import static org.junit.Assert.assertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
 
-import org.apache.nifi.remote.io.CompressionInputStream;
-import org.apache.nifi.remote.io.CompressionOutputStream;
-
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 public class TestCompressionInputOutputStreams {
 
@@ -35,7 +32,7 @@ public class TestCompressionInputOutputStreams {
     public void testSimple() throws IOException {
         final ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        final byte[] data = "Hello, World!".getBytes("UTF-8");
+        final byte[] data = "Hello, World!".getBytes(StandardCharsets.UTF_8);
 
         final CompressionOutputStream cos = new CompressionOutputStream(baos);
         cos.write(data);
@@ -46,7 +43,7 @@ public class TestCompressionInputOutputStreams {
         final CompressionInputStream cis = new CompressionInputStream(new ByteArrayInputStream(compressedBytes));
         final byte[] decompressed = readFully(cis);
 
-        assertTrue(Arrays.equals(data, decompressed));
+        assertArrayEquals(data, decompressed);
     }
 
     @Test
@@ -57,7 +54,7 @@ public class TestCompressionInputOutputStreams {
         for (int i = 0; i < 100; i++) {
             sb.append(str);
         }
-        final byte[] data = sb.toString().getBytes("UTF-8");
+        final byte[] data = sb.toString().getBytes(StandardCharsets.UTF_8);
 
         final ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
@@ -70,13 +67,13 @@ public class TestCompressionInputOutputStreams {
         final CompressionInputStream cis = new CompressionInputStream(new ByteArrayInputStream(compressedBytes));
         final byte[] decompressed = readFully(cis);
 
-        assertTrue(Arrays.equals(data, decompressed));
+        assertArrayEquals(data, decompressed);
     }
 
     @Test
     public void testDataLargerThanBufferWhileFlushing() throws IOException {
         final String str = "The quick brown fox jumps over the lazy dog\r\n\n\n\r";
-        final byte[] data = str.getBytes("UTF-8");
+        final byte[] data = str.getBytes(StandardCharsets.UTF_8);
 
         final StringBuilder sb = new StringBuilder();
         final byte[] data1024;
@@ -90,19 +87,19 @@ public class TestCompressionInputOutputStreams {
             sb.append(str);
         }
         cos.close();
-        data1024 = sb.toString().getBytes("UTF-8");
+        data1024 = sb.toString().getBytes(StandardCharsets.UTF_8);
 
         final byte[] compressedBytes = baos.toByteArray();
         final CompressionInputStream cis = new CompressionInputStream(new ByteArrayInputStream(compressedBytes));
         final byte[] decompressed = readFully(cis);
 
-        assertTrue(Arrays.equals(data1024, decompressed));
+        assertArrayEquals(data1024, decompressed);
     }
 
     @Test
     public void testSendingMultipleFilesBackToBackOnSameStream() throws IOException {
         final String str = "The quick brown fox jumps over the lazy dog\r\n\n\n\r";
-        final byte[] data = str.getBytes("UTF-8");
+        final byte[] data = str.getBytes(StandardCharsets.UTF_8);
 
         final ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
@@ -125,18 +122,18 @@ public class TestCompressionInputOutputStreams {
         for (int i = 0; i < 512; i++) {
             sb.append(str);
         }
-        data512 = sb.toString().getBytes("UTF-8");
+        data512 = sb.toString().getBytes(StandardCharsets.UTF_8);
 
         final byte[] compressedBytes = baos.toByteArray();
         final ByteArrayInputStream bais = new ByteArrayInputStream(compressedBytes);
 
         final CompressionInputStream cis = new CompressionInputStream(bais);
         final byte[] decompressed = readFully(cis);
-        assertTrue(Arrays.equals(data512, decompressed));
+        assertArrayEquals(data512, decompressed);
 
         final CompressionInputStream cis2 = new CompressionInputStream(bais);
         final byte[] decompressed2 = readFully(cis2);
-        assertTrue(Arrays.equals(data512, decompressed2));
+        assertArrayEquals(data512, decompressed2);
     }
 
     private byte[] readFully(final InputStream in) throws IOException {

@@ -16,16 +16,17 @@
  */
 package org.apache.nifi.util;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Properties;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.Map;
+import java.util.Properties;
+import java.util.stream.Collectors;
+
+@Deprecated(since = "2.12.0", forRemoval = true)
 public class FlowFileUnpackagerV1 implements FlowFileUnpackager {
 
     private int flowFilesRead = 0;
@@ -34,7 +35,7 @@ public class FlowFileUnpackagerV1 implements FlowFileUnpackager {
     public Map<String, String> unpackageFlowFile(final InputStream in, final OutputStream out) throws IOException {
         flowFilesRead++;
         final TarArchiveInputStream tarIn = new TarArchiveInputStream(in);
-        final TarArchiveEntry attribEntry = tarIn.getNextTarEntry();
+        final TarArchiveEntry attribEntry = tarIn.getNextEntry();
         if (attribEntry == null) {
             return null;
         }
@@ -48,10 +49,10 @@ public class FlowFileUnpackagerV1 implements FlowFileUnpackager {
                     + FlowFilePackagerV1.FILENAME_ATTRIBUTES);
         }
 
-        final TarArchiveEntry contentEntry = tarIn.getNextTarEntry();
+        final TarArchiveEntry contentEntry = tarIn.getNextEntry();
 
         if (contentEntry != null && contentEntry.getName().equals(FlowFilePackagerV1.FILENAME_CONTENT)) {
-            final byte[] buffer = new byte[512 << 10];//512KB
+            final byte[] buffer = new byte[512 << 10]; //512KB
             int bytesRead = 0;
             while ((bytesRead = tarIn.read(buffer)) != -1) { //still more data to read
                 if (bytesRead > 0) {
@@ -69,34 +70,16 @@ public class FlowFileUnpackagerV1 implements FlowFileUnpackager {
     }
 
     protected Map<String, String> getAttributes(final TarArchiveInputStream stream) throws IOException {
-
         final Properties props = new Properties();
         props.loadFromXML(new NonCloseableInputStream(stream));
+        final Map<String, String> attributes = props.stringPropertyNames().stream()
+                .collect(Collectors.toMap(key -> key, props::getProperty));
 
-        final Map<String, String> result = new HashMap<>();
-        for (final Entry<Object, Object> entry : props.entrySet()) {
-            final Object keyObject = entry.getKey();
-            final Object valueObject = entry.getValue();
-            if (!(keyObject instanceof String)) {
-                throw new IOException("Flow file attributes object contains key of type "
-                        + keyObject.getClass().getCanonicalName()
-                        + " but expected java.lang.String");
-            } else if (!(keyObject instanceof String)) {
-                throw new IOException("Flow file attributes object contains value of type "
-                        + keyObject.getClass().getCanonicalName()
-                        + " but expected java.lang.String");
-            }
-
-            final String key = (String) keyObject;
-            final String value = (String) valueObject;
-            result.put(key, value);
-        }
-
-        return result;
+        return attributes;
     }
 
     @Override
-    public boolean hasMoreData() throws IOException {
+    public boolean hasMoreData() {
         return flowFilesRead == 0;
     }
 
@@ -143,12 +126,12 @@ public class FlowFileUnpackagerV1 implements FlowFileUnpackager {
         }
 
         @Override
-        public int read(byte b[], int off, int len) throws IOException {
+        public int read(byte[] b, int off, int len) throws IOException {
             return stream.read(b, off, len);
         }
 
         @Override
-        public int read(byte b[]) throws IOException {
+        public int read(byte[] b) throws IOException {
             return stream.read(b);
         }
     }

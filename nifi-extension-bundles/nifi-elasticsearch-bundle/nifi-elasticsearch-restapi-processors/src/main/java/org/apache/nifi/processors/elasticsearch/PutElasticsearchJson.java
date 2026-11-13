@@ -1,0 +1,1757 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.nifi.processors.elasticsearch;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.nifi.annotation.behavior.DynamicProperties;
+import org.apache.nifi.annotation.behavior.DynamicProperty;
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.SupportsBatching;
+import org.apache.nifi.annotation.behavior.SystemResource;
+import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
+import org.apache.nifi.annotation.behavior.WritesAttribute;
+import org.apache.nifi.annotation.behavior.WritesAttributes;
+import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.SeeAlso;
+import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.ValidationResult;
+import org.apache.nifi.elasticsearch.ElasticSearchClientService;
+import org.apache.nifi.elasticsearch.ElasticsearchException;
+import org.apache.nifi.elasticsearch.ElasticsearchRequestOptions;
+import org.apache.nifi.elasticsearch.IndexOperationRequest;
+import org.apache.nifi.elasticsearch.IndexOperationResponse;
+import org.apache.nifi.expression.ExpressionLanguageScope;
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.migration.PropertyConfiguration;
+import org.apache.nifi.migration.RelationshipConfiguration;
+import org.apache.nifi.processor.DataUnit;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.util.StringUtils;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+@InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
+@SupportsBatching
+@Tags({"ndjson", "json", "json array", "elasticsearch", "elasticsearch7", "elasticsearch8", "elasticsearch9", "put", "index"})
+@CapabilityDescription("An Elasticsearch put processor that uses the official Elastic REST client libraries to write JSON data. " +
+        "Supports three input formats selectable via the \"Input Content Format\" property: " +
+        "NDJSON (one JSON object per line), JSON Array (a top-level array of objects, streamed for memory efficiency), " +
+        "and Single JSON (the entire FlowFile is one document). " +
+        "FlowFiles are accumulated up to the configured Max Batch Size and flushed to Elasticsearch in _bulk API requests. " +
+        "Large files that exceed the batch size are automatically split into multiple _bulk requests. " +
+        "Records routed to the \"successful\" and \"errors\" relationships reflect the original FlowFile content, " +
+        "not the transformed document body sent to Elasticsearch (identifier/index/timestamp field extraction and " +
+        "null suppression are not reapplied), so the records remain suitable for replay.")
+@WritesAttributes({
+        @WritesAttribute(attribute = "elasticsearch.put.error",
+                description = "The error message if there is an issue parsing the FlowFile, sending the parsed document to Elasticsearch or parsing the Elasticsearch response"),
+        @WritesAttribute(attribute = "elasticsearch.bulk.error", description = "The _bulk response if there was an error during processing the document within Elasticsearch.")
+})
+@SeeAlso(PutElasticsearchRecord.class)
+@DynamicProperties({
+        @DynamicProperty(
+                name = "The name of the Bulk request header",
+                value = "The value of the Bulk request header",
+                expressionLanguageScope = ExpressionLanguageScope.FLOWFILE_ATTRIBUTES,
+                description = "Prefix: " + AbstractPutElasticsearch.BULK_HEADER_PREFIX +
+                        " - adds the specified property name/value as a Bulk request header in the Elasticsearch Bulk API body used for processing. " +
+                        "If the value is null or blank, the Bulk header will be omitted for the document operation. " +
+                        "These parameters will override any matching parameters in the _bulk request body."),
+        @DynamicProperty(
+                name = "The name of the HTTP request header",
+                value = "A Record Path expression to retrieve the HTTP request header value",
+                expressionLanguageScope = ExpressionLanguageScope.FLOWFILE_ATTRIBUTES,
+                description = "Prefix: " + ElasticsearchRestProcessor.DYNAMIC_PROPERTY_PREFIX_REQUEST_HEADER +
+                        " - adds the specified property name/value as a HTTP request header in the Elasticsearch request. " +
+                        "If the Record Path expression results in a null or blank value, the HTTP request header will be omitted. " +
+                        "If FlowFiles are batched, only the first FlowFile in the batch is used to evaluate property values."),
+        @DynamicProperty(
+                name = "The name of a URL query parameter to add",
+                value = "The value of the URL query parameter",
+                expressionLanguageScope = ExpressionLanguageScope.FLOWFILE_ATTRIBUTES,
+                description = "Adds the specified property name/value as a query parameter in the Elasticsearch URL used for processing. " +
+                        "These parameters will override any matching parameters in the _bulk request body. " +
+                        "If FlowFiles are batched, only the first FlowFile in the batch is used to evaluate property values.")
+})
+@SystemResourceConsideration(
+        resource = SystemResource.MEMORY,
+        description = "At most one batch's worth of data will be buffered in memory at a time. " +
+                "The maximum memory usage is bounded by the Max Batch Size property.")
+public class PutElasticsearchJson extends AbstractPutElasticsearch {
+
+    static final PropertyDescriptor SCRIPT = new PropertyDescriptor.Builder()
+            .name("Script")
+            .description("The script for the document update/upsert. Only applies to Update/Upsert operations. " +
+                    "Must be parsable as JSON Object. If left blank, the FlowFile content will be used for document update/upsert")
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor SCRIPTED_UPSERT = new PropertyDescriptor.Builder()
+            .name("Scripted Upsert")
+            .description("Whether to add the scripted_upsert flag to the Upsert operation. " +
+                    "If true, forces Elasticsearch to execute the Script whether or not the document exists, defaults to false. " +
+                    "If the upsert document will be empty, ensure null suppression is disabled so that an empty \"upsert\" doc " +
+                    "is included in the request — otherwise Elasticsearch will not create a new document for the script to " +
+                    "execute against, resulting in a \"not_found\" error. " +
+                    "For Single JSON mode, set the " + CLIENT_SERVICE.getDisplayName() + " controller service's " +
+                    ElasticSearchClientService.SUPPRESS_NULLS.getDisplayName() + " to " + ElasticSearchClientService.NEVER_SUPPRESS.getDisplayName() + ". " +
+                    "For NDJSON and JSON Array modes, set the Suppress Nulls property on this processor to Never Suppress.")
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
+            .defaultValue("false")
+            .build();
+
+    static final PropertyDescriptor DYNAMIC_TEMPLATES = new PropertyDescriptor.Builder()
+            .name("Dynamic Templates")
+            .description("The dynamic_templates for the document. Must be parsable as a JSON Object. Requires Elasticsearch 7+")
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor CHARSET = new PropertyDescriptor.Builder()
+        .name("Character Set")
+        .description("Specifies the character set of the document data.")
+        .addValidator(StandardValidators.CHARACTER_SET_VALIDATOR)
+        .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+        .defaultValue(StandardCharsets.UTF_8.name())
+        .required(true)
+        .build();
+
+    static final PropertyDescriptor MAX_BATCH_SIZE = new PropertyDescriptor.Builder()
+            .name("Max Batch Size")
+            .description("""
+                    The maximum amount of data to send in a single Elasticsearch _bulk API request. \
+                    For NDJSON and JSON Array modes, FlowFiles are accumulated until this threshold is reached, then flushed. \
+                    For Single JSON mode, this acts as a size-based safety limit: if the accumulated FlowFiles exceed this size \
+                    before Max FlowFiles Per Batch is reached, the request is flushed early. \
+                    Elasticsearch recommends 5-15 MB per bulk request for optimal performance. \
+                    To disable the size-based limit, check "Set Empty String".\
+                    """)
+            .defaultValue("10 MB")
+            .addValidator((subject, input, context) -> StringUtils.isBlank(input)
+                    ? new ValidationResult.Builder().subject(subject).valid(true).build()
+                    : StandardValidators.DATA_SIZE_VALIDATOR.validate(subject, input, context))
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .required(false)
+            .build();
+
+    static final PropertyDescriptor INPUT_FORMAT = new PropertyDescriptor.Builder()
+            .name("Input Content Format")
+            .description("""
+                    The format of the JSON content in each FlowFile. \
+                    NDJSON: one JSON object per line (newline-delimited). \
+                    JSON Array: a top-level JSON array of objects, streamed element-by-element for memory efficiency. \
+                    Single JSON: the entire FlowFile is a single JSON document.\
+                    """)
+            .allowableValues(InputFormat.class)
+            .defaultValue(InputFormat.SINGLE_JSON.getValue())
+            .required(true)
+            .build();
+
+    static final PropertyDescriptor BATCH_SIZE = new PropertyDescriptor.Builder()
+            .fromPropertyDescriptor(AbstractPutElasticsearch.BATCH_SIZE)
+            .name("Max FlowFiles Per Batch")
+            .displayName("Max FlowFiles Per Batch")
+            .description("""
+                    The maximum number of FlowFiles to include in a single Elasticsearch _bulk API request. \
+                    If the accumulated FlowFiles exceed Max Batch Size before this count is reached, the request will be flushed early.\
+                    """)
+            .dependsOn(INPUT_FORMAT, InputFormat.SINGLE_JSON)
+            .build();
+
+    static final PropertyDescriptor SUPPRESS_NULLS = new PropertyDescriptor.Builder()
+            .name("Suppress Nulls")
+            .description("""
+                    When set to Always Suppress, null and empty values are removed from documents before they are sent to Elasticsearch.
+                    This setting applies to NDJSON and JSON Array formats for Index and Create operations only. \
+                    For Single JSON, configure null suppression on the controller service instead.
+                    Performance note: for JSON Array the impact is negligible since documents are already being parsed. \
+                    For NDJSON, each line must be parsed and re-serialized when suppression is enabled, \
+                    which adds overhead compared to the default behaviour of passing lines through as raw bytes.\
+                    """)
+            .allowableValues(ElasticSearchClientService.NEVER_SUPPRESS, ElasticSearchClientService.ALWAYS_SUPPRESS)
+            .defaultValue(ElasticSearchClientService.NEVER_SUPPRESS)
+            .required(true)
+            .dependsOn(INPUT_FORMAT, InputFormat.NDJSON, InputFormat.JSON_ARRAY)
+            .build();
+
+    static final PropertyDescriptor ID_ATTRIBUTE = new PropertyDescriptor.Builder()
+            .name("Identifier Attribute")
+            .description("""
+                    The name of the FlowFile attribute containing the identifier for the document. \
+                    If the Index Operation is "index", this property may be left empty or evaluate to an empty value, \
+                    in which case the document's identifier will be auto-generated by Elasticsearch. \
+                    For all other Index Operations, the attribute must evaluate to a non-empty value.\
+                    """)
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.NONE)
+            .addValidator(StandardValidators.ATTRIBUTE_KEY_VALIDATOR)
+            .dependsOn(INPUT_FORMAT, InputFormat.SINGLE_JSON)
+            .build();
+
+    static final PropertyDescriptor FIELD_PATH_MODE = new PropertyDescriptor.Builder()
+            .name("Field Path Mode")
+            .description("""
+                    How the Identifier Field, Index Field, and Timestamp Field property values are interpreted \
+                    when locating a field within each document. In "Literal Field Name" mode (the default) each \
+                    value is the exact name of a top-level field. In "Nested Field Path" mode each value is a \
+                    "/"-delimited path into nested objects; see the processor's Additional Details for the full \
+                    path syntax, including how to reference a field name that contains a literal "/".\
+                    """)
+            .required(true)
+            .allowableValues(FieldReferenceMode.class)
+            .defaultValue(FieldReferenceMode.LITERAL.getValue())
+            .build();
+
+    static final PropertyDescriptor IDENTIFIER_FIELD = new PropertyDescriptor.Builder()
+            .name("Identifier Field")
+            .description("""
+                    The name of the field within each document to use as the Elasticsearch document ID, \
+                    interpreted as a literal field name or a nested "/"-delimited path per the Field Path Mode property. \
+                    If the field is not present in a document or this property is left blank, no document ID is set \
+                    and Elasticsearch will auto-generate one.\
+                    """)
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .dependsOn(INPUT_FORMAT, InputFormat.NDJSON, InputFormat.JSON_ARRAY)
+            .build();
+
+    static final PropertyDescriptor RETAIN_IDENTIFIER_FIELD = new PropertyDescriptor.Builder()
+            .name("Retain Identifier Field")
+            .description("""
+                    Whether to keep the Identifier Field in the document body after extracting it \
+                    for use as the Elasticsearch document ID. \
+                    When true (default), the field is left in the document; set to false to remove it before indexing. \
+                    For a nested ("/"-delimited) path, any parent object left empty by the removal is also pruned.\
+                    """)
+            .required(true)
+            .allowableValues("true", "false")
+            .defaultValue("true")
+            .dependsOn(IDENTIFIER_FIELD)
+            .build();
+
+    static final PropertyDescriptor INDEX_FIELD = new PropertyDescriptor.Builder()
+            .name("Index Field")
+            .description("""
+                    The name of the field within each document to use as the Elasticsearch index name, \
+                    interpreted as a literal field name or a nested "/"-delimited path per the Field Path Mode property. \
+                    If the field is not present in a document or this property is left blank, \
+                    the configured Index property value is used as the fallback.\
+                    """)
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor RETAIN_INDEX_FIELD = new PropertyDescriptor.Builder()
+            .name("Retain Index Field")
+            .description("""
+                    Whether to keep the Index Field in the document body after extracting it \
+                    for use as the Elasticsearch index name. \
+                    When true (default), the field is left in the document; set to false to remove it before indexing. \
+                    For a nested ("/"-delimited) path, any parent object left empty by the removal is also pruned.\
+                    """)
+            .required(true)
+            .allowableValues("true", "false")
+            .defaultValue("true")
+            .dependsOn(INDEX_FIELD)
+            .build();
+
+    static final PropertyDescriptor TIMESTAMP_FIELD = new PropertyDescriptor.Builder()
+            .name("Timestamp Field")
+            .description("""
+                    The name of a field within each document whose value will be written to \
+                    Elasticsearch as the @timestamp field, interpreted as a literal field name or a nested \
+                    "/"-delimited path per the Field Path Mode property. \
+                    If the field is absent or this property is left blank, no @timestamp is set.\
+                    """)
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor RETAIN_TIMESTAMP_FIELD = new PropertyDescriptor.Builder()
+            .name("Retain Timestamp Field")
+            .description("""
+                    Whether to keep the Timestamp Field in the document body after copying its \
+                    value to @timestamp. \
+                    When true (default), the field is left in the document; set to false to remove it before indexing. \
+                    For a nested ("/"-delimited) path, any parent object left empty by the removal is also pruned.\
+                    """)
+            .required(true)
+            .allowableValues("true", "false")
+            .defaultValue("true")
+            .dependsOn(TIMESTAMP_FIELD)
+            .build();
+
+    static final PropertyDescriptor PIPELINE = new PropertyDescriptor.Builder()
+            .name("Pipeline")
+            .description("""
+                    The name of the Elasticsearch ingest pipeline to run the documents through. \
+                    Applies to Index and Create operations only. When left blank, no pipeline is set unless \
+                    provided per-document by the Pipeline Field property.\
+                    """)
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor PIPELINE_FIELD = new PropertyDescriptor.Builder()
+            .name("Pipeline Field")
+            .description("""
+                    The name of the field within each document to use as the Elasticsearch ingest pipeline, \
+                    interpreted as a literal field name or a nested "/"-delimited path per the Field Path Mode property. \
+                    Applies to Index and Create operations only. If the field is not present in a document or this \
+                    property is left blank, the configured Pipeline property value is used as the fallback.\
+                    """)
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor RETAIN_PIPELINE_FIELD = new PropertyDescriptor.Builder()
+            .name("Retain Pipeline Field")
+            .description("""
+                    Whether to keep the Pipeline Field in the document body after extracting it \
+                    for use as the Elasticsearch ingest pipeline. \
+                    When true (default), the field is left in the document; set to false to remove it before indexing. \
+                    For a nested ("/"-delimited) path, any parent object left empty by the removal is also pruned.\
+                    """)
+            .required(true)
+            .allowableValues("true", "false")
+            .defaultValue("true")
+            .dependsOn(PIPELINE_FIELD)
+            .build();
+
+    static final Relationship REL_BULK_REQUEST = new Relationship.Builder()
+            .name("bulk_request")
+            .description("When \"Output Bulk Request\" is enabled, the raw Elasticsearch _bulk API request body is written " +
+                    "to this relationship as a FlowFile for inspection or debugging.")
+            .build();
+
+    static final PropertyDescriptor OUTPUT_BULK_REQUEST = new PropertyDescriptor.Builder()
+            .name("Output Bulk Request")
+            .description("If enabled, each Elasticsearch _bulk request body is written as a FlowFile to the \"" +
+                    REL_BULK_REQUEST.getName() + "\" relationship. Useful for debugging. " +
+                    "Each FlowFile contains the full NDJSON body exactly as sent to Elasticsearch.")
+            .allowableValues("true", "false")
+            .defaultValue("false")
+            .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
+            .build();
+
+    static final List<PropertyDescriptor> DESCRIPTORS = List.of(
+            INDEX_OP,
+            INDEX,
+            PIPELINE,
+            TYPE,
+            SCRIPT,
+            SCRIPTED_UPSERT,
+            DYNAMIC_TEMPLATES,
+            INPUT_FORMAT,
+            BATCH_SIZE,
+            MAX_BATCH_SIZE,
+            SUPPRESS_NULLS,
+            ID_ATTRIBUTE,
+            FIELD_PATH_MODE,
+            IDENTIFIER_FIELD,
+            RETAIN_IDENTIFIER_FIELD,
+            INDEX_FIELD,
+            RETAIN_INDEX_FIELD,
+            TIMESTAMP_FIELD,
+            RETAIN_TIMESTAMP_FIELD,
+            PIPELINE_FIELD,
+            RETAIN_PIPELINE_FIELD,
+            CHARSET,
+            MAX_JSON_FIELD_STRING_LENGTH,
+            CLIENT_SERVICE,
+            LOG_ERROR_RESPONSES,
+            OUTPUT_ERROR_RESPONSES,
+            OUTPUT_BULK_REQUEST,
+            NOT_FOUND_IS_SUCCESSFUL
+    );
+
+    static final Set<Relationship> BASE_RELATIONSHIPS =
+            Set.of(REL_ORIGINAL, REL_FAILURE, REL_RETRY, REL_SUCCESSFUL, REL_ERRORS);
+
+    private static final int READER_BUFFER_SIZE = 65536;
+
+    private final AtomicBoolean bulkRequestOutputEnabled = new AtomicBoolean(false);
+    private boolean outputBulkRequest;
+    private ObjectReader mapReader;
+    private ObjectWriter suppressingWriter;
+
+    @Override
+    Set<Relationship> getBaseRelationships() {
+        return BASE_RELATIONSHIPS;
+    }
+
+    @Override
+    public Set<Relationship> getRelationships() {
+        final Set<Relationship> rels = new HashSet<>(super.getRelationships());
+        if (bulkRequestOutputEnabled.get()) {
+            rels.add(REL_BULK_REQUEST);
+        }
+        return rels;
+    }
+
+    @Override
+    public final List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return DESCRIPTORS;
+    }
+
+    @Override
+    public void onPropertyModified(final PropertyDescriptor descriptor, final String oldValue, final String newValue) {
+        super.onPropertyModified(descriptor, oldValue, newValue);
+        if (OUTPUT_BULK_REQUEST.equals(descriptor)) {
+            bulkRequestOutputEnabled.set(Boolean.parseBoolean(newValue));
+        }
+    }
+
+    @Override
+    public void migrateProperties(final PropertyConfiguration config) {
+        super.migrateProperties(config);
+
+        // Migrate legacy property names from PutElasticsearchJson
+        config.removeProperty("put-es-json-error-documents");
+        config.renameProperty("put-es-json-id-attr", ID_ATTRIBUTE.getName());
+        config.renameProperty("put-es-json-script", SCRIPT.getName());
+        config.renameProperty("put-es-json-scripted-upsert", SCRIPTED_UPSERT.getName());
+        config.renameProperty("put-es-json-dynamic_templates", DYNAMIC_TEMPLATES.getName());
+        config.renameProperty("put-es-json-charset", CHARSET.getName());
+        config.renameProperty("put-es-json-not_found-is-error", NOT_FOUND_IS_SUCCESSFUL.getName());
+
+        // If INPUT_FORMAT was not explicitly set, this flow was migrated from PutElasticsearchJson — default to Single JSON.
+        // Set this before migrating BATCH_SIZE so its dependsOn condition is satisfied when NiFi processes the property.
+        if (!config.hasProperty(INPUT_FORMAT.getName())) {
+            config.setProperty(INPUT_FORMAT.getName(), InputFormat.SINGLE_JSON.getValue());
+        }
+
+        // Migrate "Batch Size" (from PutElasticsearchJson) to the new name used in this processor.
+        // INPUT_FORMAT is set first above so its dependsOn condition is satisfied when NiFi processes BATCH_SIZE.
+        config.renameProperty(AbstractPutElasticsearch.BATCH_SIZE.getName(), BATCH_SIZE.getName());
+
+        // MAX_BATCH_SIZE is a new property — existing configurations had no byte-based limit.
+        // Preserve that behavior on upgrade by leaving the property blank (unbounded).
+        // The custom validator on MAX_BATCH_SIZE accepts blank values, so this will not be
+        // overwritten by the default of 10 MB. New processor instances get the 10 MB default.
+        if (!config.hasProperty(MAX_BATCH_SIZE.getName())) {
+            config.setProperty(MAX_BATCH_SIZE.getName(), "");
+        }
+    }
+
+    @Override
+    public void migrateRelationships(final RelationshipConfiguration config) {
+        super.migrateRelationships(config);
+
+        // PutElasticsearchJson used "success" before it was renamed to "original"
+        config.renameRelationship("success", REL_ORIGINAL.getName());
+    }
+
+    @Override
+    @OnScheduled
+    public void onScheduled(final ProcessContext context) {
+        super.onScheduled(context);
+        this.notFoundIsSuccessful = context.getProperty(NOT_FOUND_IS_SUCCESSFUL).asBoolean();
+        this.outputBulkRequest = context.getProperty(OUTPUT_BULK_REQUEST).asBoolean();
+        this.bulkRequestOutputEnabled.set(this.outputBulkRequest);
+        this.mapReader = mapper.readerFor(new TypeReference<Map<String, Object>>() { });
+        final InputFormat inputFormat = InputFormat.fromValue(context.getProperty(INPUT_FORMAT).getValue());
+        if (inputFormat != InputFormat.SINGLE_JSON
+                && ElasticSearchClientService.ALWAYS_SUPPRESS.getValue().equals(context.getProperty(SUPPRESS_NULLS).getValue())) {
+            final ObjectMapper suppressingMapper = mapper.copy()
+                    .setDefaultPropertyInclusion(JsonInclude.Include.NON_EMPTY);
+            this.suppressingWriter = suppressingMapper.writer();
+        } else {
+            this.suppressingWriter = null;
+        }
+    }
+
+    @Override
+    public void onTrigger(final ProcessContext context, final ProcessSession session) {
+        FlowFile flowFile = session.get();
+        if (flowFile == null) {
+            return;
+        }
+        final String maxBatchSizeStr = context.getProperty(MAX_BATCH_SIZE).evaluateAttributeExpressions().getValue();
+        final long maxBatchBytes = StringUtils.isNotBlank(maxBatchSizeStr)
+                ? context.getProperty(MAX_BATCH_SIZE).evaluateAttributeExpressions().asDataSize(DataUnit.B).longValue()
+                : Long.MAX_VALUE;
+        final InputFormat inputFormat = InputFormat.fromValue(context.getProperty(INPUT_FORMAT).getValue());
+        final String idAttribute = inputFormat == InputFormat.SINGLE_JSON
+                ? context.getProperty(ID_ATTRIBUTE).getValue()
+                : null;
+        // In Literal Field Name mode the configured values are escaped into single-segment paths so the
+        // shared path helpers resolve them to the exact (verbatim) field name; in Nested Field Path mode
+        // they are already "/"-delimited paths and used as-is.
+        final boolean nestedFieldPaths = FieldReferenceMode.NESTED_PATH.getValue().equals(context.getProperty(FIELD_PATH_MODE).getValue());
+        final String documentIdField = inputFormat != InputFormat.SINGLE_JSON
+                ? fieldPath(context.getProperty(IDENTIFIER_FIELD).evaluateAttributeExpressions().getValue(), nestedFieldPaths)
+                : null;
+        final String documentIndexField = fieldPath(context.getProperty(INDEX_FIELD).evaluateAttributeExpressions().getValue(), nestedFieldPaths);
+        final String documentTimestampField = fieldPath(context.getProperty(TIMESTAMP_FIELD).evaluateAttributeExpressions().getValue(), nestedFieldPaths);
+        final String documentPipelineField = fieldPath(context.getProperty(PIPELINE_FIELD).evaluateAttributeExpressions().getValue(), nestedFieldPaths);
+        // The id/index field paths are loop-invariant, so classify them as nested-vs-flat and decode
+        // the flat names once here rather than per record in the NDJSON raw-bytes fast path below.
+        final boolean nestedExtractionField = isNestedPath(documentIdField) || isNestedPath(documentIndexField);
+        final String documentIdFieldName = documentIdField == null ? null : decodeSegment(documentIdField);
+        final String documentIndexFieldName = documentIndexField == null ? null : decodeSegment(documentIndexField);
+        // The Retain toggles depend on their source field being set, so only read them when it is —
+        // reading a property whose dependency is unsatisfied is invalid. When the source field is
+        // blank no extraction or stripping occurs, so the retain value is irrelevant anyway.
+        final boolean retainIdentifierField = inputFormat != InputFormat.SINGLE_JSON
+                && StringUtils.isNotBlank(documentIdField)
+                && context.getProperty(RETAIN_IDENTIFIER_FIELD).asBoolean();
+        final boolean retainIndexField = StringUtils.isBlank(documentIndexField)
+                || context.getProperty(RETAIN_INDEX_FIELD).asBoolean();
+        final boolean retainTimestampField = StringUtils.isBlank(documentTimestampField)
+                || context.getProperty(RETAIN_TIMESTAMP_FIELD).asBoolean();
+        final boolean retainPipelineField = StringUtils.isBlank(documentPipelineField)
+                || context.getProperty(RETAIN_PIPELINE_FIELD).asBoolean();
+        final int batchSize = InputFormat.SINGLE_JSON == inputFormat
+                ? context.getProperty(BATCH_SIZE).evaluateAttributeExpressions().asInteger()
+                : Integer.MAX_VALUE;
+        int flowFilesProcessed = 0;
+
+        // Tracks all FlowFiles that were successfully parsed and submitted (even partially)
+        final Set<FlowFile> allProcessedFlowFiles = new LinkedHashSet<>();
+        // Tracks FlowFiles that had at least one Elasticsearch document error
+        final Set<FlowFile> errorFlowFiles = new LinkedHashSet<>();
+        // Deferred bulk-error attributes: applied after each FlowFile's InputStream is closed
+        final Map<FlowFile, List<Map<String, Object>>> pendingBulkErrors = new HashMap<>();
+        // Failed local record indices per FlowFile — O(error count) memory; used at finalization
+        // to re-read FlowFiles once and reconstruct error/success content without buffering all bytes
+        final Map<FlowFile, Set<Integer>> pendingErrorRecordIndices = new LinkedHashMap<>();
+
+        // Current chunk accumulation — operationFlowFiles and operationRecordIndices are parallel to operations (same index)
+        final List<FlowFile> operationFlowFiles = new ArrayList<>();
+        final List<IndexOperationRequest> operations = new ArrayList<>();
+        final List<Integer> operationRecordIndices = new ArrayList<>();
+        long totalBytesAccumulated = 0;
+        long chunkBytes = 0;
+
+        while (flowFile != null) {
+            final String indexOp = context.getProperty(INDEX_OP).evaluateAttributeExpressions(flowFile).getValue();
+            final String index = context.getProperty(INDEX).evaluateAttributeExpressions(flowFile).getValue();
+            final String pipeline = context.getProperty(PIPELINE).evaluateAttributeExpressions(flowFile).getValue();
+            final String type = context.getProperty(TYPE).evaluateAttributeExpressions(flowFile).getValue();
+            final String charset = context.getProperty(CHARSET).evaluateAttributeExpressions(flowFile).getValue();
+            final String flowFileIdAttribute = StringUtils.isNotBlank(idAttribute) ? flowFile.getAttribute(idAttribute) : null;
+
+            final Map<String, Object> scriptMap = getMapFromAttribute(SCRIPT, context, flowFile);
+            final boolean scriptedUpsert = context.getProperty(SCRIPTED_UPSERT).evaluateAttributeExpressions(flowFile).asBoolean();
+            final Map<String, Object> dynamicTemplatesMap = getMapFromAttribute(DYNAMIC_TEMPLATES, context, flowFile);
+            final Map<String, String> dynamicProperties = getRequestParametersFromDynamicProperties(context, flowFile);
+            final Map<String, String> bulkHeaderFields = getBulkHeaderParameters(dynamicProperties);
+
+            boolean parseError = false;
+            try {
+                final IndexOperationRequest.Operation o = IndexOperationRequest.Operation.forValue(indexOp);
+                if (InputFormat.NDJSON == inputFormat) {
+                    // NDJSON: each non-blank line is one JSON document.
+                    // Index/Create operations pass raw UTF-8 bytes directly to avoid Map allocation.
+                    // Update/Delete/Upsert parse into a Map so the bulk serializer can wrap the payload.
+                    int localRecordIndex = 0;
+                    try (final BufferedReader reader = new BufferedReader(
+                            new InputStreamReader(session.read(flowFile), charset), READER_BUFFER_SIZE)) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            final String trimmedLine = line.trim();
+                            if (trimmedLine.isEmpty()) {
+                                continue;
+                            }
+                            final IndexOperationRequest opRequest;
+                            final long docBytes;
+                            if (o == IndexOperationRequest.Operation.Index || o == IndexOperationRequest.Operation.Create) {
+                                final byte[] rawJsonBytes;
+                                final String id;
+                                final String docIndex;
+                                final String docPipeline;
+                                final boolean stripId = !retainIdentifierField && StringUtils.isNotBlank(documentIdField);
+                                final boolean stripIdx = !retainIndexField && StringUtils.isNotBlank(documentIndexField);
+                                final boolean stripPipeline = !retainPipelineField && StringUtils.isNotBlank(documentPipelineField);
+                                final boolean needsTimestamp = StringUtils.isNotBlank(documentTimestampField);
+                                final boolean needsPipelineFromField = StringUtils.isNotBlank(documentPipelineField);
+                                // The raw streaming scan only matches flat field names; a nested (/-delimited) id or
+                                // index path, or a pipeline read from the payload, requires the parsed Map.
+                                if (suppressingWriter != null || stripId || stripIdx || needsTimestamp || nestedExtractionField || needsPipelineFromField) {
+                                    // Map is needed anyway — extract the fields from the Map directly.
+                                    final Map<String, Object> contentMap = mapReader.readValue(trimmedLine);
+                                    id = resolveId(contentMap, documentIdField, flowFileIdAttribute);
+                                    docIndex = resolveFieldValue(contentMap, documentIndexField, index);
+                                    docPipeline = resolveFieldValue(contentMap, documentPipelineField, pipeline);
+                                    if (stripId) {
+                                        removeAtPath(contentMap, documentIdField);
+                                    }
+                                    if (stripIdx) {
+                                        removeAtPath(contentMap, documentIndexField);
+                                    }
+                                    if (stripPipeline) {
+                                        removeAtPath(contentMap, documentPipelineField);
+                                    }
+                                    applyTimestamp(contentMap, documentTimestampField, retainTimestampField);
+                                    rawJsonBytes = suppressingWriter != null
+                                            ? suppressingWriter.writeValueAsBytes(contentMap)
+                                            : mapper.writeValueAsBytes(contentMap);
+                                } else {
+                                    // Raw-bytes path: single streaming scan finds both fields at once.
+                                    // The field names are pre-decoded and known to be flat (non-nested) here.
+                                    final String[] extracted = extractIdAndIndex(trimmedLine, documentIdFieldName, flowFileIdAttribute, documentIndexFieldName, index);
+                                    id = extracted[0];
+                                    docIndex = extracted[1];
+                                    docPipeline = pipeline;
+                                    rawJsonBytes = trimmedLine.getBytes(StandardCharsets.UTF_8);
+                                }
+                                opRequest = IndexOperationRequest.builder()
+                                        .index(docIndex)
+                                        .type(type)
+                                        .id(id)
+                                        .rawJsonBytes(rawJsonBytes)
+                                        .operation(o)
+                                        .script(scriptMap)
+                                        .scriptedUpsert(scriptedUpsert)
+                                        .dynamicTemplates(dynamicTemplatesMap)
+                                        .headerFields(withPipeline(bulkHeaderFields, docPipeline))
+                                        .build();
+                                docBytes = rawJsonBytes.length;
+                            } else {
+                                final Map<String, Object> contentMap = mapReader.readValue(trimmedLine);
+                                final String id = resolveId(contentMap, documentIdField, flowFileIdAttribute);
+                                final String docIndex = resolveFieldValue(contentMap, documentIndexField, index);
+                                if (!retainIdentifierField && StringUtils.isNotBlank(documentIdField)) {
+                                    removeAtPath(contentMap, documentIdField);
+                                }
+                                if (!retainIndexField && StringUtils.isNotBlank(documentIndexField)) {
+                                    removeAtPath(contentMap, documentIndexField);
+                                }
+                                // The pipeline is not applied to this operation, but the field is still stripped when
+                                // requested so the routing metadata is not indexed with the document.
+                                if (!retainPipelineField && StringUtils.isNotBlank(documentPipelineField)) {
+                                    removeAtPath(contentMap, documentPipelineField);
+                                }
+                                applyTimestamp(contentMap, documentTimestampField, retainTimestampField);
+                                opRequest = IndexOperationRequest.builder()
+                                        .index(docIndex)
+                                        .type(type)
+                                        .id(id)
+                                        .fields(contentMap)
+                                        .operation(o)
+                                        .script(scriptMap)
+                                        .scriptedUpsert(scriptedUpsert)
+                                        .dynamicTemplates(dynamicTemplatesMap)
+                                        .headerFields(bulkHeaderFields)
+                                        .build();
+                                docBytes = trimmedLine.length();
+                            }
+                            operations.add(opRequest);
+                            operationFlowFiles.add(flowFile);
+                            operationRecordIndices.add(localRecordIndex++);
+                            chunkBytes += docBytes;
+                            totalBytesAccumulated += docBytes;
+                            if (chunkBytes >= maxBatchBytes) {
+                                flushChunk(operations, operationFlowFiles, operationRecordIndices, errorFlowFiles, flowFile, pendingBulkErrors, pendingErrorRecordIndices, context, session);
+                                operations.clear();
+                                operationFlowFiles.clear();
+                                operationRecordIndices.clear();
+                                chunkBytes = 0;
+                            }
+                        }
+                    }
+                } else if (InputFormat.JSON_ARRAY == inputFormat) {
+                    // JSON Array: the FlowFile may contain one or more top-level JSON arrays.
+                    // Arrays are read sequentially; elements within each array are streamed one at a
+                    // time via JsonParser to avoid loading the entire content into memory.
+                    // Each element is re-serialized to compact bytes for Index/Create,
+                    // or parsed into a Map for Update/Delete/Upsert.
+                    int localRecordIndex = 0;
+                    try (final InputStreamReader isr = new InputStreamReader(session.read(flowFile), charset);
+                         final JsonParser parser = mapper.getFactory().createParser(isr)) {
+                        JsonToken outerToken;
+                        while ((outerToken = parser.nextToken()) != null) {
+                            if (outerToken != JsonToken.START_ARRAY) {
+                                throw new IOException("Expected a JSON array but found: " + outerToken);
+                            }
+                            JsonToken token;
+                            while ((token = parser.nextToken()) != JsonToken.END_ARRAY) {
+                                if (token == null) {
+                                    throw new IOException("Malformed JSON Array: reached end of stream before the closing ']'. " +
+                                            "Verify the FlowFile content is a complete, valid JSON array.");
+                                }
+                                final long startOffset = parser.currentTokenLocation().getCharOffset();
+                                final IndexOperationRequest opRequest;
+                                if (o == IndexOperationRequest.Operation.Index || o == IndexOperationRequest.Operation.Create) {
+                                    final long docBytes;
+                                    final byte[] rawJsonBytes;
+                                    final String id;
+                                    final String docIndex;
+                                    final String docPipeline;
+                                    if (suppressingWriter != null) {
+                                        // Parse directly to Map so NON_NULL/NON_EMPTY inclusion filters apply during
+                                        // serialization. JsonNode tree serialization bypasses JsonInclude filters,
+                                        // and convertValue(node, Map) adds an extra serialization cycle.
+                                        final Map<String, Object> contentMap = mapReader.readValue(parser);
+                                        docBytes = Math.max(1, parser.currentLocation().getCharOffset() - startOffset);
+                                        id = resolveId(contentMap, documentIdField, flowFileIdAttribute);
+                                        docIndex = resolveFieldValue(contentMap, documentIndexField, index);
+                                        docPipeline = resolveFieldValue(contentMap, documentPipelineField, pipeline);
+                                        if (!retainIdentifierField && StringUtils.isNotBlank(documentIdField)) {
+                                            removeAtPath(contentMap, documentIdField);
+                                        }
+                                        if (!retainIndexField && StringUtils.isNotBlank(documentIndexField)) {
+                                            removeAtPath(contentMap, documentIndexField);
+                                        }
+                                        if (!retainPipelineField && StringUtils.isNotBlank(documentPipelineField)) {
+                                            removeAtPath(contentMap, documentPipelineField);
+                                        }
+                                        applyTimestamp(contentMap, documentTimestampField, retainTimestampField);
+                                        rawJsonBytes = suppressingWriter.writeValueAsBytes(contentMap);
+                                    } else {
+                                        final JsonNode node = mapper.readTree(parser);
+                                        docBytes = Math.max(1, parser.currentLocation().getCharOffset() - startOffset);
+                                        id = extractId(node, documentIdField, flowFileIdAttribute);
+                                        docIndex = extractFieldValue(node, documentIndexField, index);
+                                        docPipeline = extractFieldValue(node, documentPipelineField, pipeline);
+                                        // Field stripping and @timestamp injection only apply to JSON objects.
+                                        // Non-object elements (scalars, arrays, null) are passed through unchanged so
+                                        // Elasticsearch can reject them per-document rather than failing the whole FlowFile.
+                                        if (node.isObject()) {
+                                            final ObjectNode objectNode = (ObjectNode) node;
+                                            if (!retainIdentifierField && StringUtils.isNotBlank(documentIdField)) {
+                                                removeAtPath(objectNode, documentIdField);
+                                            }
+                                            if (!retainIndexField && StringUtils.isNotBlank(documentIndexField)) {
+                                                removeAtPath(objectNode, documentIndexField);
+                                            }
+                                            if (!retainPipelineField && StringUtils.isNotBlank(documentPipelineField)) {
+                                                removeAtPath(objectNode, documentPipelineField);
+                                            }
+                                            applyTimestamp(objectNode, documentTimestampField, retainTimestampField);
+                                        }
+                                        rawJsonBytes = mapper.writeValueAsBytes(node);
+                                    }
+                                    opRequest = IndexOperationRequest.builder()
+                                        .index(docIndex)
+                                        .type(type)
+                                        .id(id)
+                                        .rawJsonBytes(rawJsonBytes)
+                                        .operation(o)
+                                        .script(scriptMap)
+                                        .scriptedUpsert(scriptedUpsert)
+                                        .dynamicTemplates(dynamicTemplatesMap)
+                                        .headerFields(withPipeline(bulkHeaderFields, docPipeline))
+                                        .build();
+                                    chunkBytes += docBytes;
+                                    totalBytesAccumulated += docBytes;
+                                } else {
+                                    final Map<String, Object> contentMap = mapReader.readValue(parser);
+                                    final long docBytes = Math.max(1, parser.currentLocation().getCharOffset() - startOffset);
+                                    final String id = resolveId(contentMap, documentIdField, flowFileIdAttribute);
+                                    final String docIndex = resolveFieldValue(contentMap, documentIndexField, index);
+                                    if (!retainIdentifierField && StringUtils.isNotBlank(documentIdField)) {
+                                        removeAtPath(contentMap, documentIdField);
+                                    }
+                                    if (!retainIndexField && StringUtils.isNotBlank(documentIndexField)) {
+                                        removeAtPath(contentMap, documentIndexField);
+                                    }
+                                    // The pipeline is not applied to this operation, but the field is still stripped
+                                    // when requested so the routing metadata is not indexed with the document.
+                                    if (!retainPipelineField && StringUtils.isNotBlank(documentPipelineField)) {
+                                        removeAtPath(contentMap, documentPipelineField);
+                                    }
+                                    applyTimestamp(contentMap, documentTimestampField, retainTimestampField);
+                                    opRequest = IndexOperationRequest.builder()
+                                        .index(docIndex)
+                                        .type(type)
+                                        .id(id)
+                                        .fields(contentMap)
+                                        .operation(o)
+                                        .script(scriptMap)
+                                        .scriptedUpsert(scriptedUpsert)
+                                        .dynamicTemplates(dynamicTemplatesMap)
+                                        .headerFields(bulkHeaderFields)
+                                        .build();
+                                    chunkBytes += docBytes;
+                                    totalBytesAccumulated += docBytes;
+                                }
+                                operations.add(opRequest);
+                                operationFlowFiles.add(flowFile);
+                                operationRecordIndices.add(localRecordIndex++);
+                                if (chunkBytes >= maxBatchBytes) {
+                                    flushChunk(operations, operationFlowFiles, operationRecordIndices, errorFlowFiles, flowFile, pendingBulkErrors, pendingErrorRecordIndices, context, session);
+                                    operations.clear();
+                                    operationFlowFiles.clear();
+                                    operationRecordIndices.clear();
+                                    chunkBytes = 0;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Single JSON: the entire FlowFile is one document parsed into a Map.
+                    // The client service serializes the Map, preserving null-suppression settings.
+                    try (final InputStream in = session.read(flowFile)) {
+                        final Map<String, Object> contentMap = mapReader.readValue(in);
+                        final String id = StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null;
+                        final String docIndex = resolveFieldValue(contentMap, documentIndexField, index);
+                        // Ingest pipelines apply to Index/Create operations only.
+                        final boolean pipelineApplies = o == IndexOperationRequest.Operation.Index || o == IndexOperationRequest.Operation.Create;
+                        final String docPipeline = pipelineApplies ? resolveFieldValue(contentMap, documentPipelineField, pipeline) : null;
+                        if (!retainIndexField && StringUtils.isNotBlank(documentIndexField)) {
+                            removeAtPath(contentMap, documentIndexField);
+                        }
+                        // The field is stripped when requested even for operations the pipeline does not apply to,
+                        // so the routing metadata is not indexed with the document.
+                        if (!retainPipelineField && StringUtils.isNotBlank(documentPipelineField)) {
+                            removeAtPath(contentMap, documentPipelineField);
+                        }
+                        applyTimestamp(contentMap, documentTimestampField, retainTimestampField);
+                        final IndexOperationRequest opRequest = IndexOperationRequest.builder()
+                                .index(docIndex)
+                                .type(type)
+                                .id(id)
+                                .fields(contentMap)
+                                .operation(o)
+                                .script(scriptMap)
+                                .scriptedUpsert(scriptedUpsert)
+                                .dynamicTemplates(dynamicTemplatesMap)
+                                .headerFields(withPipeline(bulkHeaderFields, docPipeline))
+                                .build();
+                        operations.add(opRequest);
+                        operationFlowFiles.add(flowFile);
+                        operationRecordIndices.add(0);
+                        final long docBytes = flowFile.getSize();
+                        chunkBytes += docBytes;
+                        totalBytesAccumulated += docBytes;
+                        if (chunkBytes >= maxBatchBytes) {
+                            flushChunk(operations, operationFlowFiles, operationRecordIndices, errorFlowFiles, flowFile, pendingBulkErrors, pendingErrorRecordIndices, context, session);
+                            operations.clear();
+                            operationFlowFiles.clear();
+                            operationRecordIndices.clear();
+                            chunkBytes = 0;
+                        }
+                    }
+                }
+            } catch (final ElasticsearchException ese) {
+                final String msg = String.format("Encountered a server-side problem with Elasticsearch. %s",
+                        ese.isElastic() ? "Routing to retry." : "Routing to failure.");
+                getLogger().error(msg, ese);
+                final Relationship rel = ese.isElastic() ? REL_RETRY : REL_FAILURE;
+                // Route only the failing in-flight chunk to retry/failure. FlowFiles already
+                // successfully indexed by prior _bulk requests are routed normally to avoid
+                // duplicate indexing if those FlowFiles are re-processed on retry.
+                final Set<FlowFile> inFlight = new LinkedHashSet<>(operationFlowFiles);
+                transferFlowFilesOnException(ese, rel, session, true, inFlight.toArray(new FlowFile[0]));
+                final Set<FlowFile> alreadyIndexed = new LinkedHashSet<>(allProcessedFlowFiles);
+                alreadyIndexed.removeAll(inFlight);
+                if (!alreadyIndexed.isEmpty()) {
+                    handleFinalResponse(context, session, errorFlowFiles, alreadyIndexed, pendingErrorRecordIndices, inputFormat);
+                }
+                return;
+            } catch (final IOException ioe) {
+                getLogger().error("Could not read FlowFile content as valid {}.", inputFormat, ioe);
+                removeFlowFileFromChunk(flowFile, operations, operationFlowFiles, operationRecordIndices);
+                flowFile = session.putAttribute(flowFile, "elasticsearch.put.error", ioe.getMessage());
+                session.penalize(flowFile);
+                session.transfer(flowFile, REL_FAILURE);
+                parseError = true;
+            } catch (final Exception ex) {
+                getLogger().error("Failed processing records.", ex);
+                removeFlowFileFromChunk(flowFile, operations, operationFlowFiles, operationRecordIndices);
+                flowFile = session.putAttribute(flowFile, "elasticsearch.put.error", ex.getMessage());
+                session.penalize(flowFile);
+                session.transfer(flowFile, REL_FAILURE);
+                parseError = true;
+            }
+
+            if (!parseError) {
+                allProcessedFlowFiles.add(flowFile);
+                // InputStream is now closed — safe to apply any deferred bulk-error attributes
+                applyPendingBulkErrors(flowFile, pendingBulkErrors, session);
+            }
+
+            flowFilesProcessed++;
+
+            // For Single JSON, stop when the count-based batch limit is reached; otherwise use size limit
+            if (InputFormat.SINGLE_JSON == inputFormat ? flowFilesProcessed >= batchSize : totalBytesAccumulated >= maxBatchBytes) {
+                break;
+            }
+
+            flowFile = session.get();
+        }
+
+        // Flush any remaining operations (all InputStreams are closed at this point)
+        if (!operations.isEmpty()) {
+            try {
+                flushChunk(operations, operationFlowFiles, operationRecordIndices, errorFlowFiles, null, pendingBulkErrors, pendingErrorRecordIndices, context, session);
+            } catch (final ElasticsearchException ese) {
+                final String msg = String.format("Encountered a server-side problem with Elasticsearch. %s",
+                        ese.isElastic() ? "Routing to retry." : "Routing to failure.");
+                getLogger().error(msg, ese);
+                final Relationship rel = ese.isElastic() ? REL_RETRY : REL_FAILURE;
+                final Set<FlowFile> inFlight = new LinkedHashSet<>(operationFlowFiles);
+                transferFlowFilesOnException(ese, rel, session, true, inFlight.toArray(new FlowFile[0]));
+                final Set<FlowFile> alreadyIndexed = new LinkedHashSet<>(allProcessedFlowFiles);
+                alreadyIndexed.removeAll(inFlight);
+                if (!alreadyIndexed.isEmpty()) {
+                    handleFinalResponse(context, session, errorFlowFiles, alreadyIndexed, pendingErrorRecordIndices, inputFormat);
+                }
+                return;
+            } catch (final Exception ex) {
+                getLogger().error("Could not index documents.", ex);
+                final Set<FlowFile> inFlight = new LinkedHashSet<>(operationFlowFiles);
+                transferFlowFilesOnException(ex, REL_FAILURE, session, false, inFlight.toArray(new FlowFile[0]));
+                final Set<FlowFile> alreadyIndexed = new LinkedHashSet<>(allProcessedFlowFiles);
+                alreadyIndexed.removeAll(inFlight);
+                if (!alreadyIndexed.isEmpty()) {
+                    handleFinalResponse(context, session, errorFlowFiles, alreadyIndexed, pendingErrorRecordIndices, inputFormat);
+                }
+                context.yield();
+                return;
+            }
+        }
+
+        if (allProcessedFlowFiles.isEmpty()) {
+            getLogger().warn("No records successfully parsed for sending to Elasticsearch");
+        } else {
+            handleFinalResponse(context, session, errorFlowFiles, allProcessedFlowFiles, pendingErrorRecordIndices, inputFormat);
+        }
+    }
+
+    /**
+     * Removes all entries belonging to {@code target} from the three parallel lists, so that a
+     * FlowFile that failed mid-read does not leave stale references that would cause
+     * {@link org.apache.nifi.processor.exception.FlowFileHandlingException} on the next flush.
+     */
+    private void removeFlowFileFromChunk(final FlowFile target,
+                                          final List<IndexOperationRequest> operations,
+                                          final List<FlowFile> operationFlowFiles,
+                                          final List<Integer> operationRecordIndices) {
+        for (int i = operations.size() - 1; i >= 0; i--) {
+            if (operationFlowFiles.get(i) == target) {
+                operations.remove(i);
+                operationFlowFiles.remove(i);
+                operationRecordIndices.remove(i);
+            }
+        }
+    }
+
+    /**
+     * Applies any bulk-error attributes that were deferred for {@code flowFile} while its
+     * InputStream was open.  Must only be called after the InputStream has been closed.
+     */
+    private void applyPendingBulkErrors(final FlowFile flowFile,
+                                         final Map<FlowFile, List<Map<String, Object>>> pendingBulkErrors,
+                                         final ProcessSession session) {
+        final List<Map<String, Object>> errorList = pendingBulkErrors.remove(flowFile);
+        if (errorList == null) {
+            return;
+        }
+        try {
+            final Object errorObj = errorList.size() == 1 ? errorList.get(0) : errorList;
+            session.putAttribute(flowFile, "elasticsearch.bulk.error", mapper.writeValueAsString(errorObj));
+        } catch (final JsonProcessingException e) {
+            session.putAttribute(flowFile, "elasticsearch.bulk.error",
+                    String.format("{\"error\": {\"type\": \"elasticsearch_response_parse_error\", \"reason\": \"%s\"}}",
+                            e.getMessage().replace("\"", "\\\"")));
+        }
+    }
+
+    /**
+     * Sends the accumulated batch of operations to Elasticsearch via the _bulk API and records
+     * any per-document errors. If {@code openStreamFlowFile} is non-null, error attributes for
+     * that FlowFile are deferred into {@code pendingBulkErrors} so they are applied after its
+     * InputStream is closed (calling {@code putAttribute} on an open FlowFile throws
+     * {@link org.apache.nifi.processor.exception.FlowFileHandlingException}).
+     * <p>
+     * Only the local record index of each failed operation is stored (O(error count) memory).
+     * Error/success content is reconstructed by re-reading the FlowFile in
+     * {@link #handleFinalResponse}.
+     */
+    private void flushChunk(final List<IndexOperationRequest> operations, final List<FlowFile> operationFlowFiles,
+                             final List<Integer> operationRecordIndices,
+                             final Set<FlowFile> errorFlowFiles, final FlowFile openStreamFlowFile,
+                             final Map<FlowFile, List<Map<String, Object>>> pendingBulkErrors,
+                             final Map<FlowFile, Set<Integer>> pendingErrorRecordIndices,
+                             final ProcessContext context, final ProcessSession session) throws IOException {
+        if (outputBulkRequest) {
+            outputBulkRequestFlowFile(operations, operationFlowFiles, session);
+        }
+
+        final FlowFile firstFlowFile = operationFlowFiles.get(0);
+        final Map<String, String> dynamicProperties = getRequestParametersFromDynamicProperties(context, firstFlowFile);
+        final IndexOperationResponse response = clientService.get().bulk(operations,
+                new ElasticsearchRequestOptions(getRequestURLParameters(dynamicProperties), getRequestHeadersFromDynamicProperties(context, firstFlowFile)));
+
+        final Map<Integer, Map<String, Object>> errors = findElasticsearchResponseErrors(response);
+
+        // Attach per-FlowFile error attributes; defer putAttribute for the FlowFile whose
+        // InputStream is currently open (putAttribute would throw FlowFileHandlingException).
+        // Record only the local record index of each failure — content is reconstructed at finalization.
+        final Map<FlowFile, List<Map<String, Object>>> flowFileErrors = new HashMap<>();
+        errors.forEach((index, error) -> {
+            final FlowFile flowFile = operationFlowFiles.get(index);
+            errorFlowFiles.add(flowFile);
+            flowFileErrors.computeIfAbsent(flowFile, k -> new ArrayList<>()).add(error);
+            pendingErrorRecordIndices.computeIfAbsent(flowFile, k -> new HashSet<>()).add(operationRecordIndices.get(index));
+        });
+        flowFileErrors.forEach((flowFile, errorList) -> {
+            if (flowFile == openStreamFlowFile) {
+                // Defer: InputStream still open — apply after the try-with-resources closes
+                pendingBulkErrors.computeIfAbsent(flowFile, k -> new ArrayList<>()).addAll(errorList);
+            } else {
+                try {
+                    final Object errorObj = errorList.size() == 1 ? errorList.get(0) : errorList;
+                    session.putAttribute(flowFile, "elasticsearch.bulk.error", mapper.writeValueAsString(errorObj));
+                } catch (final JsonProcessingException e) {
+                    session.putAttribute(flowFile, "elasticsearch.bulk.error",
+                            String.format("{\"error\": {\"type\": \"elasticsearch_response_parse_error\", \"reason\": \"%s\"}}",
+                                    e.getMessage().replace("\"", "\\\"")));
+                }
+            }
+        });
+
+        if (!errors.isEmpty()) {
+            handleElasticsearchDocumentErrors(errors, session, firstFlowFile);
+        }
+    }
+
+    /**
+     * Serializes the pending batch into an Elasticsearch _bulk NDJSON body and writes it to a
+     * new FlowFile on the {@code bulk_request} relationship for inspection or debugging.
+     * Each operation produces an action metadata line followed by a document line
+     * (Delete operations have no document line). Failures here are logged and swallowed so
+     * that a debug-output failure does not abort the actual indexing.
+     */
+    private void outputBulkRequestFlowFile(final List<IndexOperationRequest> operations,
+                                            final List<FlowFile> operationFlowFiles,
+                                            final ProcessSession session) {
+        final FlowFile parent = operationFlowFiles.get(0);
+        FlowFile bulkRequestFF = session.create(parent);
+        try (final OutputStream out = session.write(bulkRequestFF)) {
+            for (final IndexOperationRequest op : operations) {
+                // Action metadata line
+                final Map<String, Object> actionBody = new LinkedHashMap<>();
+                if (StringUtils.isNotBlank(op.getIndex())) {
+                    actionBody.put("_index", op.getIndex());
+                }
+                if (StringUtils.isNotBlank(op.getType())) {
+                    actionBody.put("_type", op.getType());
+                }
+                if (StringUtils.isNotBlank(op.getId())) {
+                    actionBody.put("_id", op.getId());
+                }
+                if (op.getDynamicTemplates() != null && !op.getDynamicTemplates().isEmpty()) {
+                    actionBody.put("dynamic_templates", op.getDynamicTemplates());
+                }
+                if (op.getHeaderFields() != null) {
+                    actionBody.putAll(op.getHeaderFields());
+                }
+
+                // Upsert maps to "update" in the ES bulk API
+                final String actionName = op.getOperation() == IndexOperationRequest.Operation.Upsert
+                        ? "update" : op.getOperation().getValue();
+                final Map<String, Object> actionLine = Map.of(actionName, actionBody);
+                out.write(mapper.writeValueAsBytes(actionLine));
+                out.write('\n');
+
+                // Document line (delete has no document)
+                if (op.getOperation() != IndexOperationRequest.Operation.Delete) {
+                    if (op.getRawJsonBytes() != null) {
+                        // Index/Create with rawJson path — write directly, no Map round-trip
+                        out.write(op.getRawJsonBytes());
+                    } else {
+                        final Map<String, Object> docLine = new LinkedHashMap<>();
+                        if (op.getOperation() == IndexOperationRequest.Operation.Update
+                                || op.getOperation() == IndexOperationRequest.Operation.Upsert) {
+                            if (op.getScript() != null && !op.getScript().isEmpty()) {
+                                docLine.put("script", op.getScript());
+                                if (op.isScriptedUpsert()) {
+                                    docLine.put("scripted_upsert", true);
+                                }
+                                if (op.getFields() != null && !op.getFields().isEmpty()) {
+                                    docLine.put("upsert", op.getFields());
+                                }
+                            } else {
+                                docLine.put("doc", op.getFields());
+                                if (op.getOperation() == IndexOperationRequest.Operation.Upsert) {
+                                    docLine.put("doc_as_upsert", true);
+                                }
+                            }
+                        } else {
+                            docLine.putAll(op.getFields());
+                        }
+                        out.write(mapper.writeValueAsBytes(docLine));
+                    }
+                    out.write('\n');
+                }
+            }
+        } catch (final IOException e) {
+            getLogger().warn("Failed to write bulk request FlowFile for inspection.", e);
+            session.remove(bulkRequestFF);
+            return;
+        }
+        bulkRequestFF = session.putAttribute(bulkRequestFF, "elasticsearch.bulk.operation.count", String.valueOf(operations.size()));
+        session.transfer(bulkRequestFF, REL_BULK_REQUEST);
+    }
+
+    /**
+     * Copies the value at {@code timestampField} to a top-level {@code @timestamp} in the Map.
+     * The field may be a {@code /}-delimited path into nested objects (e.g. {@code @metadata/event_time}).
+     * If {@code retain} is false, the source field is removed after copying, pruning any ancestor
+     * objects that become empty. Does nothing when {@code timestampField} is blank or absent.
+     */
+    private void applyTimestamp(final Map<String, Object> contentMap, final String timestampField, final boolean retain) {
+        if (StringUtils.isBlank(timestampField)) {
+            return;
+        }
+        final Object value = valueAtPath(contentMap, timestampField);
+        if (value != null) {
+            if (!retain) {
+                removeAtPath(contentMap, timestampField);
+            }
+            contentMap.put("@timestamp", value);
+        }
+    }
+
+    /**
+     * Copies the value at {@code timestampField} to a top-level {@code @timestamp} in the ObjectNode.
+     * The field may be a {@code /}-delimited path into nested objects (e.g. {@code @metadata/event_time}).
+     * If {@code retain} is false, the source field is removed after copying, pruning any ancestor
+     * objects that become empty. Does nothing when {@code timestampField} is blank or absent.
+     */
+    private void applyTimestamp(final ObjectNode node, final String timestampField, final boolean retain) {
+        if (StringUtils.isBlank(timestampField)) {
+            return;
+        }
+        final JsonNode value = nodeAtPath(node, timestampField);
+        if (value != null && !value.isNull()) {
+            if (!retain) {
+                removeAtPath(node, timestampField);
+            }
+            node.set("@timestamp", value);
+        }
+    }
+
+    /**
+     * Extracts both document ID and index name from a raw JSON string in a single streaming pass.
+     * Stops as soon as both fields have been found to avoid scanning the rest of the document.
+     * Returns a two-element array: {@code [id, docIndex]}.
+     * Used for NDJSON Index/Create when neither suppression nor field-removal requires a Map parse.
+     * <p>
+     * {@code idFieldName} and {@code indexFieldName} are the already-decoded flat field names (any
+     * escaped slash/backslash resolved by the caller), compared directly against the raw JSON keys.
+     */
+    private String[] extractIdAndIndex(
+            final String rawJson,
+            final String idFieldName, final String flowFileIdAttribute,
+            final String indexFieldName, final String fallbackIndex) throws IOException {
+        final boolean needId = StringUtils.isNotBlank(idFieldName);
+        final boolean needIndex = StringUtils.isNotBlank(indexFieldName);
+
+        String id = needId ? null : (StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null);
+        String docIndex = fallbackIndex;
+
+        if (!needId && !needIndex) {
+            return new String[]{id, docIndex};
+        }
+
+        boolean foundId = !needId;
+        boolean foundIndex = !needIndex;
+
+        try (final JsonParser p = mapper.getFactory().createParser(rawJson)) {
+            while (p.nextToken() != null) {
+                if (foundId && foundIndex) {
+                    break;
+                }
+                if (!foundId && idFieldName.equals(p.currentName()) && p.nextToken() != null && isScalarValue(p.currentToken())) {
+                    final String value = p.getText();
+                    id = StringUtils.isNotBlank(value) ? value : (StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null);
+                    foundId = true;
+                } else if (!foundIndex && indexFieldName.equals(p.currentName()) && p.nextToken() != null && isScalarValue(p.currentToken())) {
+                    final String value = p.getText();
+                    docIndex = StringUtils.isNotBlank(value) ? value : fallbackIndex;
+                    foundIndex = true;
+                }
+            }
+        }
+
+        if (!foundId) {
+            id = StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null;
+        }
+        return new String[]{id, docIndex};
+    }
+
+    /**
+     * Extracts the document ID from a pre-parsed JsonNode.
+     * Used for JSON Array Index/Create operations where the node is already available.
+     * The field may be a {@code /}-delimited path into nested objects.
+     */
+    private String extractId(final JsonNode node, final String idAttribute, final String flowFileIdAttribute) {
+        if (StringUtils.isBlank(idAttribute)) {
+            return StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null;
+        }
+        final String value = fieldNodeToString(nodeAtPath(node, idAttribute));
+        if (StringUtils.isNotBlank(value)) {
+            return value;
+        }
+        return StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null;
+    }
+
+    /**
+     * Resolves the document ID for Update/Delete/Upsert operations from the already-parsed content Map.
+     * The field may be a {@code /}-delimited path into nested objects.
+     * Falls back to the FlowFile attribute value when the field is absent from the document.
+     */
+    private String resolveId(final Map<String, Object> contentMap, final String idAttribute, final String flowFileIdAttribute) {
+        if (StringUtils.isBlank(idAttribute)) {
+            return null;
+        }
+        final String value = fieldValueToString(valueAtPath(contentMap, idAttribute));
+        if (StringUtils.isNotBlank(value)) {
+            return value;
+        }
+        return StringUtils.isNotBlank(flowFileIdAttribute) ? flowFileIdAttribute : null;
+    }
+
+    /**
+     * Extracts a string value (e.g. index name or ingest pipeline) at {@code field} from a pre-parsed
+     * {@link JsonNode}. Used for JSON Array Index/Create operations where the node is already available.
+     * The field may be a {@code /}-delimited path into nested objects.
+     * Falls back to {@code fallback} when the field is absent or blank.
+     */
+    private String extractFieldValue(final JsonNode node, final String field, final String fallback) {
+        if (StringUtils.isBlank(field)) {
+            return fallback;
+        }
+        final String value = fieldNodeToString(nodeAtPath(node, field));
+        return StringUtils.isNotBlank(value) ? value : fallback;
+    }
+
+    /**
+     * Resolves a string value (e.g. index name or ingest pipeline) at {@code field} from an already-parsed
+     * content Map. The field may be a {@code /}-delimited path into nested objects.
+     * Falls back to {@code fallback} when the field is absent or blank.
+     */
+    private String resolveFieldValue(final Map<String, Object> contentMap, final String field, final String fallback) {
+        if (StringUtils.isBlank(field)) {
+            return fallback;
+        }
+        final String value = fieldValueToString(valueAtPath(contentMap, field));
+        return StringUtils.isNotBlank(value) ? value : fallback;
+    }
+
+    /**
+     * Returns the bulk action-header map for a document: the shared {@code headerFields} plus a
+     * {@code pipeline} entry when {@code pipeline} is non-blank (the ingest pipeline is expressed as a
+     * bulk action-header field). Returns the shared map unchanged when the pipeline is blank so no
+     * per-document copy is allocated in the common case.
+     */
+    private static Map<String, String> withPipeline(final Map<String, String> headerFields, final String pipeline) {
+        if (StringUtils.isBlank(pipeline)) {
+            return headerFields;
+        }
+        final Map<String, String> merged = new HashMap<>(headerFields);
+        merged.put("pipeline", pipeline);
+        return merged;
+    }
+
+    /**
+     * Normalizes a configured Identifier/Index/Timestamp Field value into the path form consumed by the
+     * shared path helpers. In Nested Field Path mode the value is already a {@code /}-delimited path and
+     * is returned unchanged. In Literal Field Name mode the value names a single field verbatim, so any
+     * {@code /} or {@code \} is escaped ({@code \} to {@code \\} then {@code /} to {@code \/}) to produce
+     * a single-segment path that resolves back to that exact field name.
+     */
+    private static String fieldPath(final String configuredValue, final boolean nestedFieldPaths) {
+        if (configuredValue == null || nestedFieldPaths) {
+            return configuredValue;
+        }
+        return configuredValue.replace("\\", "\\\\").replace("/", "\\/");
+    }
+
+    /**
+     * Whether {@code field} is a {@code /}-delimited nested path rather than a flat field name.
+     * A {@code /} preceded by a backslash is an escaped literal slash within a single field name
+     * (see {@link #splitPath(String)}) and does not make the field a nested path.
+     */
+    private static boolean isNestedPath(final String field) {
+        if (field == null) {
+            return false;
+        }
+        for (int i = 0; i < field.length(); i++) {
+            final char c = field.charAt(i);
+            if (c == '\\' && i + 1 < field.length()) {
+                final char next = field.charAt(i + 1);
+                if (next == '/' || next == '\\') {
+                    i++; // skip the escaped character
+                    continue;
+                }
+            } else if (c == '/') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Splits a {@code /}-delimited field path into its decoded segments, ignoring empty segments
+     * produced by leading, trailing, or repeated slashes. A field name containing no unescaped
+     * slash yields a single segment equal to the (decoded) name itself.
+     * <p>
+     * A backslash escapes the following character so it is taken literally: {@code \/} is a slash
+     * that is part of a field name rather than a separator, and {@code \\} is a literal backslash.
+     * A backslash before any other character (or at the end of the string) is kept as a literal
+     * backslash, so field names containing stray backslashes are unaffected.
+     */
+    private static String[] splitPath(final String path) {
+        final List<String> segments = new ArrayList<>();
+        final StringBuilder current = new StringBuilder(path.length());
+        for (int i = 0; i < path.length(); i++) {
+            final char c = path.charAt(i);
+            if (c == '\\' && i + 1 < path.length()) {
+                final char next = path.charAt(i + 1);
+                if (next == '/' || next == '\\') {
+                    current.append(next);
+                    i++; // consume the escaped character
+                    continue;
+                }
+                current.append(c); // lone backslash, kept literal
+            } else if (c == '/') {
+                if (!current.isEmpty()) {
+                    segments.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
+            }
+        }
+        if (!current.isEmpty()) {
+            segments.add(current.toString());
+        }
+        return segments.toArray(new String[0]);
+    }
+
+    /**
+     * Decodes a single flat field name, resolving the same backslash escapes as
+     * {@link #splitPath(String)} ({@code \/} to {@code /}, {@code \\} to {@code \}) without treating
+     * any slash as a separator. Returns the input unchanged when it contains no backslash.
+     */
+    private static String decodeSegment(final String field) {
+        if (field.indexOf('\\') < 0) {
+            return field;
+        }
+        final StringBuilder sb = new StringBuilder(field.length());
+        for (int i = 0; i < field.length(); i++) {
+            final char c = field.charAt(i);
+            if (c == '\\' && i + 1 < field.length()) {
+                final char next = field.charAt(i + 1);
+                if (next == '/' || next == '\\') {
+                    sb.append(next);
+                    i++;
+                    continue;
+                }
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Returns the value at the {@code /}-delimited {@code path} within {@code map}, or {@code null}
+     * when any segment is missing or an intermediate segment is not a JSON object. A path with no
+     * slash is a direct top-level lookup (no allocation).
+     */
+    private static Object valueAtPath(final Map<String, Object> map, final String path) {
+        if (!isNestedPath(path)) {
+            return map.get(decodeSegment(path));
+        }
+        Object current = map;
+        for (final String segment : splitPath(path)) {
+            if (!(current instanceof Map)) {
+                return null;
+            }
+            current = ((Map<?, ?>) current).get(segment);
+            if (current == null) {
+                return null;
+            }
+        }
+        return current;
+    }
+
+    /**
+     * Returns the {@link JsonNode} at the {@code /}-delimited {@code path} within {@code node}, or
+     * {@code null} when any segment is missing or an intermediate segment is not a JSON object.
+     * A path with no slash is a direct field lookup.
+     */
+    private static JsonNode nodeAtPath(final JsonNode node, final String path) {
+        if (!isNestedPath(path)) {
+            return node.get(decodeSegment(path));
+        }
+        JsonNode current = node;
+        for (final String segment : splitPath(path)) {
+            if (current == null || !current.isObject()) {
+                return null;
+            }
+            current = current.get(segment);
+        }
+        return current;
+    }
+
+    /**
+     * Removes the leaf at the {@code /}-delimited {@code path} within {@code root}, then prunes any
+     * ancestor objects that become empty as a result (the transient envelope often used for routing
+     * metadata, e.g. {@code @metadata}, should not be indexed once its fields are extracted).
+     * Does nothing when the path is absent. A path with no slash is a direct top-level removal.
+     */
+    private static void removeAtPath(final Map<String, Object> root, final String path) {
+        if (!isNestedPath(path)) {
+            root.remove(decodeSegment(path));
+            return;
+        }
+        removeAtPath(root, splitPath(path), MAP_ACCESSOR);
+    }
+
+    /**
+     * Removes the leaf at the {@code /}-delimited {@code path} within {@code root}, then prunes any
+     * ancestor objects that become empty as a result. Does nothing when the path is absent.
+     * A path with no slash is a direct field removal.
+     */
+    private static void removeAtPath(final ObjectNode root, final String path) {
+        if (!isNestedPath(path)) {
+            root.remove(decodeSegment(path));
+            return;
+        }
+        removeAtPath(root, splitPath(path), OBJECT_NODE_ACCESSOR);
+    }
+
+    /**
+     * Shared descend-and-prune walk for both the {@link Map} and {@link ObjectNode} object models.
+     * Descends the parent {@code segments}, removes the leaf, then walks back up removing each
+     * ancestor that the removal left empty. The {@link NodeAccessor} isolates the few model-specific
+     * operations so the traversal logic exists in exactly one place.
+     */
+    private static <T> void removeAtPath(final T root, final String[] segments, final NodeAccessor<T> accessor) {
+        final List<T> chain = new ArrayList<>();
+        T current = root;
+        chain.add(current);
+        for (int i = 0; i < segments.length - 1; i++) {
+            final T next = accessor.childObject(current, segments[i]);
+            if (next == null) {
+                return;
+            }
+            current = next;
+            chain.add(current);
+        }
+        accessor.remove(chain.get(chain.size() - 1), segments[segments.length - 1]);
+        for (int i = chain.size() - 1; i >= 1; i--) {
+            if (accessor.isEmpty(chain.get(i))) {
+                accessor.remove(chain.get(i - 1), segments[i - 1]);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /**
+     * The model-specific operations the shared {@link #removeAtPath(Object, String[], NodeAccessor)}
+     * walk needs: fetching a child only when it is itself an object, removing a key, and testing
+     * emptiness.
+     */
+    private interface NodeAccessor<T> {
+        /** The child object at {@code key}, or {@code null} when absent or not itself an object. */
+        T childObject(T node, String key);
+
+        void remove(T node, String key);
+
+        boolean isEmpty(T node);
+    }
+
+    private static final NodeAccessor<Map<String, Object>> MAP_ACCESSOR = new NodeAccessor<>() {
+        @Override
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> childObject(final Map<String, Object> node, final String key) {
+            final Object next = node.get(key);
+            return next instanceof Map ? (Map<String, Object>) next : null;
+        }
+
+        @Override
+        public void remove(final Map<String, Object> node, final String key) {
+            node.remove(key);
+        }
+
+        @Override
+        public boolean isEmpty(final Map<String, Object> node) {
+            return node.isEmpty();
+        }
+    };
+
+    private static final NodeAccessor<ObjectNode> OBJECT_NODE_ACCESSOR = new NodeAccessor<>() {
+        @Override
+        public ObjectNode childObject(final ObjectNode node, final String key) {
+            final JsonNode next = node.get(key);
+            return next != null && next.isObject() ? (ObjectNode) next : null;
+        }
+
+        @Override
+        public void remove(final ObjectNode node, final String key) {
+            node.remove(key);
+        }
+
+        @Override
+        public boolean isEmpty(final ObjectNode node) {
+            return node.isEmpty();
+        }
+    };
+
+    /**
+     * Converts a document field value taken from a parsed content Map into its string form for use
+     * as a document ID or index name. Returns {@code null} for absent values and for container
+     * values (JSON objects/arrays, deserialized as {@link Map}/{@link Collection}), which are not
+     * meaningful as an identifier or index and are treated the same as an absent field. This mirrors
+     * {@link #fieldNodeToString(JsonNode)} and the streaming {@link #extractIdAndIndex} path so all
+     * three produce identical results for the same document.
+     */
+    private static String fieldValueToString(final Object value) {
+        if (value == null || value instanceof Map || value instanceof Collection) {
+            return null;
+        }
+        return value.toString();
+    }
+
+    /**
+     * Converts a document field {@link JsonNode} into its string form for use as a document ID or
+     * index name. Returns {@code null} for missing, null, and non-scalar (object/array) nodes,
+     * consistent with {@link #fieldValueToString(Object)} and the streaming extraction path.
+     */
+    private static String fieldNodeToString(final JsonNode node) {
+        if (node == null || node.isNull() || !node.isValueNode()) {
+            return null;
+        }
+        return node.asText();
+    }
+
+    /**
+     * Whether the streaming-parser token represents a usable scalar value (text, number, boolean)
+     * rather than a container start ({@code {}/[]}) or a JSON null. Keeps the streaming ID/index
+     * extraction consistent with the Map and JsonNode paths, which treat objects/arrays/nulls as
+     * absent fields.
+     */
+    private static boolean isScalarValue(final JsonToken token) {
+        return token != null && !token.isStructStart() && token != JsonToken.VALUE_NULL;
+    }
+
+    /**
+     * Reads a processor property as a JSON Object string and deserializes it into a Map.
+     * Returns an empty Map when the property is blank. Throws {@link ProcessException} if the
+     * value is not valid JSON or not a JSON Object.
+     */
+    private Map<String, Object> getMapFromAttribute(final PropertyDescriptor propertyDescriptor, final ProcessContext context, final FlowFile input) {
+        final String propertyValue = context.getProperty(propertyDescriptor).evaluateAttributeExpressions(input).getValue();
+        try {
+            return StringUtils.isNotBlank(propertyValue) ? mapper.readValue(propertyValue, new TypeReference<Map<String, Object>>() { }) : Collections.emptyMap();
+        } catch (final JsonProcessingException jpe) {
+            throw new ProcessException(propertyDescriptor.getDisplayName() + " must be a String parsable into a JSON Object", jpe);
+        }
+    }
+
+    /**
+     * Routes all successfully processed FlowFiles to their final relationships after all
+     * _bulk requests for the trigger have completed.
+     * <ul>
+     *   <li>FlowFiles with no errors are cloned to {@code REL_SUCCESSFUL} without re-reading.</li>
+     *   <li>FlowFiles with errors are re-read exactly once to split records by failed indices:
+     *       failed records go to a clone on {@code REL_ERRORS}; successful records (if any) go
+     *       to a clone on {@code REL_SUCCESSFUL}. For SINGLE_JSON the FlowFile is always a single
+     *       document so a direct clone is used instead of re-reading.</li>
+     *   <li>All FlowFiles go to {@code REL_ORIGINAL}.</li>
+     * </ul>
+     */
+    private void handleFinalResponse(final ProcessContext context, final ProcessSession session,
+                                     final Set<FlowFile> errorFlowFiles, final Set<FlowFile> allFlowFiles,
+                                     final Map<FlowFile, Set<Integer>> pendingErrorRecordIndices,
+                                     final InputFormat inputFormat) {
+        final List<FlowFile> copiedErrors = new ArrayList<>();
+        final List<FlowFile> successfulDocuments = new ArrayList<>();
+
+        for (final FlowFile ff : allFlowFiles) {
+            if (!errorFlowFiles.contains(ff)) {
+                // All records succeeded: clone the original without re-reading
+                successfulDocuments.add(session.clone(ff));
+            } else if (inputFormat == InputFormat.SINGLE_JSON) {
+                // One document per FlowFile — it failed entirely; clone directly
+                copiedErrors.add(session.clone(ff));
+            } else {
+                // NDJSON or JSON Array: re-read once and split records into error/success by index
+                final Set<Integer> failedIndices = pendingErrorRecordIndices.getOrDefault(ff, Collections.emptySet());
+                final String charset = context.getProperty(CHARSET).evaluateAttributeExpressions(ff).getValue();
+                final ByteArrayOutputStream errorBaos = new ByteArrayOutputStream();
+                final ByteArrayOutputStream successBaos = new ByteArrayOutputStream();
+                session.read(ff, in -> splitRecords(in, failedIndices, charset, inputFormat, errorBaos, successBaos));
+
+                if (errorBaos.size() > 0) {
+                    final byte[] errorBytes = errorBaos.toByteArray();
+                    FlowFile errorFf = session.clone(ff);
+                    errorFf = session.write(errorFf, out -> out.write(errorBytes));
+                    copiedErrors.add(errorFf);
+                }
+                if (successBaos.size() > 0) {
+                    final byte[] successBytes = successBaos.toByteArray();
+                    FlowFile successFf = session.clone(ff);
+                    successFf = session.write(successFf, out -> out.write(successBytes));
+                    successFf = session.removeAttribute(successFf, "elasticsearch.bulk.error");
+                    successfulDocuments.add(successFf);
+                }
+            }
+        }
+
+        session.transfer(copiedErrors, REL_ERRORS);
+        copiedErrors.forEach(e ->
+                session.getProvenanceReporter().send(
+                        e,
+                        clientService.get().getTransitUrl(
+                                context.getProperty(INDEX).evaluateAttributeExpressions(e).getValue(),
+                                context.getProperty(TYPE).evaluateAttributeExpressions(e).getValue()
+                        ),
+                        "Elasticsearch _bulk operation error"
+                )
+        );
+
+        session.transfer(successfulDocuments, REL_SUCCESSFUL);
+        successfulDocuments.forEach(s ->
+                session.getProvenanceReporter().send(
+                        s,
+                        clientService.get().getTransitUrl(
+                                context.getProperty(INDEX).evaluateAttributeExpressions(s).getValue(),
+                                context.getProperty(TYPE).evaluateAttributeExpressions(s).getValue()
+                        )
+                )
+        );
+
+        session.transfer(allFlowFiles, REL_ORIGINAL);
+    }
+
+    /**
+     * Reads records from {@code in} according to {@code inputFormat} and writes each record
+     * (as compact single-line JSON followed by {@code '\n'}) to either {@code errorOut} or
+     * {@code successOut} depending on whether its zero-based index is in {@code failedIndices}.
+     * <p>
+     * The {@code InputStream} is owned by the NiFi session and must not be closed here;
+     * {@code BufferedReader} and {@code JsonParser} wrappers are intentionally not closed so
+     * that they do not propagate a close to the underlying stream.
+     */
+    private void splitRecords(final InputStream in, final Set<Integer> failedIndices, final String charset,
+                               final InputFormat inputFormat, final OutputStream errorOut,
+                               final OutputStream successOut) throws IOException {
+        // Track whether each output stream has received its first record so we can write '\n'
+        // between records (not after the last one), avoiding a trailing blank line.
+        boolean firstError = true;
+        boolean firstSuccess = true;
+        int idx = 0;
+        if (inputFormat == InputFormat.NDJSON) {
+            // BufferedReader not closed intentionally — 'in' is session-managed
+            final BufferedReader reader = new BufferedReader(new InputStreamReader(in, charset), READER_BUFFER_SIZE);
+            String line;
+            while ((line = reader.readLine()) != null) {
+                final String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                final byte[] bytes = trimmed.getBytes(StandardCharsets.UTF_8);
+                if (failedIndices.contains(idx)) {
+                    if (!firstError) {
+                        errorOut.write('\n');
+                    }
+                    errorOut.write(bytes);
+                    firstError = false;
+                } else {
+                    if (!firstSuccess) {
+                        successOut.write('\n');
+                    }
+                    successOut.write(bytes);
+                    firstSuccess = false;
+                }
+                idx++;
+            }
+        } else {
+            // JSON Array: stream elements one at a time via JsonParser
+            // JsonParser not closed intentionally — 'in' is session-managed
+            final JsonParser parser = mapper.getFactory().createParser(new InputStreamReader(in, charset));
+            JsonToken outerToken;
+            while ((outerToken = parser.nextToken()) != null) {
+                if (outerToken != JsonToken.START_ARRAY) {
+                    continue;
+                }
+                JsonToken token;
+                while ((token = parser.nextToken()) != JsonToken.END_ARRAY) {
+                    if (token == null) {
+                        break;
+                    }
+                    final JsonNode node = mapper.readTree(parser);
+                    final byte[] bytes = mapper.writeValueAsBytes(node);
+                    if (failedIndices.contains(idx)) {
+                        if (!firstError) {
+                            errorOut.write('\n');
+                        }
+                        errorOut.write(bytes);
+                        firstError = false;
+                    } else {
+                        if (!firstSuccess) {
+                            successOut.write('\n');
+                        }
+                        successOut.write(bytes);
+                        firstSuccess = false;
+                    }
+                    idx++;
+                }
+            }
+        }
+    }
+}

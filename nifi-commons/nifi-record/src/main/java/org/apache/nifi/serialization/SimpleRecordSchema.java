@@ -19,28 +19,28 @@ package org.apache.nifi.serialization;
 
 import org.apache.nifi.serialization.record.DataType;
 import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordFieldRemovalPath;
 import org.apache.nifi.serialization.record.RecordSchema;
 import org.apache.nifi.serialization.record.SchemaIdentifier;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 public class SimpleRecordSchema implements RecordSchema {
     private List<RecordField> fields = null;
     private Map<String, RecordField> fieldMap = null;
-    private final boolean textAvailable;
+    private boolean textAvailable;
     private final AtomicReference<String> text = new AtomicReference<>();
-    private final String schemaFormat;
-    private final SchemaIdentifier schemaIdentifier;
+    private String schemaFormat;
+    private SchemaIdentifier schemaIdentifier;
     private String schemaName;
     private String schemaNamespace;
     private volatile int hashCode;
+    private volatile Boolean recursive;
 
     public SimpleRecordSchema(final List<RecordField> fields) {
         this(fields, null, null, false, SchemaIdentifier.EMPTY);
@@ -83,7 +83,6 @@ public class SimpleRecordSchema implements RecordSchema {
         }
     }
 
-
     @Override
     public Optional<String> getSchemaFormat() {
         return Optional.ofNullable(schemaFormat);
@@ -99,7 +98,9 @@ public class SimpleRecordSchema implements RecordSchema {
             throw new IllegalArgumentException("Fields have already been set.");
         }
 
-        this.fields = Collections.unmodifiableList(new ArrayList<>(fields));
+        this.recursive = null;
+        this.hashCode = 0;
+        this.fields = List.copyOf(fields);
         this.fieldMap = new HashMap<>(fields.size() * 2);
 
         for (final RecordField field : fields) {
@@ -129,14 +130,20 @@ public class SimpleRecordSchema implements RecordSchema {
 
     @Override
     public List<DataType> getDataTypes() {
-        return getFields().stream().map(RecordField::getDataType)
-            .collect(Collectors.toList());
+        final List<DataType> dataTypes = new ArrayList<>();
+        for (final RecordField field : fields) {
+            dataTypes.add(field.getDataType());
+        }
+        return dataTypes;
     }
 
     @Override
     public List<String> getFieldNames() {
-        return getFields().stream().map(RecordField::getFieldName)
-            .collect(Collectors.toList());
+        final List<String> fieldNames = new ArrayList<>();
+        for (final RecordField field : fields) {
+            fieldNames.add(field.getFieldName());
+        }
+        return fieldNames;
     }
 
     @Override
@@ -153,7 +160,6 @@ public class SimpleRecordSchema implements RecordSchema {
         return Optional.ofNullable(fieldMap.get(fieldName));
     }
 
-
     @Override
     public boolean equals(final Object obj) {
         if (obj == null) {
@@ -162,27 +168,39 @@ public class SimpleRecordSchema implements RecordSchema {
         if (obj == this) {
             return true;
         }
-        if (!(obj instanceof RecordSchema)) {
+        if (!(obj instanceof final RecordSchema other)) {
             return false;
         }
 
-        final RecordSchema other = (RecordSchema) obj;
-        if (getSchemaNamespace().isPresent() && getSchemaNamespace().equals(other.getSchemaNamespace())
-                && getSchemaName().isPresent() && getSchemaName().equals(other.getSchemaName())) {
-            return true;
+        final boolean thisIsRecursive = isRecursive();
+        final boolean otherIsRecursive = other.isRecursive();
+        if (thisIsRecursive && otherIsRecursive) {
+            if (getSchemaNamespace().isPresent() && getSchemaNamespace().equals(other.getSchemaNamespace())
+                    && getSchemaName().isPresent() && getSchemaName().equals(other.getSchemaName())) {
+                return true;
+            } else {
+                return fields.equals(other.getFields());
+            }
+        } else if (thisIsRecursive || otherIsRecursive) {
+            return false;
+        } else {
+            return fields.equals(other.getFields());
         }
-
-        return fields.equals(other.getFields());
     }
 
     @Override
     public int hashCode() {
         int computed = this.hashCode;
         if (computed == 0) {
-            computed = this.hashCode = 143 + 3 * fields.hashCode();
+            computed = calculateHashCode();
+            this.hashCode = computed;
         }
 
         return computed;
+    }
+
+    private int calculateHashCode() {
+        return 143 + 3 * fields.hashCode();
     }
 
     private static String createText(final List<RecordField> fields) {
@@ -231,7 +249,7 @@ public class SimpleRecordSchema implements RecordSchema {
      * Set schema name.
      * @param schemaName schema name as defined in a root record.
      */
-    public void setSchemaName(String schemaName) {
+    public void setSchemaName(final String schemaName) {
         this.schemaName = schemaName;
     }
 
@@ -244,12 +262,87 @@ public class SimpleRecordSchema implements RecordSchema {
      * Set schema namespace.
      * @param schemaNamespace schema namespace as defined in a root record.
      */
-    public void setSchemaNamespace(String schemaNamespace) {
+    public void setSchemaNamespace(final String schemaNamespace) {
         this.schemaNamespace = schemaNamespace;
     }
 
     @Override
     public Optional<String> getSchemaNamespace() {
         return Optional.ofNullable(schemaNamespace);
+    }
+
+    @Override
+    public void removeField(final String fieldName) {
+        final List<RecordField> remainingFields = new ArrayList<>();
+        for (final RecordField field : fields) {
+            if (!field.getFieldName().equals(fieldName)) {
+                remainingFields.add(field);
+            }
+        }
+
+        if (remainingFields.size() != fields.size()) {
+            resetFields(remainingFields);
+        }
+    }
+
+    @Override
+    public void removePath(final RecordFieldRemovalPath path) {
+        if (path.length() == 1) {
+            removeField(path.head());
+        } else if (path.length() != 0) {
+            getField(path.head()).ifPresent(field -> field.getDataType().removePath(path.tail()));
+        }
+    }
+
+    @Override
+    public boolean renameField(final String currentName, final String newName) {
+        final List<RecordField> updatedFields = new ArrayList<>(fields.size());
+
+        boolean renamed = false;
+        for (final RecordField recordField : fields) {
+            if (recordField.getFieldName().equals(currentName)) {
+                final RecordField updated = new RecordField(newName, recordField.getDataType(), recordField.getDefaultValue(), recordField.getAliases(), recordField.isNullable());
+                updatedFields.add(updated);
+                renamed = true;
+            } else {
+                updatedFields.add(recordField);
+            }
+        }
+
+        if (!renamed) {
+            return false;
+        }
+
+        resetFields(updatedFields);
+        return true;
+    }
+
+    private void resetFields(final List<RecordField> updatedFields) {
+        this.fields = null;
+        setFields(updatedFields);
+        textAvailable = false;
+        text.set(null);
+        schemaFormat = null;
+        schemaIdentifier = SchemaIdentifier.EMPTY;
+        hashCode = calculateHashCode();
+    }
+
+    @Override
+    public boolean isRecursive() {
+        final Boolean recursiveFlag = this.recursive;
+        if (recursiveFlag != null) {
+            return recursiveFlag;
+        }
+
+        final List<RecordSchema> schemaList = List.of(this);
+        for (final RecordField field : fields) {
+            if (field.getDataType().isRecursive(schemaList)) {
+                recursive = true;
+                return true;
+            }
+        }
+
+        recursive = false;
+        return false;
     }
 }

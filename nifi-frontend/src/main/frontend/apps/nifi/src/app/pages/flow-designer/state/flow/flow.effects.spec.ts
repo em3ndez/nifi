@@ -1,0 +1,2496 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { FlowService } from '../../service/flow.service';
+import * as FlowActions from './flow.actions';
+import { firstValueFrom, Observable, of, ReplaySubject, Subject, take, throwError, toArray } from 'rxjs';
+import { MatDialog, MatDialogRef } from '@angular/material/dialog';
+import {
+    ComponentHistoryEntity,
+    DocumentedType,
+    ParameterContextEntity,
+    RegistryClientEntity
+} from '../../../../state/shared';
+import { EditProcessor } from '../../../../ui/common/component-dialogs/edit-processor/edit-processor.component';
+import { ProcessorBacklogDialog } from '../../ui/canvas/items/processor/backlog-dialog/backlog-dialog.component';
+import { PropertyTableHelperService } from '../../../../service/property-table-helper.service';
+import { FlowEffects } from './flow.effects';
+import { provideMockActions } from '@ngrx/effects/testing';
+import { MockStore, provideMockStore } from '@ngrx/store/testing';
+import { TestBed } from '@angular/core/testing';
+import { Action, createSelector } from '@ngrx/store';
+import { selectCurrentProcessGroupId, selectParentProcessGroupId } from './flow.selectors';
+import * as flowSelectors from './flow.selectors';
+import { flowFeatureKey, MoveToFrontRequest, StopSourcesResponse } from './index';
+import {
+    CreateComponentRequest,
+    CreateComponentResponse,
+    CreateConnection,
+    CreateConnectionRequest,
+    CreatePortRequest,
+    CreateProcessGroupDialogRequest,
+    CreateProcessGroupRequest,
+    CreateProcessorRequest,
+    CreateRemoteProcessGroupRequest,
+    GroupComponentsDialogRequest,
+    GroupComponentsRequest,
+    ImportFromRegistryDialogRequest,
+    ImportFromRegistryRequest,
+    UploadProcessGroupRequest
+} from '../../../../state/flow-shared';
+import {
+    BacklogRequestEntity,
+    DisableComponentRequest,
+    EnableComponentRequest,
+    StartComponentRequest,
+    StopComponentRequest,
+    UpdateProcessorRequest,
+    UpdateProcessorResponse
+} from '../../../../state/shared';
+import { selectCurrentUser } from '../../../../state/current-user/current-user.selectors';
+import * as fromUser from '../../../../state/current-user/current-user.reducer';
+import {
+    selectFlowConfiguration,
+    selectTimeOffset
+} from '../../../../state/flow-configuration/flow-configuration.selectors';
+import * as fromFlowConfiguration from '../../../../state/flow-configuration/flow-configuration.reducer';
+import * as fromDocumentVisibility from '../../../../state/document-visibility/document-visibility.reducer';
+import { selectDocumentVisibilityState } from '../../../../state/document-visibility/document-visibility.selectors';
+import { MockComponent } from 'ng-mocks';
+import { EventEmitter } from '@angular/core';
+import { VerifyPropertiesRequestContext } from '../../../../state/property-verification';
+import { ControllerServiceService } from '../../service/controller-service.service';
+import * as ErrorActions from '../../../../state/error/error.actions';
+import { ErrorContextKey } from '../../../../state/error';
+import { ParameterHelperService } from '../../service/parameter-helper.service';
+import { ExtensionTypesService } from '../../../../service/extension-types.service';
+import { RegistryService } from '../../service/registry.service';
+import { SnippetService } from '../../service/snippet.service';
+import { CopyPasteService } from '../../service/copy-paste.service';
+import { CanvasView } from '../../service/canvas-view.service';
+import { CanvasUtils } from '../../service/canvas-utils.service';
+import { BirdseyeView } from '../../service/birdseye-view.service';
+import { selectDisconnectionAcknowledged } from '../../../../state/cluster-summary/cluster-summary.selectors';
+import { ComponentType, ComponentTypeNamePipe, FunnelEntity, PortEntity, YesNoDialog } from '@nifi/shared';
+import { ParameterContextService } from '../../../parameter-contexts/service/parameter-contexts.service';
+import { HttpErrorResponse } from '@angular/common/http';
+import { provideRouter, Router } from '@angular/router';
+import { ErrorHelper } from '../../../../service/error-helper.service';
+import { selectConnectedStateChanged } from '../../../../state/cluster-summary/cluster-summary.selectors';
+import { canvasFeatureKey } from '../index';
+import * as fromFlow from './flow.reducer';
+import { transformFeatureKey } from '../transform';
+import * as fromTransform from '../transform/transform.reducer';
+import { controllerServicesFeatureKey } from '../controller-services';
+import * as fromControllerServices from '../controller-services/controller-services.reducer';
+import { parameterFeatureKey } from '../parameter';
+import * as fromParameter from '../parameter/parameter.reducer';
+import { flowAnalysisFeatureKey } from '../flow-analysis';
+import * as fromFlowAnalysis from '../flow-analysis/flow-analysis.reducer';
+import * as EmptyQueueActions from '../../../../state/empty-queue/empty-queue.actions';
+import {
+    selectExtensionTypesLoadingStatus,
+    selectPrioritizerTypes,
+    selectProcessorTypes
+} from '../../../../state/extension-types/extension-types.selectors';
+import { ExtensionTypesLoadingStatus } from '../../../../state/extension-types';
+import * as ParameterActions from '../parameter/parameter.actions';
+import { NoRegistryClientsDialog } from '../../ui/common/no-registry-clients-dialog/no-registry-clients-dialog.component';
+
+describe('FlowEffects', () => {
+    let action$: ReplaySubject<Action>;
+    let effects: FlowEffects;
+    let flowService: FlowService;
+    let propertyTableHelperService: PropertyTableHelperService;
+    let dialog: MatDialog;
+    let store: MockStore;
+    let verify: EventEmitter<VerifyPropertiesRequestContext>;
+    let editProcessor: EventEmitter<UpdateProcessorRequest>;
+    let startRequest: EventEmitter<StartComponentRequest>;
+    let stopRequest: EventEmitter<StopComponentRequest>;
+    let enableRequest: EventEmitter<EnableComponentRequest>;
+    let disableRequest: EventEmitter<DisableComponentRequest>;
+
+    const mockData = {
+        type: ComponentType.Processor,
+        uri: 'https://localhost:4200/nifi-api/processors/d90ac264-018b-1000-1827-a86c8156fd9e',
+        entity: {
+            revision: {
+                clientId: 'd8e8a955-018b-1000-915e-a59d0e7933ef',
+                version: 1
+            },
+            id: 'd90ac264-018b-1000-1827-a86c8156fd9e',
+            uri: 'https://localhost:4200/nifi-api/processors/d90ac264-018b-1000-1827-a86c8156fd9e',
+            position: {
+                x: 554.8456153681711,
+                y: -690.0400701011749
+            },
+            permissions: {
+                canRead: true,
+                canWrite: true
+            },
+            bulletins: [],
+            component: {
+                id: 'd90ac264-018b-1000-1827-a86c8156fd9e',
+                parentGroupId: '95a4b210-018b-1000-772a-5a9ebfa03287',
+                position: {
+                    x: 554.8456153681711,
+                    y: -690.0400701011749
+                },
+                name: 'ConsumeKafka_2_6',
+                type: 'org.apache.nifi.processors.kafka.pubsub.ConsumeKafka_2_6',
+                bundle: {
+                    group: 'org.apache.nifi',
+                    artifact: 'nifi-kafka-2-6-nar',
+                    version: '2.0.0-SNAPSHOT'
+                },
+                state: 'STOPPED',
+                style: {},
+                relationships: [
+                    {
+                        name: 'success',
+                        description:
+                            'FlowFiles received from Kafka. Depending on demarcation strategy it is a flow file per message or a bundle of messages grouped by topic and partition.',
+                        autoTerminate: false,
+                        retry: false
+                    }
+                ],
+                supportsParallelProcessing: true,
+                supportsBatching: false,
+                supportsSensitiveDynamicProperties: false,
+                persistsState: false,
+                restricted: false,
+                deprecated: false,
+                executionNodeRestricted: false,
+                multipleVersionsAvailable: false,
+                inputRequirement: 'INPUT_FORBIDDEN',
+                config: {
+                    properties: {
+                        'bootstrap.servers': 'localhost:9092',
+                        topic: null,
+                        topic_type: 'names',
+                        'group.id': null,
+                        'Commit Offsets': 'true',
+                        'max-uncommit-offset-wait': '1 secs',
+                        'honor-transactions': 'true',
+                        'message-demarcator': null,
+                        'separate-by-key': 'false',
+                        'security.protocol': 'PLAINTEXT',
+                        'sasl.mechanism': 'GSSAPI',
+                        'kerberos-user-service': null,
+                        'sasl.kerberos.service.name': null,
+                        'sasl.username': null,
+                        'sasl.password': null,
+                        'sasl.token.auth': 'false',
+                        'aws.profile.name': null,
+                        'ssl.context.service': null,
+                        'key-attribute-encoding': 'utf-8',
+                        'auto.offset.reset': 'latest',
+                        'message-header-encoding': 'UTF-8',
+                        'header-name-regex': null,
+                        'max.poll.records': '10000',
+                        'Communications Timeout': '60 secs'
+                    },
+                    descriptors: {
+                        'bootstrap.servers': {
+                            name: 'bootstrap.servers',
+                            displayName: 'Kafka Brokers',
+                            description: 'Comma-separated list of Kafka Brokers in the format host:port',
+                            defaultValue: 'localhost:9092',
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: []
+                        },
+                        topic: {
+                            name: 'topic',
+                            displayName: 'Topic Name(s)',
+                            description:
+                                'The name of the Kafka Topic(s) to pull from. More than one can be supplied if comma separated.',
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: []
+                        },
+                        topic_type: {
+                            name: 'topic_type',
+                            displayName: 'Topic Name Format',
+                            description:
+                                'Specifies whether the Topic(s) provided are a comma separated list of names or a single regular expression',
+                            defaultValue: 'names',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'names',
+                                        value: 'names',
+                                        description: 'Topic is a full topic name or comma separated list of names'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'pattern',
+                                        value: 'pattern',
+                                        description: 'Topic is a regex using the Java Pattern syntax'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'group.id': {
+                            name: 'group.id',
+                            displayName: 'Group ID',
+                            description:
+                                "A Group ID is used to identify consumers that are within the same consumer group. Corresponds to Kafka's 'group.id' property.",
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: []
+                        },
+                        'Commit Offsets': {
+                            name: 'Commit Offsets',
+                            displayName: 'Commit Offsets',
+                            description:
+                                "Specifies whether or not this Processor should commit the offsets to Kafka after receiving messages. Typically, we want this value set to true so that messages that are received are not duplicated. However, in certain scenarios, we may want to avoid committing the offsets, that the data can be processed and later acknowledged by PublishKafkaRecord in order to provide Exactly Once semantics. See Processor's Usage / Additional Details for more information.",
+                            defaultValue: 'true',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'true',
+                                        value: 'true'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'false',
+                                        value: 'false'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'max-uncommit-offset-wait': {
+                            name: 'max-uncommit-offset-wait',
+                            displayName: 'Max Uncommitted Time',
+                            description:
+                                "Specifies the maximum amount of time allowed to pass before offsets must be committed. This value impacts how often offsets will be committed.  Committing offsets less often increases throughput but also increases the window of potential data duplication in the event of a rebalance or JVM restart between commits.  This value is also related to maximum poll records and the use of a message demarcator.  When using a message demarcator we can have far more uncommitted messages than when we're not as there is much less for us to keep track of in memory.",
+                            defaultValue: '1 secs',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: [
+                                {
+                                    propertyName: 'Commit Offsets',
+                                    dependentValues: ['true']
+                                }
+                            ]
+                        },
+                        'honor-transactions': {
+                            name: 'honor-transactions',
+                            displayName: 'Honor Transactions',
+                            description:
+                                'Specifies whether or not NiFi should honor transactional guarantees when communicating with Kafka. If false, the Processor will use an "isolation level" of read_uncomitted. This means that messages will be received as soon as they are written to Kafka but will be pulled, even if the producer cancels the transactions. If this value is true, NiFi will not receive any messages for which the producer\'s transaction was canceled, but this can result in some latency since the consumer must wait for the producer to finish its entire transaction instead of pulling as the messages become available.',
+                            defaultValue: 'true',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'true',
+                                        value: 'true'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'false',
+                                        value: 'false'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'message-demarcator': {
+                            name: 'message-demarcator',
+                            displayName: 'Message Demarcator',
+                            description:
+                                "Since KafkaConsumer receives messages in batches, you have an option to output FlowFiles which contains all Kafka messages in a single batch for a given topic and partition and this property allows you to provide a string (interpreted as UTF-8) to use for demarcating apart multiple Kafka messages. This is an optional property and if not provided each Kafka message received will result in a single FlowFile which  time it is triggered. To enter special character such as 'new line' use CTRL+Enter or Shift+Enter depending on the OS",
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: []
+                        },
+                        'separate-by-key': {
+                            name: 'separate-by-key',
+                            displayName: 'Separate By Key',
+                            description:
+                                'If true, and the <Message Demarcator> property is set, two messages will only be added to the same FlowFile if both of the Kafka Messages have identical keys.',
+                            defaultValue: 'false',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'true',
+                                        value: 'true'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'false',
+                                        value: 'false'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'security.protocol': {
+                            name: 'security.protocol',
+                            displayName: 'Security Protocol',
+                            description:
+                                'Security protocol used to communicate with brokers. Corresponds to Kafka Client security.protocol property',
+                            defaultValue: 'PLAINTEXT',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'PLAINTEXT',
+                                        value: 'PLAINTEXT'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'SSL',
+                                        value: 'SSL'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'SASL_PLAINTEXT',
+                                        value: 'SASL_PLAINTEXT'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'SASL_SSL',
+                                        value: 'SASL_SSL'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'sasl.mechanism': {
+                            name: 'sasl.mechanism',
+                            displayName: 'SASL Mechanism',
+                            description:
+                                'SASL mechanism used for authentication. Corresponds to Kafka Client sasl.mechanism property',
+                            defaultValue: 'GSSAPI',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'GSSAPI',
+                                        value: 'GSSAPI',
+                                        description: 'General Security Services API for Kerberos authentication'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'PLAIN',
+                                        value: 'PLAIN',
+                                        description: 'Plain username and password authentication'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'SCRAM-SHA-256',
+                                        value: 'SCRAM-SHA-256',
+                                        description:
+                                            'Salted Challenge Response Authentication Mechanism using SHA-512 with username and password'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'SCRAM-SHA-512',
+                                        value: 'SCRAM-SHA-512',
+                                        description:
+                                            'Salted Challenge Response Authentication Mechanism using SHA-256 with username and password'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'kerberos-user-service': {
+                            name: 'kerberos-user-service',
+                            displayName: 'Kerberos User Service',
+                            description: 'Service supporting user authentication with Kerberos',
+                            allowableValues: [],
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            identifiesControllerService: 'org.apache.nifi.kerberos.SelfContainedKerberosUserService',
+                            identifiesControllerServiceBundle: {
+                                group: 'org.apache.nifi',
+                                artifact: 'nifi-standard-services-api-nar',
+                                version: '2.0.0-SNAPSHOT'
+                            },
+                            dependencies: []
+                        },
+                        'sasl.kerberos.service.name': {
+                            name: 'sasl.kerberos.service.name',
+                            displayName: 'Kerberos Service Name',
+                            description:
+                                'The service name that matches the primary name of the Kafka server configured in the broker JAAS configuration',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: []
+                        },
+                        'sasl.username': {
+                            name: 'sasl.username',
+                            displayName: 'Username',
+                            description:
+                                'Username provided with configured password when using PLAIN or SCRAM SASL Mechanisms',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: [
+                                {
+                                    propertyName: 'sasl.mechanism',
+                                    dependentValues: ['PLAIN', 'SCRAM-SHA-512', 'SCRAM-SHA-256']
+                                }
+                            ]
+                        },
+                        'sasl.password': {
+                            name: 'sasl.password',
+                            displayName: 'Password',
+                            description:
+                                'Password provided with configured username when using PLAIN or SCRAM SASL Mechanisms',
+                            required: false,
+                            sensitive: true,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables defined at JVM level and system properties',
+                            dependencies: [
+                                {
+                                    propertyName: 'sasl.mechanism',
+                                    dependentValues: ['PLAIN', 'SCRAM-SHA-512', 'SCRAM-SHA-256']
+                                }
+                            ]
+                        },
+                        'sasl.token.auth': {
+                            name: 'sasl.token.auth',
+                            displayName: 'Token Authentication',
+                            description: 'Enables or disables Token authentication when using SCRAM SASL Mechanisms',
+                            defaultValue: 'false',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'true',
+                                        value: 'true'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'false',
+                                        value: 'false'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: [
+                                {
+                                    propertyName: 'sasl.mechanism',
+                                    dependentValues: ['SCRAM-SHA-512', 'SCRAM-SHA-256']
+                                }
+                            ]
+                        },
+                        'aws.profile.name': {
+                            name: 'aws.profile.name',
+                            displayName: 'AWS Profile Name',
+                            description:
+                                'The Amazon Web Services Profile to select when multiple profiles are available.',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: true,
+                            expressionLanguageScope: 'Environment variables and FlowFile Attributes',
+                            dependencies: [
+                                {
+                                    propertyName: 'sasl.mechanism',
+                                    dependentValues: ['AWS_MSK_IAM']
+                                }
+                            ]
+                        },
+                        'ssl.context.service': {
+                            name: 'ssl.context.service',
+                            displayName: 'SSL Context Service',
+                            description: 'Service supporting SSL communication with Kafka brokers',
+                            allowableValues: [],
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            identifiesControllerService: 'org.apache.nifi.ssl.SSLContextService',
+                            identifiesControllerServiceBundle: {
+                                group: 'org.apache.nifi',
+                                artifact: 'nifi-standard-services-api-nar',
+                                version: '2.0.0-SNAPSHOT'
+                            },
+                            dependencies: []
+                        },
+                        'key-attribute-encoding': {
+                            name: 'key-attribute-encoding',
+                            displayName: 'Key Attribute Encoding',
+                            description:
+                                "FlowFiles that are emitted have an attribute named 'kafka.key'. This property dictates how the value of the attribute should be encoded.",
+                            defaultValue: 'utf-8',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'UTF-8 Encoded',
+                                        value: 'utf-8',
+                                        description: 'The key is interpreted as a UTF-8 Encoded string.'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'Hex Encoded',
+                                        value: 'hex',
+                                        description:
+                                            'The key is interpreted as arbitrary binary data and is encoded using hexadecimal characters with uppercase letters'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'Do Not Add Key as Attribute',
+                                        value: 'do-not-add',
+                                        description: 'The key will not be added as an Attribute'
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'auto.offset.reset': {
+                            name: 'auto.offset.reset',
+                            displayName: 'Offset Reset',
+                            description:
+                                "Allows you to manage the condition when there is no initial offset in Kafka or if the current offset does not exist any more on the server (e.g. because that data has been deleted). Corresponds to Kafka's 'auto.offset.reset' property.",
+                            defaultValue: 'latest',
+                            allowableValues: [
+                                {
+                                    allowableValue: {
+                                        displayName: 'earliest',
+                                        value: 'earliest',
+                                        description: 'Automatically reset the offset to the earliest offset'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'latest',
+                                        value: 'latest',
+                                        description: 'Automatically reset the offset to the latest offset'
+                                    },
+                                    canRead: true
+                                },
+                                {
+                                    allowableValue: {
+                                        displayName: 'none',
+                                        value: 'none',
+                                        description:
+                                            "Throw exception to the consumer if no previous offset is found for the consumer's group"
+                                    },
+                                    canRead: true
+                                }
+                            ],
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'message-header-encoding': {
+                            name: 'message-header-encoding',
+                            displayName: 'Message Header Encoding',
+                            description:
+                                'Any message header that is found on a Kafka message will be added to the outbound FlowFile as an attribute. This property indicates the Character Encoding to use for deserializing the headers.',
+                            defaultValue: 'UTF-8',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'header-name-regex': {
+                            name: 'header-name-regex',
+                            displayName: 'Headers to Add as Attributes (Regex)',
+                            description:
+                                'A Regular Expression that is matched against all message headers. Any message header whose name matches the regex will be added to the FlowFile as an Attribute. If not specified, no Header values will be added as FlowFile attributes. If two messages have a different value for the same header and that header is selected by the provided regex, then those two messages must be added to different FlowFiles. As a result, users should be cautious about using a regex like ".*" if messages are expected to have header values that are unique per message, such as an identifier or timestamp, because it will prevent NiFi from bundling the messages together efficiently.',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'max.poll.records': {
+                            name: 'max.poll.records',
+                            displayName: 'Max Poll Records',
+                            description:
+                                'Specifies the maximum number of records Kafka should return in a single poll.',
+                            defaultValue: '10000',
+                            required: false,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        },
+                        'Communications Timeout': {
+                            name: 'Communications Timeout',
+                            displayName: 'Communications Timeout',
+                            description:
+                                'Specifies the timeout that the consumer should use when communicating with the Kafka Broker',
+                            defaultValue: '60 secs',
+                            required: true,
+                            sensitive: false,
+                            dynamic: false,
+                            supportsEl: false,
+                            expressionLanguageScope: 'Not Supported',
+                            dependencies: []
+                        }
+                    },
+                    schedulingPeriod: '0 sec',
+                    schedulingStrategy: 'TIMER_DRIVEN',
+                    executionNode: 'ALL',
+                    penaltyDuration: '30 sec',
+                    yieldDuration: '1 sec',
+                    bulletinLevel: 'WARN',
+                    runDurationMillis: 0,
+                    concurrentlySchedulableTaskCount: 1,
+                    autoTerminatedRelationships: [],
+                    comments: '',
+                    lossTolerant: false,
+                    defaultConcurrentTasks: {
+                        TIMER_DRIVEN: '1',
+                        CRON_DRIVEN: '1'
+                    },
+                    defaultSchedulingPeriod: {
+                        TIMER_DRIVEN: '0 sec',
+                        CRON_DRIVEN: '* * * * * ?'
+                    },
+                    retryCount: 10,
+                    retriedRelationships: [],
+                    backoffMechanism: 'PENALIZE_FLOWFILE',
+                    maxBackoffPeriod: '10 mins'
+                },
+                validationErrors: [
+                    "'Topic Name(s)' is invalid because Topic Name(s) is required",
+                    "'Group ID' is invalid because Group ID is required",
+                    "'Relationship success' is invalid because Relationship 'success' is not connected to any component and is not auto-terminated"
+                ],
+                validationStatus: 'INVALID',
+                extensionMissing: false
+            },
+            inputRequirement: 'INPUT_FORBIDDEN',
+            status: {
+                groupId: '95a4b210-018b-1000-772a-5a9ebfa03287',
+                id: 'd90ac264-018b-1000-1827-a86c8156fd9e',
+                name: 'ConsumeKafka_2_6',
+                runStatus: 'Stopped',
+                statsLastRefreshed: '14:54:21 EST',
+                aggregateSnapshot: {
+                    id: 'd90ac264-018b-1000-1827-a86c8156fd9e',
+                    groupId: '95a4b210-018b-1000-772a-5a9ebfa03287',
+                    name: 'ConsumeKafka_2_6',
+                    type: 'ConsumeKafka_2_6',
+                    runStatus: 'Stopped',
+                    executionNode: 'ALL',
+                    bytesRead: 0,
+                    bytesWritten: 0,
+                    read: '0 bytes',
+                    written: '0 bytes',
+                    flowFilesIn: 0,
+                    bytesIn: 0,
+                    input: '0 (0 bytes)',
+                    flowFilesOut: 0,
+                    bytesOut: 0,
+                    output: '0 (0 bytes)',
+                    taskCount: 0,
+                    tasksDurationNanos: 0,
+                    tasks: '0',
+                    tasksDuration: '00:00:00.000',
+                    activeThreadCount: 0,
+                    terminatedThreadCount: 0
+                }
+            },
+            operatePermissions: {
+                canRead: true,
+                canWrite: true
+            }
+        }
+    };
+
+    beforeEach(() => {
+        TestBed.configureTestingModule({
+            imports: [],
+            providers: [
+                FlowEffects,
+                ComponentTypeNamePipe,
+                provideRouter([]),
+                provideMockActions(() => action$),
+                provideMockStore({
+                    initialState: {
+                        [canvasFeatureKey]: {
+                            [flowFeatureKey]: fromFlow.initialState,
+                            [transformFeatureKey]: fromTransform.initialState,
+                            [controllerServicesFeatureKey]: fromControllerServices.initialState,
+                            [parameterFeatureKey]: fromParameter.initialState,
+                            [flowAnalysisFeatureKey]: fromFlowAnalysis.initialState
+                        }
+                    },
+                    selectors: [
+                        {
+                            selector: selectCurrentUser,
+                            value: fromUser.initialState.user
+                        },
+                        {
+                            selector: selectFlowConfiguration,
+                            value: fromFlowConfiguration.initialState.flowConfiguration
+                        },
+                        {
+                            selector: selectDocumentVisibilityState,
+                            value: fromDocumentVisibility.initialState
+                        },
+                        {
+                            selector: selectDisconnectionAcknowledged,
+                            value: true
+                        }
+                    ]
+                }),
+                {
+                    provide: FlowService,
+                    useValue: {
+                        getProcessor: vi.fn(),
+                        updateComponent: vi.fn(),
+                        createConnection: vi.fn(),
+                        createLabel: vi.fn(),
+                        clearBulletinsForProcessGroup: vi.fn(),
+                        submitProcessorBacklogRequest: vi.fn(),
+                        stopSources: vi.fn(),
+                        getProcessGroup: vi.fn(),
+                        getFlow: vi.fn()
+                    }
+                },
+                {
+                    provide: PropertyTableHelperService,
+                    useValue: {
+                        getComponentHistory: vi.fn(),
+                        createNewProperty: vi.fn(),
+                        createNewService: vi.fn()
+                    }
+                },
+                {
+                    provide: ControllerServiceService,
+                    useValue: {
+                        getControllerService: vi.fn()
+                    }
+                },
+                {
+                    provide: ParameterHelperService,
+                    useValue: {
+                        getParameterContext: vi.fn(),
+                        convertToParameter: vi.fn()
+                    }
+                },
+                {
+                    provide: ExtensionTypesService,
+                    useValue: {
+                        getParameterContext: vi.fn()
+                    }
+                },
+                {
+                    provide: ParameterContextService,
+                    useValue: {
+                        getParameterContext: vi.fn()
+                    }
+                },
+                {
+                    provide: RegistryService,
+                    useValue: {
+                        getRegistryClients: vi.fn(),
+                        getBranches: vi.fn(),
+                        getBuckets: vi.fn(),
+                        getFlows: vi.fn(),
+                        getFlowVersions: vi.fn()
+                    }
+                },
+                {
+                    provide: SnippetService,
+                    useValue: {}
+                },
+                {
+                    provide: CopyPasteService,
+                    useValue: {
+                        isCopiedContentInView: vi.fn(),
+                        toOffsetPasteRequest: vi.fn(),
+                        toCenteredPasteRequest: vi.fn(),
+                        paste: vi.fn()
+                    }
+                },
+                {
+                    provide: CanvasView,
+                    useValue: {
+                        updateCanvasVisibility: vi.fn(),
+                        centerBoundingBox: vi.fn(),
+                        isCanvasInitialized: vi.fn().mockReturnValue(false)
+                    }
+                },
+                {
+                    provide: BirdseyeView,
+                    useValue: {
+                        refresh: vi.fn()
+                    }
+                }
+            ]
+        });
+
+        effects = TestBed.inject(FlowEffects);
+        action$ = new ReplaySubject<Action>();
+        flowService = TestBed.inject(FlowService);
+        propertyTableHelperService = TestBed.inject(PropertyTableHelperService);
+        dialog = TestBed.inject(MatDialog);
+        store = TestBed.inject(MockStore);
+        verify = new EventEmitter<VerifyPropertiesRequestContext>();
+        editProcessor = new EventEmitter<UpdateProcessorRequest>();
+        startRequest = new EventEmitter<StartComponentRequest>();
+        stopRequest = new EventEmitter<StopComponentRequest>();
+        enableRequest = new EventEmitter<EnableComponentRequest>();
+        disableRequest = new EventEmitter<DisableComponentRequest>();
+
+        vi.spyOn(dialog, 'open').mockReturnValue({
+            close: vi.fn(),
+            afterClosed: () => {
+                return of();
+            },
+            componentInstance: {
+                ...MockComponent(EditProcessor),
+                verify: verify,
+                editProcessor: editProcessor,
+                startComponentRequest: startRequest,
+                stopComponentRequest: stopRequest,
+                disableComponentRequest: disableRequest,
+                enableComponentRequest: enableRequest
+            }
+        } as unknown as MatDialogRef<EditProcessor>);
+
+        vi.spyOn(flowService, 'getProcessor').mockReturnValue(of(mockData.entity));
+
+        vi.spyOn(propertyTableHelperService, 'getComponentHistory').mockReturnValue(
+            of({ componentHistory: {} } as ComponentHistoryEntity)
+        );
+
+        vi.spyOn(store, 'dispatch');
+    });
+
+    afterEach(() => {
+        if (action$) {
+            action$.complete();
+        }
+    });
+
+    describe('loadProcessGroup error handling', () => {
+        it('dispatches full-screen error on initial load (hasExistingData=false)', async () => {
+            // Arrange selectors
+            store.overrideSelector(flowSelectors.selectHasFlowData, false);
+            store.overrideSelector(selectConnectedStateChanged, false);
+
+            // Arrange service methods
+            (flowService as any).getFlow = vi.fn(() => throwError(() => new HttpErrorResponse({ status: 500 })));
+            (flowService as any).getFlowStatus = vi.fn(() => of({}));
+            (flowService as any).getControllerBulletins = vi.fn(() => of({}));
+            vi.spyOn(TestBed.inject(RegistryService), 'getRegistryClients').mockReturnValueOnce(
+                of({ registries: [] }) as any
+            );
+
+            // Arrange error helper
+            const errorHelper = TestBed.inject(ErrorHelper);
+            const errorAction = FlowActions.flowBannerError({
+                errorContext: { context: 'FLOW', errors: ['e'] } as any
+            });
+            vi.spyOn(errorHelper, 'handleLoadingError').mockReturnValueOnce(errorAction as any);
+
+            // Act
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+            const result = await new Promise((resolve) => effects.loadProcessGroup$.pipe(take(1)).subscribe(resolve));
+
+            // Assert
+            expect(errorHelper.handleLoadingError).toHaveBeenCalledWith(false, expect.any(HttpErrorResponse));
+            expect(result).toEqual(errorAction);
+        });
+
+        it('dispatches snackbar/banner error on refresh (hasExistingData=true)', async () => {
+            // Arrange selectors
+            store.overrideSelector(flowSelectors.selectHasFlowData, true);
+            store.overrideSelector(selectConnectedStateChanged, false);
+
+            // Arrange service methods
+            (flowService as any).getFlow = vi.fn(() => throwError(() => new HttpErrorResponse({ status: 500 })));
+            (flowService as any).getFlowStatus = vi.fn(() => of({}));
+            (flowService as any).getControllerBulletins = vi.fn(() => of({}));
+            vi.spyOn(TestBed.inject(RegistryService), 'getRegistryClients').mockReturnValueOnce(
+                of({ registries: [] }) as any
+            );
+
+            // Arrange error helper
+            const errorHelper = TestBed.inject(ErrorHelper);
+            const errorAction = FlowActions.flowBannerError({
+                errorContext: { context: 'FLOW', errors: ['e'] } as any
+            });
+            vi.spyOn(errorHelper, 'handleLoadingError').mockReturnValueOnce(errorAction as any);
+
+            // Act
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+            const result = await new Promise((resolve) => effects.loadProcessGroup$.pipe(take(1)).subscribe(resolve));
+
+            // Assert
+            expect(errorHelper.handleLoadingError).toHaveBeenCalledWith(true, expect.any(HttpErrorResponse));
+            expect(result).toEqual(errorAction);
+        });
+    });
+
+    describe('#moveToFront', () => {
+        it('calls the flow service to update the component when max index matches request index', async () => {
+            const REQUEST: MoveToFrontRequest = {
+                id: '123',
+                componentType: ComponentType.Connection,
+                zIndex: 0, // 0 is the default value
+                uri: 'irrelevant',
+                revision: {
+                    version: 1
+                }
+            };
+
+            vi.spyOn(flowService, 'updateComponent').mockReturnValue(of({}));
+            vi.spyOn(flowSelectors, 'selectMaxZIndex').mockReturnValue(createSelector(() => 0));
+
+            action$.next(FlowActions.moveToFront({ request: REQUEST }));
+
+            const result = await new Promise((resolve) => effects.moveToFront$.pipe(take(1)).subscribe(resolve));
+
+            expect(result).toEqual(
+                FlowActions.updateComponentSuccess({
+                    response: {
+                        id: REQUEST.id, // same id
+                        type: REQUEST.componentType, // same type
+                        response: {} // response is irrelevant
+                    }
+                })
+            );
+
+            expect(flowService.updateComponent).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    payload: expect.objectContaining({
+                        component: expect.objectContaining({
+                            zIndex: 1 // bump the zIndex up by 1
+                        })
+                    })
+                })
+            );
+        });
+    });
+    describe('#createConnection', () => {
+        it('enriches the call to createConnection with the max z index + 1', async () => {
+            const REQUEST: CreateConnection = {
+                payload: {
+                    revision: { version: 0, clientId: 'client-1' },
+                    component: {
+                        labelIndex: 0,
+                        source: { id: 'source-1', groupId: 'group-1', type: 'FUNNEL' },
+                        destination: { id: 'destination-1', groupId: 'group-1', type: 'FUNNEL' }
+                    }
+                }
+            };
+
+            const MAX_Z_INDEX = 10;
+
+            vi.spyOn(flowService, 'createConnection').mockReturnValue(of({}));
+            vi.spyOn(flowSelectors, 'selectMaxZIndex').mockReturnValue(createSelector(() => MAX_Z_INDEX));
+            store.overrideSelector(selectCurrentProcessGroupId, 'some group id');
+
+            action$.next(FlowActions.createConnection({ request: REQUEST }));
+
+            const result = await new Promise((resolve) => effects.createConnection$.pipe(take(1)).subscribe(resolve));
+
+            expect(result).toEqual(
+                FlowActions.createComponentSuccess({
+                    response: {
+                        type: ComponentType.Connection,
+                        payload: {} // irrelevant
+                    }
+                })
+            );
+
+            expect(flowService.createConnection).toHaveBeenCalledWith(
+                'some group id',
+                expect.objectContaining({
+                    payload: expect.objectContaining({
+                        component: expect.objectContaining({
+                            zIndex: MAX_Z_INDEX + 1 // max z index + 1 is passed to the service
+                        })
+                    })
+                })
+            );
+        });
+    });
+
+    describe('#createLabel', () => {
+        it('enriches the call to createLabel with the max z index + 1', async () => {
+            const MAX_Z_INDEX = 10;
+
+            const REQUEST: CreateComponentRequest = {
+                type: ComponentType.Label,
+                position: { x: 0, y: 0 },
+                revision: { version: 0, clientId: 'client-1' }
+            };
+
+            const CREATE_COMPONENT_RESPONSE = {
+                type: ComponentType.Label,
+                payload: {} // irrelevant
+            } satisfies CreateComponentResponse;
+
+            vi.spyOn(flowService, 'createLabel').mockReturnValue(of(CREATE_COMPONENT_RESPONSE));
+            vi.spyOn(flowSelectors, 'selectMaxZIndex').mockReturnValue(createSelector(() => MAX_Z_INDEX));
+            store.overrideSelector(selectCurrentProcessGroupId, 'some group id');
+
+            action$.next(FlowActions.createLabel({ request: REQUEST }));
+
+            const result = await new Promise((resolve) => effects.createLabel$.pipe(take(1)).subscribe(resolve));
+
+            expect(result).toEqual(
+                FlowActions.createComponentSuccess({
+                    response: {
+                        type: ComponentType.Label,
+                        payload: CREATE_COMPONENT_RESPONSE
+                    }
+                })
+            );
+
+            expect(flowService.createLabel).toHaveBeenCalledWith('some group id', {
+                ...REQUEST,
+                zIndex: MAX_Z_INDEX + 1
+            });
+        });
+    });
+
+    describe('stopSources$', () => {
+        beforeEach(() => {
+            effects = TestBed.inject(FlowEffects);
+        });
+
+        it('should call flowService.stopSources and dispatch stopSourcesSuccess', async () => {
+            vi.spyOn(flowService, 'stopSources').mockReturnValue(
+                of({ id: 'test-group-id', state: 'STOPPED', components: {} })
+            );
+
+            action$.next(FlowActions.stopSources({ request: { id: 'test-group-id' } }));
+
+            const result = await new Promise((resolve) => effects.stopSources$.pipe(take(1)).subscribe(resolve));
+
+            expect(result).toEqual(
+                FlowActions.stopSourcesSuccess({
+                    response: {
+                        type: ComponentType.ProcessGroup,
+                        component: { id: 'test-group-id', state: 'STOPPED' }
+                    }
+                })
+            );
+            expect(flowService.stopSources).toHaveBeenCalledWith({ id: 'test-group-id' });
+        });
+
+        it('should keep overlapping stop sources requests active', async () => {
+            const firstResponse$ = new Subject<StopSourcesResponse>();
+            const secondResponse$ = new Subject<StopSourcesResponse>();
+            vi.spyOn(flowService, 'stopSources').mockImplementation((request) =>
+                request.id === 'first-group-id' ? firstResponse$ : secondResponse$
+            );
+            const resultsPromise = firstValueFrom(effects.stopSources$.pipe(take(2), toArray()));
+
+            action$.next(FlowActions.stopSources({ request: { id: 'first-group-id' } }));
+            action$.next(FlowActions.stopSources({ request: { id: 'second-group-id' } }));
+            secondResponse$.next({ id: 'second-group-id', state: 'STOPPED', components: {} });
+            secondResponse$.complete();
+            firstResponse$.next({ id: 'first-group-id', state: 'STOPPED', components: {} });
+            firstResponse$.complete();
+
+            expect(await resultsPromise).toEqual([
+                FlowActions.stopSourcesSuccess({
+                    response: {
+                        type: ComponentType.ProcessGroup,
+                        component: { id: 'second-group-id', state: 'STOPPED' }
+                    }
+                }),
+                FlowActions.stopSourcesSuccess({
+                    response: {
+                        type: ComponentType.ProcessGroup,
+                        component: { id: 'first-group-id', state: 'STOPPED' }
+                    }
+                })
+            ]);
+            expect(flowService.stopSources).toHaveBeenCalledTimes(2);
+        });
+
+        it('should dispatch flowSnackbarError and not stopSourcesSuccess when stopSources fails', async () => {
+            const errorHelper = TestBed.inject(ErrorHelper);
+            const errorResponse = new HttpErrorResponse({
+                error: 'stop sources failed',
+                status: 409,
+                statusText: 'Conflict'
+            });
+            vi.spyOn(flowService, 'stopSources').mockReturnValue(throwError(() => errorResponse));
+            vi.spyOn(errorHelper, 'getErrorString').mockReturnValue('Formatted error message');
+
+            action$.next(FlowActions.stopSources({ request: { id: 'test-group-id' } }));
+
+            const result = await new Promise((resolve) => effects.stopSources$.pipe(take(1)).subscribe(resolve));
+
+            expect(result).toEqual(FlowActions.flowSnackbarError({ error: 'Formatted error message' }));
+            expect((result as Action).type).not.toBe(FlowActions.stopSourcesSuccess.type);
+            expect(flowService.stopSources).toHaveBeenCalledWith({ id: 'test-group-id' });
+        });
+    });
+
+    describe('stopSourcesCurrentProcessGroupSuccess$', () => {
+        beforeEach(() => {
+            effects = TestBed.inject(FlowEffects);
+        });
+
+        it('should dispatch reloadFlow when sources are stopped in the current process group', async () => {
+            store.overrideSelector(selectCurrentProcessGroupId, 'test-group-id');
+            store.refreshState();
+
+            action$.next(
+                FlowActions.stopSourcesSuccess({
+                    response: {
+                        type: ComponentType.ProcessGroup,
+                        component: { id: 'test-group-id', state: 'STOPPED' }
+                    }
+                })
+            );
+
+            const result = await new Promise((resolve) =>
+                effects.stopSourcesCurrentProcessGroupSuccess$.pipe(take(1)).subscribe(resolve)
+            );
+
+            expect(result).toEqual(FlowActions.reloadFlow());
+        });
+    });
+
+    describe('stopSourcesSuccess$', () => {
+        beforeEach(() => {
+            effects = TestBed.inject(FlowEffects);
+        });
+
+        it('should dispatch loadChildProcessGroup when sources are stopped in a child process group', async () => {
+            store.overrideSelector(selectCurrentProcessGroupId, 'current-pg');
+            store.refreshState();
+
+            action$.next(
+                FlowActions.stopSourcesSuccess({
+                    response: {
+                        type: ComponentType.ProcessGroup,
+                        component: { id: 'pg-child', state: 'STOPPED' }
+                    }
+                })
+            );
+
+            const result = await new Promise((resolve) => effects.stopSourcesSuccess$.pipe(take(1)).subscribe(resolve));
+
+            expect(result).toEqual(
+                FlowActions.loadChildProcessGroup({
+                    request: {
+                        id: 'pg-child'
+                    }
+                })
+            );
+        });
+    });
+
+    describe('clearBulletinsForProcessGroup$', () => {
+        beforeEach(() => {
+            effects = TestBed.inject(FlowEffects);
+        });
+
+        it('should call flowService.clearBulletinsForProcessGroup and dispatch success action', async () => {
+            const request = {
+                processGroupId: 'test-group-id',
+                fromTimestamp: '2023-01-01T12:00:00.000Z',
+                components: ['component-1', 'component-2']
+            };
+
+            const mockResponse = {
+                bulletinsCleared: 10
+            };
+
+            vi.spyOn(flowService, 'clearBulletinsForProcessGroup').mockReturnValue(of(mockResponse));
+
+            const action = FlowActions.clearBulletinsForProcessGroup({ request });
+            action$.next(action);
+
+            const result = await new Promise((resolve) =>
+                effects.clearBulletinsForProcessGroup$.pipe(take(1)).subscribe(resolve)
+            );
+
+            expect(result).toEqual(
+                FlowActions.clearBulletinsForProcessGroupSuccess({
+                    response: {
+                        processGroupId: 'test-group-id',
+                        bulletinsCleared: 10
+                    }
+                })
+            );
+            expect(flowService.clearBulletinsForProcessGroup).toHaveBeenCalledWith(request);
+        });
+    });
+
+    describe('clearBulletinsForProcessGroupSuccess$', () => {
+        beforeEach(() => {
+            effects = TestBed.inject(FlowEffects);
+        });
+
+        it('should dispatch reloadFlow when clearing bulletins for the currently viewed process group', async () => {
+            const currentGroupId = 'current-group-id';
+            store.overrideSelector(selectCurrentProcessGroupId, currentGroupId);
+            store.refreshState();
+
+            const response = {
+                processGroupId: currentGroupId,
+                bulletinsCleared: 5
+            };
+
+            const action = FlowActions.clearBulletinsForProcessGroupSuccess({ response });
+            action$.next(action);
+
+            const result = await new Promise((resolve) =>
+                effects.clearBulletinsForProcessGroupSuccess$.pipe(take(1)).subscribe(resolve)
+            );
+
+            expect(result).toEqual(FlowActions.reloadFlow());
+        });
+
+        it('should dispatch loadChildProcessGroup when clearing bulletins for a child process group', async () => {
+            const currentGroupId = 'current-group-id';
+            const childGroupId = 'child-group-id';
+            store.overrideSelector(selectCurrentProcessGroupId, currentGroupId);
+            store.refreshState();
+
+            const response = {
+                processGroupId: childGroupId,
+                bulletinsCleared: 3
+            };
+
+            const action = FlowActions.clearBulletinsForProcessGroupSuccess({ response });
+            action$.next(action);
+
+            const result = await new Promise((resolve) =>
+                effects.clearBulletinsForProcessGroupSuccess$.pipe(take(1)).subscribe(resolve)
+            );
+
+            expect(result).toEqual(
+                FlowActions.loadChildProcessGroup({
+                    request: { id: childGroupId }
+                })
+            );
+        });
+    });
+
+    describe('refreshAfterQueueEmptied$', () => {
+        it('should dispatch loadConnection when the queueEmptied originates from the flow designer with a connectionId', async () => {
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-current');
+            store.refreshState();
+
+            action$.next(
+                EmptyQueueActions.queueEmptied({
+                    connectionId: 'conn-1',
+                    processGroupId: null,
+                    source: 'flow-designer'
+                })
+            );
+
+            const result = await firstValueFrom(effects.refreshAfterQueueEmptied$.pipe(take(1)));
+
+            expect(result).toEqual(FlowActions.loadConnection({ id: 'conn-1' }));
+        });
+
+        it('should dispatch loadProcessGroup when emptying queues for the currently viewed process group', async () => {
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-current');
+            store.refreshState();
+
+            action$.next(
+                EmptyQueueActions.queueEmptied({
+                    connectionId: null,
+                    processGroupId: 'pg-current',
+                    source: 'flow-designer'
+                })
+            );
+
+            const result = await firstValueFrom(effects.refreshAfterQueueEmptied$.pipe(take(1)));
+
+            expect(result).toEqual(
+                FlowActions.loadProcessGroup({
+                    request: { id: 'pg-current', transitionRequired: false }
+                })
+            );
+        });
+
+        it('should dispatch loadChildProcessGroup when emptying queues for a non-current process group', async () => {
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-current');
+            store.refreshState();
+
+            action$.next(
+                EmptyQueueActions.queueEmptied({
+                    connectionId: null,
+                    processGroupId: 'pg-child',
+                    source: 'flow-designer'
+                })
+            );
+
+            const result = await firstValueFrom(effects.refreshAfterQueueEmptied$.pipe(take(1)));
+
+            expect(result).toEqual(FlowActions.loadChildProcessGroup({ request: { id: 'pg-child' } }));
+        });
+
+        it('should ignore queueEmptied actions originating from other sources', async () => {
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-current');
+            store.refreshState();
+
+            const emissions: Action[] = [];
+            const subscription = effects.refreshAfterQueueEmptied$.subscribe((action) => emissions.push(action));
+
+            action$.next(
+                EmptyQueueActions.queueEmptied({
+                    connectionId: 'conn-1',
+                    processGroupId: null,
+                    source: 'connector-canvas'
+                })
+            );
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+            subscription.unsubscribe();
+
+            expect(emissions).toEqual([]);
+        });
+    });
+
+    describe('loadProcessGroup$ — position sanitization (NIFI-16025)', () => {
+        function makeEntity(id: string, x: number, y: number): any {
+            return {
+                id,
+                permissions: { canRead: true, canWrite: true },
+                revision: { version: 0 },
+                position: { x, y },
+                component: {}
+            };
+        }
+
+        function makeConnection(
+            id: string,
+            bendX: number,
+            bendY: number,
+            componentBendX = bendX,
+            componentBendY = bendY
+        ): any {
+            return {
+                id,
+                permissions: { canRead: true, canWrite: true },
+                revision: { version: 0 },
+                bends: [{ x: bendX, y: bendY }],
+                component: { bends: [{ x: componentBendX, y: componentBendY }] }
+            };
+        }
+
+        function buildFlowResponse(overrides: Partial<any> = {}): any {
+            return {
+                processGroupFlow: {
+                    id: 'pg-1',
+                    parentGroupId: null,
+                    breadcrumb: {},
+                    flow: {
+                        processors: overrides['processors'] ?? [],
+                        processGroups: [],
+                        remoteProcessGroups: [],
+                        inputPorts: [],
+                        outputPorts: [],
+                        labels: [],
+                        funnels: [],
+                        connections: overrides['connections'] ?? []
+                    }
+                }
+            };
+        }
+
+        beforeEach(() => {
+            store.overrideSelector(flowSelectors.selectHasFlowData, false);
+            store.overrideSelector(selectConnectedStateChanged, false);
+            (flowService as any).getFlowStatus = vi.fn(() => of({}));
+            (flowService as any).getControllerBulletins = vi.fn(() => of({}));
+            vi.spyOn(TestBed.inject(RegistryService), 'getRegistryClients').mockReturnValue(
+                of({ registries: [] }) as any
+            );
+        });
+
+        it('passes in-bounds positions through unchanged', async () => {
+            const entity = makeEntity('p-1', 100, 200);
+            (flowService as any).getFlow = vi.fn(() => of(buildFlowResponse({ processors: [entity] })));
+
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+
+            const result: any = await firstValueFrom(effects.loadProcessGroup$.pipe(take(1)));
+            const processor = result.response.flow.processGroupFlow.flow.processors[0];
+            expect(processor.position).toEqual({ x: 100, y: 200 });
+        });
+
+        it('clamps catastrophic-finite coordinates to (0, 0)', async () => {
+            const entity = makeEntity('p-2', 7.490388061926315e307, 0);
+            (flowService as any).getFlow = vi.fn(() => of(buildFlowResponse({ processors: [entity] })));
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+
+            const result: any = await firstValueFrom(effects.loadProcessGroup$.pipe(take(1)));
+            const processor = result.response.flow.processGroupFlow.flow.processors[0];
+            expect(processor.position).toEqual({ x: 0, y: 0 });
+            expect(warnSpy).toHaveBeenCalled();
+            warnSpy.mockRestore();
+        });
+
+        it('does not sanitize a nonexistent connection position', async () => {
+            const connection = makeConnection('conn-valid', 100, 200, 300, 400);
+            (flowService as any).getFlow = vi.fn(() => of(buildFlowResponse({ connections: [connection] })));
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+
+            const result: any = await firstValueFrom(effects.loadProcessGroup$.pipe(take(1)));
+            const sanitizedConnection = result.response.flow.processGroupFlow.flow.connections[0];
+            expect(sanitizedConnection).not.toHaveProperty('position');
+            expect(sanitizedConnection.bends[0]).toEqual({ x: 100, y: 200 });
+            expect(sanitizedConnection.component.bends[0]).toEqual({ x: 300, y: 400 });
+            expect(warnSpy).not.toHaveBeenCalled();
+            warnSpy.mockRestore();
+        });
+
+        it('clamps top-level and nested catastrophic-finite connection bends to (0, 0)', async () => {
+            const connection = {
+                ...makeConnection('conn-1', 9e307, 0, 0, 8e307),
+                position: { x: 7e307, y: 0 }
+            };
+            (flowService as any).getFlow = vi.fn(() => of(buildFlowResponse({ connections: [connection] })));
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+
+            const result: any = await firstValueFrom(effects.loadProcessGroup$.pipe(take(1)));
+            const sanitizedConnection = result.response.flow.processGroupFlow.flow.connections[0];
+            expect(sanitizedConnection.bends[0]).toEqual({ x: 0, y: 0 });
+            expect(sanitizedConnection.component.bends[0]).toEqual({ x: 0, y: 0 });
+            expect(sanitizedConnection.position).toEqual({ x: 7e307, y: 0 });
+            expect(warnSpy).toHaveBeenCalledTimes(1);
+            expect(warnSpy).toHaveBeenCalledWith(
+                expect.stringContaining('Component Connection bend conn-1:bend:0 has an out-of-range position'),
+                { x: 9e307, y: 0 },
+                expect.stringContaining('falling back to (0, 0)')
+            );
+            warnSpy.mockRestore();
+        });
+
+        it('warns at most once per component id across repeated loadProcessGroup calls', async () => {
+            const entity = makeEntity('p-dup', 7.490388061926315e307, 0);
+            (flowService as any).getFlow = vi.fn(() => of(buildFlowResponse({ processors: [entity] })));
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+            await firstValueFrom(effects.loadProcessGroup$.pipe(take(1)));
+
+            action$.next(FlowActions.loadProcessGroup({ request: { id: 'pg-1', transitionRequired: false } }));
+            await firstValueFrom(effects.loadProcessGroup$.pipe(take(1)));
+
+            expect(warnSpy).toHaveBeenCalledTimes(1);
+            warnSpy.mockRestore();
+        });
+    });
+
+    describe('navigateToProvenanceForComponent$', () => {
+        let router: Router;
+
+        beforeEach(() => {
+            router = TestBed.inject(Router);
+            vi.spyOn(router, 'navigate').mockImplementation(() => Promise.resolve(true));
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-123');
+            store.refreshState();
+        });
+
+        it('should navigate to provenance with Processor type in back navigation route and context', () => {
+            effects.navigateToProvenanceForComponent$.subscribe();
+
+            action$.next(
+                FlowActions.navigateToProvenanceForComponent({
+                    id: 'comp-1',
+                    componentType: ComponentType.Processor
+                })
+            );
+
+            expect(router.navigate).toHaveBeenCalledWith(['/provenance'], {
+                queryParams: { componentId: 'comp-1' },
+                state: {
+                    backNavigation: {
+                        route: ['/process-groups', 'pg-123', ComponentType.Processor, 'comp-1'],
+                        routeBoundary: ['/provenance'],
+                        context: 'Processor'
+                    }
+                }
+            });
+        });
+
+        it('should navigate to provenance with Funnel type in back navigation route and context', () => {
+            effects.navigateToProvenanceForComponent$.subscribe();
+
+            action$.next(
+                FlowActions.navigateToProvenanceForComponent({
+                    id: 'funnel-1',
+                    componentType: ComponentType.Funnel
+                })
+            );
+
+            expect(router.navigate).toHaveBeenCalledWith(['/provenance'], {
+                queryParams: { componentId: 'funnel-1' },
+                state: {
+                    backNavigation: {
+                        route: ['/process-groups', 'pg-123', ComponentType.Funnel, 'funnel-1'],
+                        routeBoundary: ['/provenance'],
+                        context: 'Funnel'
+                    }
+                }
+            });
+        });
+
+        it('should navigate to provenance with InputPort type in back navigation route and context', () => {
+            effects.navigateToProvenanceForComponent$.subscribe();
+
+            action$.next(
+                FlowActions.navigateToProvenanceForComponent({
+                    id: 'port-1',
+                    componentType: ComponentType.InputPort
+                })
+            );
+
+            expect(router.navigate).toHaveBeenCalledWith(['/provenance'], {
+                queryParams: { componentId: 'port-1' },
+                state: {
+                    backNavigation: {
+                        route: ['/process-groups', 'pg-123', ComponentType.InputPort, 'port-1'],
+                        routeBoundary: ['/provenance'],
+                        context: 'Input Port'
+                    }
+                }
+            });
+        });
+
+        it('should navigate to provenance with OutputPort type in back navigation route and context', () => {
+            effects.navigateToProvenanceForComponent$.subscribe();
+
+            action$.next(
+                FlowActions.navigateToProvenanceForComponent({
+                    id: 'port-2',
+                    componentType: ComponentType.OutputPort
+                })
+            );
+
+            expect(router.navigate).toHaveBeenCalledWith(['/provenance'], {
+                queryParams: { componentId: 'port-2' },
+                state: {
+                    backNavigation: {
+                        route: ['/process-groups', 'pg-123', ComponentType.OutputPort, 'port-2'],
+                        routeBoundary: ['/provenance'],
+                        context: 'Output Port'
+                    }
+                }
+            });
+        });
+    });
+
+    describe('openProcessorBacklogDialog$', () => {
+        const PROCESSOR_ID = 'proc-1';
+
+        it('submits a backlog request and opens the dialog with the resulting request entity', () => {
+            const requestEntity: BacklogRequestEntity = {
+                request: {
+                    requestId: 'req-1',
+                    uri: `https://localhost:4200/nifi-api/processors/${PROCESSOR_ID}/backlog-requests/req-1`,
+                    componentId: PROCESSOR_ID,
+                    complete: false,
+                    percentCompleted: 0
+                }
+            };
+
+            vi.spyOn(flowService, 'submitProcessorBacklogRequest').mockReturnValue(of(requestEntity));
+
+            effects.openProcessorBacklogDialog$.subscribe();
+            action$.next(FlowActions.openProcessorBacklogDialog({ id: PROCESSOR_ID }));
+
+            expect(flowService.submitProcessorBacklogRequest).toHaveBeenCalledWith(PROCESSOR_ID);
+            expect(dialog.open).toHaveBeenCalledWith(
+                ProcessorBacklogDialog,
+                expect.objectContaining({
+                    minWidth: '36rem',
+                    maxWidth: '36rem',
+                    width: '36rem',
+                    data: { processorId: PROCESSOR_ID, requestEntity }
+                })
+            );
+        });
+
+        it('opens the dialog with an error message when the submit request fails', () => {
+            const errorHelper = TestBed.inject(ErrorHelper);
+            vi.spyOn(errorHelper, 'getErrorString').mockReturnValue('submit failed');
+            vi.spyOn(flowService, 'submitProcessorBacklogRequest').mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 500 }))
+            );
+
+            effects.openProcessorBacklogDialog$.subscribe();
+            action$.next(FlowActions.openProcessorBacklogDialog({ id: PROCESSOR_ID }));
+
+            expect(dialog.open).toHaveBeenCalledWith(
+                ProcessorBacklogDialog,
+                expect.objectContaining({
+                    data: { processorId: PROCESSOR_ID, errorMessage: 'submit failed' }
+                })
+            );
+        });
+    });
+
+    describe('openEditProcessorDialog$ goToParameter', () => {
+        const PARAMETER_CONTEXT_ID = 'ctx-1';
+        const PROCESSOR_ID = 'd90ac264-018b-1000-1827-a86c8156fd9e';
+        const EXPECTED_COMMANDS = ['/parameter-contexts', PARAMETER_CONTEXT_ID, 'edit'];
+        const EXPECTED_BACK_NAVIGATION = {
+            route: ['/process-groups', 'pg-123', ComponentType.Processor, PROCESSOR_ID, 'edit'],
+            routeBoundary: ['/parameter-contexts'],
+            context: 'Processor'
+        };
+
+        let router: Router;
+        let editProcessorInstance: any;
+        let saveChangesInstance: { yes: EventEmitter<any>; no: EventEmitter<any> };
+
+        // Opens the edit dialog and returns the goToParameter callback the effect assigned to it.
+        const openDialogAndGetGoToParameter = (dirty: boolean): ((parameterValue: string) => void) => {
+            editProcessorInstance = {
+                ...MockComponent(EditProcessor),
+                verify,
+                editProcessor,
+                startComponentRequest: startRequest,
+                stopComponentRequest: stopRequest,
+                disableComponentRequest: disableRequest,
+                enableComponentRequest: enableRequest,
+                editProcessorForm: { dirty },
+                submitForm: vi.fn()
+            };
+            saveChangesInstance = { yes: new EventEmitter<any>(), no: new EventEmitter<any>() };
+
+            vi.spyOn(dialog, 'open').mockImplementation((component: any) => {
+                if (component === YesNoDialog) {
+                    return {
+                        componentInstance: saveChangesInstance,
+                        afterClosed: () => of()
+                    } as unknown as MatDialogRef<any>;
+                }
+
+                return {
+                    close: vi.fn(),
+                    afterClosed: () => of(),
+                    componentInstance: editProcessorInstance
+                } as unknown as MatDialogRef<EditProcessor>;
+            });
+
+            effects.openEditProcessorDialog$.subscribe();
+            action$.next(
+                FlowActions.openEditProcessorDialog({
+                    request: {
+                        type: mockData.type,
+                        uri: mockData.uri,
+                        entity: mockData.entity
+                    } as any
+                })
+            );
+
+            return editProcessorInstance.goToParameter;
+        };
+
+        beforeEach(() => {
+            router = TestBed.inject(Router);
+            vi.spyOn(router, 'navigate').mockImplementation(() => Promise.resolve(true));
+
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-123');
+            store.overrideSelector(flowSelectors.selectCurrentParameterContext, {
+                id: PARAMETER_CONTEXT_ID,
+                permissions: { canRead: true, canWrite: true }
+            } as any);
+            store.refreshState();
+
+            vi.spyOn(TestBed.inject(ParameterContextService), 'getParameterContext').mockReturnValue(
+                of({ id: PARAMETER_CONTEXT_ID, component: { name: 'ctx' } }) as any
+            );
+        });
+
+        it('navigates to the parameter context highlighting the referenced parameter when the form is pristine', () => {
+            const goToParameter = openDialogAndGetGoToParameter(false);
+
+            goToParameter('#{my-param}');
+
+            expect(router.navigate).toHaveBeenCalledWith(EXPECTED_COMMANDS, {
+                state: {
+                    backNavigation: EXPECTED_BACK_NAVIGATION,
+                    highlightedParameterName: 'my-param'
+                }
+            });
+        });
+
+        it('navigates without a highlight when the property value contains no parameter reference', () => {
+            const goToParameter = openDialogAndGetGoToParameter(false);
+
+            goToParameter('a literal value');
+
+            const state = vi.mocked(router.navigate).mock.calls[0][1]?.state ?? {};
+            expect(Object.keys(state)).toEqual(['backNavigation']);
+        });
+
+        it('submits the form with the highlight when the form is dirty and changes are saved', () => {
+            const goToParameter = openDialogAndGetGoToParameter(true);
+
+            goToParameter('#{my-param}');
+            saveChangesInstance.yes.emit();
+
+            expect(editProcessorInstance.submitForm).toHaveBeenCalledWith(EXPECTED_COMMANDS, ['/parameter-contexts'], {
+                highlightedParameterName: 'my-param'
+            });
+            expect(router.navigate).not.toHaveBeenCalled();
+        });
+
+        it('navigates with the highlight when the form is dirty and changes are discarded', () => {
+            const goToParameter = openDialogAndGetGoToParameter(true);
+
+            goToParameter('#{my-param}');
+            saveChangesInstance.no.emit();
+
+            expect(editProcessorInstance.submitForm).not.toHaveBeenCalled();
+            expect(router.navigate).toHaveBeenCalledWith(EXPECTED_COMMANDS, {
+                state: {
+                    backNavigation: EXPECTED_BACK_NAVIGATION,
+                    highlightedParameterName: 'my-param'
+                }
+            });
+        });
+    });
+
+    describe('openEditProcessorDialog$ goToService', () => {
+        let router: Router;
+
+        // Opens the edit dialog and returns the goToService callback the effect assigned to it.
+        const openDialogAndGetGoToService = (referencedService: object): ((serviceId: string) => void) => {
+            const editProcessorInstance: any = {
+                ...MockComponent(EditProcessor),
+                verify,
+                editProcessor,
+                startComponentRequest: startRequest,
+                stopComponentRequest: stopRequest,
+                disableComponentRequest: disableRequest,
+                enableComponentRequest: enableRequest,
+                editProcessorForm: { dirty: false }
+            };
+            vi.spyOn(dialog, 'open').mockReturnValue({
+                close: vi.fn(),
+                afterClosed: () => of(),
+                componentInstance: editProcessorInstance
+            } as unknown as MatDialogRef<EditProcessor>);
+            vi.spyOn(TestBed.inject(ControllerServiceService), 'getControllerService').mockReturnValue(
+                of(referencedService) as any
+            );
+
+            effects.openEditProcessorDialog$.subscribe();
+            action$.next(
+                FlowActions.openEditProcessorDialog({
+                    request: {
+                        type: mockData.type,
+                        uri: mockData.uri,
+                        entity: mockData.entity
+                    } as any
+                })
+            );
+
+            return editProcessorInstance.goToService;
+        };
+
+        beforeEach(() => {
+            router = TestBed.inject(Router);
+            vi.spyOn(router, 'navigate').mockImplementation(() => Promise.resolve(true));
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-123');
+            store.overrideSelector(flowSelectors.selectCurrentParameterContext, null);
+            store.refreshState();
+        });
+
+        it('navigates to the referenced Controller Service in its parent group', () => {
+            const goToService = openDialogAndGetGoToService({ id: 'svc-2', parentGroupId: 'pg-x' });
+
+            goToService('svc-2');
+
+            expect(router.navigate).toHaveBeenCalledWith(['/process-groups', 'pg-x', 'controller-services', 'svc-2'], {
+                state: {
+                    backNavigation: {
+                        route: ['/process-groups', 'pg-123', ComponentType.Processor, mockData.entity.id, 'edit'],
+                        routeBoundary: ['/process-groups', 'pg-x', 'controller-services'],
+                        context: 'Processor'
+                    }
+                }
+            });
+        });
+
+        it('shows a banner instead of navigating when the referenced Controller Service has no parent group', () => {
+            const goToService = openDialogAndGetGoToService({
+                id: 'svc-2',
+                component: { id: 'svc-2', parentGroupId: 'pg-x' }
+            });
+
+            goToService('svc-2');
+
+            expect(store.dispatch).toHaveBeenCalledWith(
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Unable to determine the Controller Service parent group.'],
+                        context: ErrorContextKey.PROCESSOR
+                    }
+                })
+            );
+            expect(router.navigate).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('updateProcessorSuccess$', () => {
+        let router: Router;
+
+        beforeEach(() => {
+            router = TestBed.inject(Router);
+            vi.spyOn(router, 'navigate').mockImplementation(() => Promise.resolve(true));
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-123');
+            store.refreshState();
+        });
+
+        it('should include postUpdateNavigationState in router navigate state when postUpdateNavigationState is provided', () => {
+            const response: UpdateProcessorResponse = {
+                id: 'proc-1',
+                type: ComponentType.Processor,
+                postUpdateNavigation: ['/parameter-contexts', 'ctx-1', 'edit'],
+                postUpdateNavigationBoundary: ['/parameter-contexts'],
+                postUpdateNavigationState: { highlightedParameterName: 'my-param' },
+                response: {}
+            };
+
+            effects.updateProcessorSuccess$.subscribe();
+            action$.next(FlowActions.updateProcessorSuccess({ response }));
+
+            expect(router.navigate).toHaveBeenCalledWith(['/parameter-contexts', 'ctx-1', 'edit'], {
+                state: {
+                    backNavigation: {
+                        route: ['/process-groups', 'pg-123', ComponentType.Processor, 'proc-1', 'edit'],
+                        routeBoundary: ['/parameter-contexts'],
+                        context: 'Processor'
+                    },
+                    highlightedParameterName: 'my-param'
+                }
+            });
+        });
+
+        it('should omit postUpdateNavigationState keys from router navigate state when postUpdateNavigationState is absent', () => {
+            const response: UpdateProcessorResponse = {
+                id: 'proc-2',
+                type: ComponentType.Processor,
+                postUpdateNavigation: ['/parameter-contexts', 'ctx-2', 'edit'],
+                postUpdateNavigationBoundary: ['/parameter-contexts'],
+                response: {}
+            };
+
+            effects.updateProcessorSuccess$.subscribe();
+            action$.next(FlowActions.updateProcessorSuccess({ response }));
+
+            expect(router.navigate).toHaveBeenCalledTimes(1);
+            expect(vi.mocked(router.navigate).mock.calls[0][0]).toEqual(['/parameter-contexts', 'ctx-2', 'edit']);
+
+            // Object.keys rather than toHaveBeenCalledWith: argument matching treats an absent key and an
+            // explicit undefined as equal, so it cannot distinguish omission from highlightedParameterName: undefined.
+            const state = vi.mocked(router.navigate).mock.calls[0][1]?.state ?? {};
+            expect(Object.keys(state)).toEqual(['backNavigation']);
+            expect(state['backNavigation']).toEqual({
+                route: ['/process-groups', 'pg-123', ComponentType.Processor, 'proc-2', 'edit'],
+                routeBoundary: ['/parameter-contexts'],
+                context: 'Processor'
+            });
+        });
+    });
+
+    describe('openNewConnectionDialog$', () => {
+        const createFunnelEntity = (id: string): FunnelEntity => ({
+            id,
+            uri: `https://localhost:4200/nifi-api/funnels/${id}`,
+            revision: { version: 0 },
+            permissions: { canRead: true, canWrite: true },
+            position: { x: 0, y: 0 },
+            component: { id, position: { x: 0, y: 0 } }
+        });
+        const createPortEntity = (id: string, portType: 'INPUT_PORT' | 'OUTPUT_PORT'): PortEntity => ({
+            id,
+            uri: `https://localhost:4200/nifi-api/${portType === 'INPUT_PORT' ? 'input-ports' : 'output-ports'}/${id}`,
+            revision: { version: 0 },
+            permissions: { canRead: true, canWrite: true },
+            operatePermissions: { canRead: true, canWrite: true },
+            position: { x: 0, y: 0 },
+            portType,
+            component: {
+                id,
+                position: { x: 0, y: 0 },
+                state: 'STOPPED',
+                type: portType,
+                portFunction: 'STANDARD',
+                concurrentlySchedulableTaskCount: 1,
+                name: id
+            }
+        });
+        const request: CreateConnectionRequest = {
+            source: {
+                id: 'src',
+                componentType: ComponentType.Funnel,
+                entity: createFunnelEntity('src')
+            },
+            destination: {
+                id: 'dst',
+                componentType: ComponentType.Funnel,
+                entity: createFunnelEntity('dst')
+            }
+        };
+
+        it('assigns dialog inputs and dispatches createConnection from the dialog output', async () => {
+            const afterClosed = new Subject<void>();
+            const createConnection = new EventEmitter<CreateConnection>();
+            const componentInstance: {
+                createConnection: EventEmitter<CreateConnection>;
+                saving$: Observable<boolean>;
+                breadcrumbs$: Observable<unknown>;
+                availablePrioritizers$: Observable<DocumentedType[]>;
+                getChildOutputPorts: (groupId: string) => Observable<PortEntity[]>;
+                getChildInputPorts: (groupId: string) => Observable<PortEntity[]>;
+            } = {
+                createConnection,
+                saving$: of(true),
+                breadcrumbs$: of(null),
+                availablePrioritizers$: of([]),
+                getChildOutputPorts: () => of([]),
+                getChildInputPorts: () => of([])
+            };
+            vi.spyOn(dialog, 'open').mockReturnValue({
+                componentInstance,
+                afterClosed: () => afterClosed.asObservable()
+            } as unknown as MatDialogRef<unknown>);
+            vi.spyOn(flowService, 'getProcessGroup').mockReturnValue(
+                of({
+                    component: {
+                        defaultFlowFileExpiration: '0 sec',
+                        defaultBackPressureObjectThreshold: 10000,
+                        defaultBackPressureDataSizeThreshold: '1 GB'
+                    }
+                })
+            );
+            const outputPorts = [createPortEntity('out-1', 'OUTPUT_PORT')];
+            const inputPorts = [createPortEntity('in-1', 'INPUT_PORT')];
+            vi.spyOn(flowService, 'getFlow').mockReturnValue(
+                of({
+                    processGroupFlow: {
+                        flow: {
+                            outputPorts,
+                            inputPorts
+                        }
+                    }
+                })
+            );
+            const prioritizers = [{ type: 'org.apache.nifi.prioritizer.FirstInFirstOutPrioritizer' } as DocumentedType];
+            store.overrideSelector(selectCurrentProcessGroupId, 'pg-1');
+            store.overrideSelector(selectPrioritizerTypes, prioritizers);
+            store.refreshState();
+
+            effects.openNewConnectionDialog$.subscribe();
+            action$.next(FlowActions.openNewConnectionDialog({ request }));
+
+            expect(await firstValueFrom(componentInstance.saving$)).toBe(false);
+            expect(await firstValueFrom(componentInstance.breadcrumbs$)).toEqual(
+                fromFlow.initialState.flow.processGroupFlow.breadcrumb
+            );
+            expect(await firstValueFrom(componentInstance.availablePrioritizers$)).toEqual(prioritizers);
+            expect(await firstValueFrom(componentInstance.getChildOutputPorts('child-1'))).toEqual(outputPorts);
+            expect(await firstValueFrom(componentInstance.getChildInputPorts('child-1'))).toEqual(inputPorts);
+            expect(flowService.getFlow).toHaveBeenCalledWith('child-1');
+
+            const payload: CreateConnection = {
+                payload: {
+                    revision: { version: 0, clientId: 'client-1' },
+                    component: {
+                        labelIndex: 0,
+                        name: '',
+                        source: { id: 'src', groupId: 'pg-1', type: 'FUNNEL' },
+                        destination: { id: 'dst', groupId: 'pg-1', type: 'FUNNEL' }
+                    }
+                }
+            };
+            createConnection.emit(payload);
+
+            expect(store.dispatch).toHaveBeenCalledWith(FlowActions.createConnection({ request: payload }));
+        });
+
+        it('removes the temporary edge when the dialog closes', () => {
+            const afterClosed = new Subject<void>();
+            vi.spyOn(dialog, 'open').mockReturnValue({
+                componentInstance: { createConnection: new EventEmitter<CreateConnection>() },
+                afterClosed: () => afterClosed.asObservable()
+            } as unknown as MatDialogRef<unknown>);
+            vi.spyOn(flowService, 'getProcessGroup').mockReturnValue(
+                of({
+                    component: {
+                        defaultFlowFileExpiration: '0 sec',
+                        defaultBackPressureObjectThreshold: 10000,
+                        defaultBackPressureDataSizeThreshold: '1 GB'
+                    }
+                })
+            );
+            const canvasUtils = TestBed.inject(CanvasUtils);
+            vi.spyOn(canvasUtils, 'removeTempEdge');
+
+            effects.openNewConnectionDialog$.subscribe();
+            action$.next(FlowActions.openNewConnectionDialog({ request }));
+            afterClosed.next();
+
+            expect(canvasUtils.removeTempEdge).toHaveBeenCalled();
+        });
+
+        it('removes the temporary edge when process group defaults fail to load', () => {
+            vi.spyOn(flowService, 'getProcessGroup').mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 500 }))
+            );
+            const canvasUtils = TestBed.inject(CanvasUtils);
+            vi.spyOn(canvasUtils, 'removeTempEdge');
+
+            effects.openNewConnectionDialog$.subscribe({ error: () => undefined });
+            action$.next(FlowActions.openNewConnectionDialog({ request }));
+
+            expect(canvasUtils.removeTempEdge).toHaveBeenCalled();
+        });
+    });
+
+    describe('create dialog outputs', () => {
+        const componentRequest: CreateComponentRequest = {
+            type: ComponentType.Processor,
+            position: { x: 0, y: 0 },
+            revision: { version: 0, clientId: 'client-1' }
+        };
+
+        type DialogOutputEmitters<TOutputs extends Record<string, unknown>> = {
+            [Key in keyof TOutputs]: EventEmitter<TOutputs[Key]>;
+        };
+
+        function openWith<TOutputs extends Record<string, unknown>>(
+            outputs: DialogOutputEmitters<TOutputs>
+        ): {
+            componentInstance: Record<string, unknown>;
+            afterClosed: Subject<void>;
+        } {
+            const afterClosed = new Subject<void>();
+            const componentInstance: Record<string, unknown> = { ...outputs };
+            vi.spyOn(dialog, 'open').mockReturnValue({
+                componentInstance,
+                afterClosed: () => afterClosed.asObservable()
+            } as unknown as MatDialogRef<unknown>);
+            return { componentInstance, afterClosed };
+        }
+
+        describe('openNewProcessorDialog$', () => {
+            it('assigns processor inputs, dispatches createProcessor, and clears dragging on close', async () => {
+                const processorTypes = [
+                    { type: 'org.apache.nifi.processors.attributes.UpdateAttribute' } as DocumentedType
+                ];
+                const loadingStatus: ExtensionTypesLoadingStatus = 'success';
+                store.overrideSelector(selectProcessorTypes, processorTypes);
+                store.overrideSelector(selectExtensionTypesLoadingStatus, loadingStatus);
+                store.refreshState();
+
+                const createProcessor = new EventEmitter<CreateProcessorRequest>();
+                const { componentInstance, afterClosed } = openWith({ createProcessor });
+
+                effects.openNewProcessorDialog$.subscribe();
+                action$.next(FlowActions.openNewProcessorDialog({ request: componentRequest }));
+
+                expect(await firstValueFrom(componentInstance['saving$'] as Observable<boolean>)).toBe(false);
+                expect(
+                    await firstValueFrom(componentInstance['processorTypes$'] as Observable<DocumentedType[]>)
+                ).toEqual(processorTypes);
+                expect(
+                    await firstValueFrom(
+                        componentInstance['processorTypesLoadingStatus$'] as Observable<ExtensionTypesLoadingStatus>
+                    )
+                ).toBe(loadingStatus);
+
+                const request: CreateProcessorRequest = {
+                    ...componentRequest,
+                    processorType: processorTypes[0].type,
+                    processorBundle: {
+                        group: 'org.apache.nifi',
+                        artifact: 'nifi-update-attribute-nar',
+                        version: '2.0.0'
+                    }
+                };
+                createProcessor.emit(request);
+                afterClosed.next();
+
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.createProcessor({ request }));
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+        });
+
+        describe('openNewRemoteProcessGroupDialog$', () => {
+            it('dispatches createRemoteProcessGroup and clears dragging on close', async () => {
+                const createRemoteProcessGroup = new EventEmitter<CreateRemoteProcessGroupRequest>();
+                const { componentInstance, afterClosed } = openWith({ createRemoteProcessGroup });
+
+                effects.openNewRemoteProcessGroupDialog$.subscribe();
+                action$.next(FlowActions.openNewRemoteProcessGroupDialog({ request: componentRequest }));
+
+                expect(await firstValueFrom(componentInstance['saving$'] as Observable<boolean>)).toBe(false);
+
+                const request: CreateRemoteProcessGroupRequest = {
+                    ...componentRequest,
+                    type: ComponentType.RemoteProcessGroup,
+                    targetUris: 'http://localhost:8443/nifi',
+                    transportProtocol: 'RAW',
+                    localNetworkInterface: '',
+                    proxyHost: '',
+                    proxyPort: '',
+                    proxyUser: '',
+                    proxyPassword: '',
+                    communicationsTimeout: '30 sec',
+                    yieldDuration: '10 sec'
+                };
+                createRemoteProcessGroup.emit(request);
+                afterClosed.next();
+
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.createRemoteProcessGroup({ request }));
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+        });
+
+        describe('openNewProcessGroupDialog$', () => {
+            const parameterContexts = [{ id: 'pc-1' } as ParameterContextEntity];
+            const dialogRequest: CreateProcessGroupDialogRequest = {
+                request: { ...componentRequest, type: ComponentType.ProcessGroup },
+                parameterContexts
+            };
+
+            it('forwards create, upload, and new parameter context, and clears dragging on close', async () => {
+                const createProcessGroup = new EventEmitter<CreateProcessGroupRequest>();
+                const uploadProcessGroup = new EventEmitter<UploadProcessGroupRequest>();
+                const openNewParameterContext = new EventEmitter<ParameterContextEntity[]>();
+                const { componentInstance, afterClosed } = openWith({
+                    createProcessGroup,
+                    uploadProcessGroup,
+                    openNewParameterContext
+                });
+
+                effects.openNewProcessGroupDialog$.subscribe();
+                action$.next(FlowActions.openNewProcessGroupDialog({ request: dialogRequest }));
+
+                expect(componentInstance['parameterContexts']).toBe(parameterContexts);
+                expect(componentInstance['supportsParameters']).toBeUndefined();
+                expect(await firstValueFrom(componentInstance['saving$'] as Observable<boolean>)).toBe(false);
+                expect(await firstValueFrom(componentInstance['currentUser$'] as Observable<unknown>)).toEqual(
+                    fromUser.initialState.user
+                );
+
+                const createRequest: CreateProcessGroupRequest = {
+                    ...dialogRequest.request,
+                    name: 'child',
+                    parameterContextId: 'pc-1'
+                };
+                const uploadRequest: UploadProcessGroupRequest = {
+                    ...dialogRequest.request,
+                    name: 'uploaded',
+                    flowDefinition: new File(['{}'], 'flow.json')
+                };
+                createProcessGroup.emit(createRequest);
+                uploadProcessGroup.emit(uploadRequest);
+                openNewParameterContext.emit(parameterContexts);
+                afterClosed.next();
+
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.createProcessGroup({ request: createRequest }));
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.uploadProcessGroup({ request: uploadRequest }));
+                expect(store.dispatch).toHaveBeenCalledWith(
+                    ParameterActions.openNewParameterContextDialog({ request: { parameterContexts } })
+                );
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+        });
+
+        describe('openGroupComponentsDialog$', () => {
+            it('dispatches groupComponents with the parameter context id and clears dragging on close', () => {
+                const dialogRequest: GroupComponentsDialogRequest = {
+                    request: { position: { x: 1, y: 2 }, moveComponents: [] },
+                    parameterContexts: []
+                };
+                const groupComponents = new EventEmitter<GroupComponentsRequest>();
+                const { afterClosed } = openWith({ groupComponents });
+
+                effects.openGroupComponentsDialog$.subscribe();
+                action$.next(FlowActions.openGroupComponentsDialog({ request: dialogRequest }));
+
+                const request: GroupComponentsRequest = {
+                    ...componentRequest,
+                    type: ComponentType.ProcessGroup,
+                    name: 'grouped',
+                    parameterContextId: 'pc-1',
+                    components: []
+                };
+                groupComponents.emit(request);
+                afterClosed.next();
+
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.groupComponents({ request }));
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+        });
+
+        describe('openNewPortDialog$', () => {
+            const portRequest: CreatePortRequest = {
+                ...componentRequest,
+                type: ComponentType.InputPort,
+                name: 'in',
+                allowRemoteAccess: true
+            };
+
+            it('marks the root group and dispatches createPort', () => {
+                const createPort = new EventEmitter<CreatePortRequest>();
+                const { componentInstance, afterClosed } = openWith({ createPort });
+
+                effects.openNewPortDialog$.subscribe();
+                action$.next(FlowActions.openNewPortDialog({ request: componentRequest }));
+
+                expect(componentInstance['isRootProcessGroup']).toBe(true);
+                createPort.emit(portRequest);
+                afterClosed.next();
+
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.createPort({ request: portRequest }));
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+
+            it('clears the root flag when the current group has a parent', () => {
+                store.overrideSelector(selectParentProcessGroupId, 'parent-1');
+                store.refreshState();
+                const { componentInstance } = openWith({ createPort: new EventEmitter<CreatePortRequest>() });
+
+                effects.openNewPortDialog$.subscribe();
+                action$.next(FlowActions.openNewPortDialog({ request: componentRequest }));
+
+                expect(componentInstance['isRootProcessGroup']).toBe(false);
+            });
+        });
+
+        describe('openImportFromRegistryDialog$', () => {
+            const readableClient = { permissions: { canRead: true } } as RegistryClientEntity;
+
+            it('assigns registry lookups and time offset, then dispatches importFromRegistry', async () => {
+                const registryService = TestBed.inject(RegistryService);
+                vi.spyOn(registryService, 'getBranches').mockReturnValue(of({ branches: [{ id: 'branch-1' }] }));
+                vi.spyOn(registryService, 'getBuckets').mockReturnValue(of({ buckets: [{ id: 'bucket-1' }] }));
+                vi.spyOn(registryService, 'getFlows').mockReturnValue(of({ versionedFlows: [{ id: 'flow-1' }] }));
+                vi.spyOn(registryService, 'getFlowVersions').mockReturnValue(
+                    of({ versionedFlowSnapshotMetadataSet: [{ version: 1 }] })
+                );
+                store.overrideSelector(selectTimeOffset, 45000);
+                store.refreshState();
+
+                const importFromRegistry = new EventEmitter<ImportFromRegistryRequest>();
+                const { componentInstance, afterClosed } = openWith({ importFromRegistry });
+                const dialogRequest: ImportFromRegistryDialogRequest = {
+                    request: componentRequest,
+                    registryClients: [readableClient]
+                };
+
+                effects.openImportFromRegistryDialog$.subscribe();
+                action$.next(FlowActions.openImportFromRegistryDialog({ request: dialogRequest }));
+
+                expect(await firstValueFrom(componentInstance['saving$'] as Observable<boolean>)).toBe(false);
+                expect(await firstValueFrom(componentInstance['timeOffset$'] as Observable<number>)).toBe(45000);
+
+                const getBranches = componentInstance['getBranches'] as (registryId: string) => Observable<unknown[]>;
+                const getBuckets = componentInstance['getBuckets'] as (
+                    registryId: string,
+                    branch?: string | null
+                ) => Observable<unknown[]>;
+                const getFlows = componentInstance['getFlows'] as (
+                    registryId: string,
+                    bucketId: string,
+                    branch?: string | null
+                ) => Observable<unknown[]>;
+                const getFlowVersions = componentInstance['getFlowVersions'] as (
+                    registryId: string,
+                    bucketId: string,
+                    flowId: string,
+                    branch?: string | null
+                ) => Observable<unknown[]>;
+
+                expect(await firstValueFrom(getBranches('reg-1'))).toEqual([{ id: 'branch-1' }]);
+                expect(await firstValueFrom(getBuckets('reg-1', 'main'))).toEqual([{ id: 'bucket-1' }]);
+                expect(await firstValueFrom(getFlows('reg-1', 'bucket-1', 'main'))).toEqual([{ id: 'flow-1' }]);
+                expect(await firstValueFrom(getFlowVersions('reg-1', 'bucket-1', 'flow-1', 'main'))).toEqual([
+                    { version: 1 }
+                ]);
+
+                const request: ImportFromRegistryRequest = {
+                    payload: {
+                        revision: componentRequest.revision,
+                        component: {
+                            position: componentRequest.position,
+                            versionControlInformation: {
+                                registryId: 'reg-1',
+                                bucketId: 'bucket-1',
+                                flowId: 'flow-1',
+                                version: '1',
+                                branch: 'main'
+                            }
+                        }
+                    },
+                    keepExistingParameterContext: false
+                };
+                importFromRegistry.emit(request);
+                afterClosed.next();
+
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.importFromRegistry({ request }));
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+
+            it('clears dragging when no registry client is readable', () => {
+                const afterClosed = new Subject<void>();
+                vi.spyOn(dialog, 'open').mockReturnValue({
+                    afterClosed: () => afterClosed.asObservable()
+                } as unknown as MatDialogRef<unknown>);
+                const dialogRequest: ImportFromRegistryDialogRequest = {
+                    request: componentRequest,
+                    registryClients: [{ permissions: { canRead: false } } as RegistryClientEntity]
+                };
+
+                effects.openImportFromRegistryDialog$.subscribe();
+                action$.next(FlowActions.openImportFromRegistryDialog({ request: dialogRequest }));
+                afterClosed.next();
+
+                expect(dialog.open).toHaveBeenCalledWith(
+                    NoRegistryClientsDialog,
+                    expect.objectContaining({
+                        data: {
+                            controllerPermissions: fromUser.initialState.user.controllerPermissions
+                        }
+                    })
+                );
+                expect(store.dispatch).toHaveBeenCalledWith(FlowActions.setDragging({ dragging: false }));
+            });
+        });
+    });
+});

@@ -20,6 +20,7 @@ package org.apache.nifi.record.path;
 import org.apache.nifi.serialization.record.DataType;
 import org.apache.nifi.serialization.record.RecordField;
 
+import java.util.Map;
 import java.util.Objects;
 
 public class MapEntryFieldValue extends StandardFieldValue {
@@ -36,12 +37,22 @@ public class MapEntryFieldValue extends StandardFieldValue {
 
     @Override
     public void updateValue(final Object newValue) {
-        getParentRecord().get().setMapValue(getField().getFieldName(), getMapKey(), newValue);
+        getParentRecord().ifPresent(parent -> parent.setMapValue(getField().getFieldName(), getMapKey(), newValue));
     }
 
     @Override
     public void updateValue(final Object newValue, final DataType dataType) {
-        getParentRecord().get().setMapValue(getField().getFieldName(), getMapKey(), newValue);
+        getParentRecord().ifPresent(parent -> parent.setMapValue(getField().getFieldName(), getMapKey(), newValue));
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void remove() {
+        getParent().ifPresent(parent -> {
+            if (parent.getValue() instanceof Map) {
+                ((Map<String, Object>) parent.getValue()).remove(mapKey);
+            }
+        });
     }
 
     @Override
@@ -57,11 +68,10 @@ public class MapEntryFieldValue extends StandardFieldValue {
         if (obj == null) {
             return false;
         }
-        if (!(obj instanceof MapEntryFieldValue)) {
+        if (!(obj instanceof final MapEntryFieldValue other)) {
             return false;
         }
 
-        final MapEntryFieldValue other = (MapEntryFieldValue) obj;
         return Objects.equals(getValue(), other.getValue()) && Objects.equals(getField(), other.getField())
             && Objects.equals(getParent(), other.getParent()) && Objects.equals(getMapKey(), other.getMapKey());
     }

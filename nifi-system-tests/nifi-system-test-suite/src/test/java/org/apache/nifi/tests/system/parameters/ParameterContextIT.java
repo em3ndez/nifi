@@ -16,40 +16,61 @@
  */
 package org.apache.nifi.tests.system.parameters;
 
+import org.apache.nifi.parameter.ParameterProviderConfiguration;
+import org.apache.nifi.parameter.ParameterSensitivity;
+import org.apache.nifi.parameter.StandardParameterProviderConfiguration;
+import org.apache.nifi.tests.system.NiFiInstance;
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ParamContextClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.toolkit.client.ParamContextClient;
 import org.apache.nifi.web.api.dto.ParameterContextDTO;
 import org.apache.nifi.web.api.dto.ParameterDTO;
 import org.apache.nifi.web.api.dto.ProcessorConfigDTO;
 import org.apache.nifi.web.api.entity.AffectedComponentEntity;
+import org.apache.nifi.web.api.entity.AssetEntity;
+import org.apache.nifi.web.api.entity.AssetsEntity;
+import org.apache.nifi.web.api.entity.ConnectionEntity;
 import org.apache.nifi.web.api.entity.ControllerServiceEntity;
 import org.apache.nifi.web.api.entity.ParameterContextEntity;
 import org.apache.nifi.web.api.entity.ParameterContextUpdateRequestEntity;
+import org.apache.nifi.web.api.entity.ParameterContextsEntity;
 import org.apache.nifi.web.api.entity.ParameterEntity;
+import org.apache.nifi.web.api.entity.ParameterGroupConfigurationEntity;
+import org.apache.nifi.web.api.entity.ParameterProviderApplyParametersRequestEntity;
+import org.apache.nifi.web.api.entity.ParameterProviderEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ParameterContextIT extends NiFiSystemIT {
+    private static final Logger logger = LoggerFactory.getLogger(ParameterContextIT.class);
+
     @Test
     public void testCreateParameterContext() throws NiFiClientException, IOException {
         final Set<ParameterEntity> parameterEntities = new HashSet<>();
@@ -61,7 +82,7 @@ public class ParameterContextIT extends NiFiSystemIT {
         assertSingleFooCreation(returned);
 
         final String contextId = returned.getId();
-        final ParameterContextEntity fetched = paramContextClient.getParamContext(contextId);
+        final ParameterContextEntity fetched = paramContextClient.getParamContext(contextId, false);
         assertSingleFooCreation(fetched);
     }
 
@@ -74,7 +95,7 @@ public class ParameterContextIT extends NiFiSystemIT {
         final ParameterDTO returnedParamDto = returnedParamEntities.iterator().next().getParameter();
         assertEquals("foo", returnedParamDto.getName());
         assertNull(returnedParamDto.getDescription());
-        assertSame(Boolean.FALSE,returnedParamDto.getSensitive());
+        assertSame(Boolean.FALSE, returnedParamDto.getSensitive());
         assertEquals("bar", returnedParamDto.getValue());
     }
 
@@ -89,7 +110,7 @@ public class ParameterContextIT extends NiFiSystemIT {
         assertSensitiveParametersNotReturned(returned);
 
         final String contextId = returned.getId();
-        final ParameterContextEntity fetched = paramContextClient.getParamContext(contextId);
+        final ParameterContextEntity fetched = paramContextClient.getParamContext(contextId, false);
         assertSensitiveParametersNotReturned(fetched);
     }
 
@@ -103,10 +124,9 @@ public class ParameterContextIT extends NiFiSystemIT {
         final ParameterDTO returnedParamDto = returnedParamEntities.iterator().next().getParameter();
         assertEquals("foo", returnedParamDto.getName());
         assertNull(returnedParamDto.getDescription());
-        assertSame(Boolean.TRUE,returnedParamDto.getSensitive());
+        assertSame(Boolean.TRUE, returnedParamDto.getSensitive());
         assertEquals("********", returnedParamDto.getValue());
     }
-
 
     @Test
     public void testAddingMissingParameterMakesProcessorValid() throws NiFiClientException, IOException, InterruptedException {
@@ -154,7 +174,91 @@ public class ParameterContextIT extends NiFiSystemIT {
         waitForValidProcessor(processorId);
     }
 
-    @Test(timeout=30000)
+    @Test
+    public void testValidationWithNestedParameterContexts() throws NiFiClientException, IOException, InterruptedException {
+        final ProcessorEntity generate = getClientUtil().createProcessor("GenerateFlowFile");
+        getClientUtil().updateProcessorProperties(generate, Collections.singletonMap("File Size", "#{foo}"));
+        getClientUtil().setAutoTerminatedRelationships(generate, "success");
+
+        final String processorId = generate.getId();
+
+        waitForInvalidProcessor(processorId);
+
+        final ParameterEntity fooKB = createParameterEntity("foo", null, false, "1 KB");
+        final Set<ParameterEntity> parameters = new HashSet<>();
+        parameters.add(fooKB);
+        final ParameterContextEntity contextEntity = createParameterContextEntity(getTestName(), null, parameters);
+        final ParameterContextEntity createdContextEntity = getNifiClient().getParamContextClient().createParamContext(contextEntity);
+
+        final ParameterContextEntity parentContextEntity = createParameterContextEntity(getTestName() + " Parent", null,
+                null, Arrays.asList(createdContextEntity), null, null);
+        final ParameterContextEntity createdParentContextEntity = getNifiClient().getParamContextClient().createParamContext(parentContextEntity);
+
+        setParameterContext("root", createdParentContextEntity);
+        waitForValidProcessor(processorId);
+    }
+
+    @Test
+    @Timeout(30)
+    public void testExistingEmptyParameterContextCanInheritProviderBackedContext() throws NiFiClientException, IOException, InterruptedException {
+        if (getNumberOfNodes() > 1) {
+            waitForAllNodesConnected();
+        }
+
+        final String parameterName = "db.host";
+        final String parameterValue = "localhost";
+        final String parameterGroupName = "Parameters";
+        final String childContextName = getTestName() + " Child";
+        final String parentContextName = getTestName() + " Parent";
+
+        ParameterProviderEntity parameterProvider = createParameterProvider("PropertiesParameterProvider");
+        parameterProvider = updateParameterProviderProperties(parameterProvider,
+                Collections.singletonMap("parameters", parameterName + "=" + parameterValue));
+
+        final ParameterContextEntity childContextEntity = createParameterContextEntity(childContextName, null, Collections.emptySet(),
+                Collections.emptyList(), parameterProvider, parameterGroupName);
+        final ParameterContextEntity createdChildContext = getNifiClient().getParamContextClient().createParamContext(childContextEntity);
+
+        final ParameterGroupConfigurationEntity groupConfiguration = new ParameterGroupConfigurationEntity();
+        groupConfiguration.setSynchronized(true);
+        groupConfiguration.setGroupName(parameterGroupName);
+        groupConfiguration.setParameterContextName(childContextName);
+        groupConfiguration.setParameterSensitivities(Collections.singletonMap(parameterName, ParameterSensitivity.NON_SENSITIVE));
+        fetchAndWaitForAppliedParameters(parameterProvider, Collections.singletonList(groupConfiguration));
+
+        final ParameterContextEntity createdParentContext = getNifiClient().getParamContextClient().createParamContext(
+                createParameterContextEntity(parentContextName, null, Collections.emptySet()));
+
+        final ParameterContextEntity parentUpdate = createParameterContextEntity(parentContextName, null, Collections.emptySet(),
+                Collections.singletonList(createdChildContext), null, null);
+        parentUpdate.setId(createdParentContext.getId());
+        parentUpdate.setRevision(createdParentContext.getRevision());
+        parentUpdate.getComponent().setId(createdParentContext.getComponent().getId());
+
+        final ParameterContextUpdateRequestEntity updateRequest = getNifiClient().getParamContextClient().updateParamContext(parentUpdate);
+        final String requestId = updateRequest.getRequest().getRequestId();
+        getClientUtil().waitForParameterContextRequestToComplete(createdParentContext.getId(), requestId);
+
+        final ParameterContextEntity persistedParent = getNifiClient().getParamContextClient().getParamContext(createdParentContext.getId(), false);
+        assertEquals(1, persistedParent.getComponent().getInheritedParameterContexts().size());
+        assertEquals(createdChildContext.getId(), persistedParent.getComponent().getInheritedParameterContexts().get(0).getId());
+
+        final ParameterDTO effectiveParameter = getNifiClient().getParamContextClient().getParamContext(createdParentContext.getId(), true)
+                .getComponent()
+                .getParameters()
+                .stream()
+                .map(ParameterEntity::getParameter)
+                .filter(parameter -> parameterName.equals(parameter.getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(effectiveParameter);
+        assertEquals(parameterValue, effectiveParameter.getValue());
+        assertSame(Boolean.TRUE, effectiveParameter.getInherited());
+        assertSame(Boolean.TRUE, effectiveParameter.getProvided());
+    }
+
+    @Timeout(30)
+    @Test
     public void testValidationWithRequiredPropertiesAndNoDefault() throws NiFiClientException, IOException, InterruptedException {
         final ProcessorEntity generate = getClientUtil().createProcessor("DependOnProperties");
         final Map<String, String> properties = new HashMap<>();
@@ -184,6 +288,166 @@ public class ParameterContextIT extends NiFiSystemIT {
         waitForInvalidProcessor(processorId);
     }
 
+    @Test
+    @Timeout(30)
+    public void testSetParameterProviders() throws NiFiClientException, IOException, InterruptedException {
+        final ProcessorEntity countEvents = getClientUtil().createProcessor("CountEvents");
+        final Map<String, String> properties = new HashMap<>();
+        properties.put("Name", "#{non.sensitive}");
+        properties.put("Sensitive", "#{sensitive}");
+        getClientUtil().updateProcessorProperties(countEvents, properties);
+        final String processorId = countEvents.getId();
+
+        // Neither property is required
+        waitForInvalidProcessor(processorId);
+
+        final ParameterProviderEntity parameterProvider = createParameterProvider("PropertiesParameterProvider");
+        final Map<String, String> parameterProperties = new HashMap<>();
+        parameterProperties.put("parameters", "non.sensitive=non-sensitive value\n" +
+                "sensitive=My sensitive value");
+        updateParameterProviderProperties(parameterProvider, parameterProperties);
+
+        // The parameter group name is hard-coded in the PropertiesParameterProvider
+        final String parameterGroupName = "Parameters";
+        final String parameterContextName = getTestName();
+        final ParameterContextEntity contextEntity = createParameterContextEntity(parameterContextName, null, Collections.emptySet(),
+                Collections.emptyList(), parameterProvider, parameterGroupName);
+        final ParameterContextEntity createdContextEntity = getNifiClient().getParamContextClient().createParamContext(contextEntity);
+
+        setParameterContext("root", createdContextEntity);
+
+        // The parameters have not been fetched and applied yet
+        waitForInvalidProcessor(processorId);
+
+        final ParameterGroupConfigurationEntity groupConfiguration = new ParameterGroupConfigurationEntity();
+        groupConfiguration.setSynchronized(true);
+        groupConfiguration.setGroupName(parameterGroupName);
+        groupConfiguration.setParameterContextName(parameterContextName);
+        final Map<String, ParameterSensitivity> sensitivities = new HashMap<>();
+        sensitivities.put("sensitive", ParameterSensitivity.SENSITIVE);
+        sensitivities.put("non.sensitive", ParameterSensitivity.NON_SENSITIVE);
+        groupConfiguration.setParameterSensitivities(sensitivities);
+        final List<ParameterGroupConfigurationEntity> groupConfigurations = Collections.singletonList(groupConfiguration);
+
+        fetchAndWaitForAppliedParameters(parameterProvider, groupConfigurations);
+
+        // Now it's valid because both parameters are provided
+        waitForValidProcessor(processorId);
+
+        // Try to set a user-entered parameter, which should fail because a provider is already set
+        assertThrows(NiFiClientException.class, () -> updateParameterContext(createdContextEntity, "non.sensitive", "value"));
+    }
+
+    @Test
+    public void testParameterProviderUpdateMultipleGroups() throws NiFiClientException, IOException, InterruptedException {
+        ParameterProviderEntity parameterProvider = createParameterProvider("PropertiesParameterProvider");
+
+        final Map<String, String> initialProperties = new HashMap<>();
+        initialProperties.put("group1", "A1=1\nA2=1");
+        initialProperties.put("group2", "B1=2\nB2=2");
+        parameterProvider = updateParameterProviderProperties(parameterProvider, initialProperties);
+
+        final String parameterGroupName1 = "group1";
+        final String parameterContextName1 = "PC-group-1";
+        final ParameterContextEntity contextEntity1 = createParameterContextEntity(parameterContextName1, null, Collections.emptySet(),
+                Collections.emptyList(), parameterProvider, parameterGroupName1);
+        final ParameterContextEntity createdContextEntity1 = getNifiClient().getParamContextClient().createParamContext(contextEntity1);
+
+        final String parameterGroupName2 = "group2";
+        final String parameterContextName2 = "PC-group-2";
+        final ParameterContextEntity contextEntity2 = createParameterContextEntity(parameterContextName2, null, Collections.emptySet(),
+                Collections.emptyList(), parameterProvider, parameterGroupName2);
+        final ParameterContextEntity createdContextEntity2 = getNifiClient().getParamContextClient().createParamContext(contextEntity2);
+
+        final Map<String, ParameterSensitivity> sensitivities = new HashMap<>();
+        sensitivities.put("A1", ParameterSensitivity.NON_SENSITIVE);
+        sensitivities.put("A2", ParameterSensitivity.NON_SENSITIVE);
+        sensitivities.put("B1", ParameterSensitivity.NON_SENSITIVE);
+        sensitivities.put("B2", ParameterSensitivity.NON_SENSITIVE);
+        sensitivities.put("C", ParameterSensitivity.NON_SENSITIVE);
+        sensitivities.put("D", ParameterSensitivity.NON_SENSITIVE);
+
+        final ParameterGroupConfigurationEntity config1 = new ParameterGroupConfigurationEntity();
+        config1.setSynchronized(true);
+        config1.setGroupName("group1");
+        config1.setParameterContextName(parameterContextName1);
+        config1.setParameterSensitivities(sensitivities);
+
+        final ParameterGroupConfigurationEntity config2 = new ParameterGroupConfigurationEntity();
+        config2.setSynchronized(true);
+        config2.setGroupName("group2");
+        config2.setParameterContextName(parameterContextName2);
+        config2.setParameterSensitivities(sensitivities);
+
+        fetchAndWaitForAppliedParameters(parameterProvider, Arrays.asList(config1, config2));
+
+        ParameterContextEntity fetchedContext1 = getNifiClient().getParamContextClient().getParamContext(createdContextEntity1.getId(), false);
+        ParameterContextEntity fetchedContext2 = getNifiClient().getParamContextClient().getParamContext(createdContextEntity2.getId(), false);
+
+        assertEquals(Set.of("A1", "A2"), getParameterNames(fetchedContext1));
+        assertEquals(Set.of("B1", "B2"), getParameterNames(fetchedContext2));
+
+        final Map<String, String> updatedProperties = new HashMap<>();
+        updatedProperties.put("group1", "A2=1\nC=3");
+        updatedProperties.put("group2", "B1=2\nD=4");
+        parameterProvider = updateParameterProviderProperties(parameterProvider, updatedProperties);
+
+        fetchAndWaitForAppliedParameters(parameterProvider, Arrays.asList(config1, config2));
+
+        fetchedContext1 = getNifiClient().getParamContextClient().getParamContext(createdContextEntity1.getId(), false);
+        fetchedContext2 = getNifiClient().getParamContextClient().getParamContext(createdContextEntity2.getId(), false);
+
+        assertEquals(Set.of("A2", "C"), getParameterNames(fetchedContext1));
+        assertEquals(Set.of("B1", "D"), getParameterNames(fetchedContext2));
+    }
+
+    @Test
+    public void testParameterRemovalThroughProvider() throws NiFiClientException, IOException, InterruptedException {
+        final ParameterProviderEntity parameterProvider = createParameterProvider("PropertiesParameterProvider");
+
+        final Map<String, String> initialProperties = new HashMap<>();
+        initialProperties.put("parameters", "a=1\nb=2");
+        final ParameterProviderEntity updatedProvider = updateParameterProviderProperties(parameterProvider, initialProperties);
+
+        final String parameterGroupName = "Parameters";
+        final String parameterContextName = getTestName();
+        final ParameterContextEntity contextEntity = createParameterContextEntity(parameterContextName, null, Collections.emptySet(),
+                Collections.emptyList(), updatedProvider, parameterGroupName);
+        final ParameterContextEntity createdContextEntity = getNifiClient().getParamContextClient().createParamContext(contextEntity);
+
+        setParameterContext("root", createdContextEntity);
+
+        final ParameterGroupConfigurationEntity groupConfiguration = new ParameterGroupConfigurationEntity();
+        groupConfiguration.setSynchronized(true);
+        groupConfiguration.setGroupName(parameterGroupName);
+        groupConfiguration.setParameterContextName(parameterContextName);
+        final Map<String, ParameterSensitivity> sensitivities = new HashMap<>();
+        sensitivities.put("a", ParameterSensitivity.NON_SENSITIVE);
+        sensitivities.put("b", ParameterSensitivity.NON_SENSITIVE);
+        groupConfiguration.setParameterSensitivities(sensitivities);
+
+        fetchAndWaitForAppliedParameters(updatedProvider, Collections.singletonList(groupConfiguration));
+
+        ParameterContextEntity fetchedContext = getNifiClient().getParamContextClient().getParamContext(createdContextEntity.getId(), false);
+        assertEquals(Set.of("a", "b"), getParameterNames(fetchedContext));
+
+        final Map<String, String> removedProperties = new HashMap<>();
+        removedProperties.put("parameters", "a=1");
+        final ParameterProviderEntity removedProvider = updateParameterProviderProperties(updatedProvider, removedProperties);
+
+        fetchAndWaitForAppliedParameters(removedProvider, Collections.singletonList(groupConfiguration));
+
+        final ParameterContextEntity contextAfterFailure = getNifiClient().getParamContextClient().getParamContext(createdContextEntity.getId(), false);
+        assertEquals(Set.of("a"), getParameterNames(contextAfterFailure));
+    }
+
+    private Set<String> getParameterNames(final ParameterContextEntity context) {
+        return context.getComponent()
+                .getParameters()
+                .stream()
+                .map(entity -> entity.getParameter().getName())
+                .collect(Collectors.toSet());
+    }
 
     @Test
     public void testParametersReferencingEL() throws NiFiClientException, IOException, InterruptedException {
@@ -343,7 +607,7 @@ public class ParameterContextIT extends NiFiSystemIT {
         waitForValidProcessor(processorId);
 
         // Start Processors
-        getNifiClient().getProcessorClient().startProcessor(processorId, processorEntity.getRevision().getClientId(), 1);
+        getClientUtil().startProcessor(processorEntity);
 
         try {
             // Update Parameter Context to a long validation time.
@@ -359,9 +623,7 @@ public class ParameterContextIT extends NiFiSystemIT {
             waitForRunningProcessor(processorId);
         } finally {
             // Ensure that we stop the processor so that other tests are allowed to change the Parameter Context, etc.
-            getNifiClient().getProcessorClient().stopProcessor(processorId, processorEntity.getRevision().getClientId(), 2);
-            waitForStoppedProcessor(processorId);
-
+            getClientUtil().stopProcessor(processorEntity);
             getNifiClient().getProcessorClient().deleteProcessor(processorId, processorEntity.getRevision().getClientId(), 3);
         }
     }
@@ -373,7 +635,7 @@ public class ParameterContextIT extends NiFiSystemIT {
         // Set the Parameter Context on the root Process Group
         setParameterContext("root", createdContextEntity);
 
-        final ControllerServiceEntity serviceEntity = createControllerService(TEST_CS_PACKAGE + ".StandardSleepService", "root", NIFI_GROUP_ID, TEST_EXTENSIONS_ARTIFACT_ID, getNiFiVersion());
+        final ControllerServiceEntity serviceEntity = createControllerService(TEST_CS_PACKAGE + ".StandardSleepService", "root", NIFI_GROUP_ID, TEST_EXTENSIONS_SERVICES_ARTIFACT_ID, getNiFiVersion());
         final String serviceId = serviceEntity.getId();
 
         // Set service's sleep time to the parameter.
@@ -390,7 +652,7 @@ public class ParameterContextIT extends NiFiSystemIT {
             processorEntity.getComponent().getConfig().setAutoTerminatedRelationships(Collections.singleton("success"));
 
             getNifiClient().getProcessorClient().updateProcessor(processorEntity);
-            getNifiClient().getProcessorClient().startProcessor(processorId, processorEntity.getRevision().getClientId(), 1L);
+            getClientUtil().startProcessor(processorEntity);
 
             try {
                 final ParameterContextUpdateRequestEntity requestEntity = updateParameterContext(createdContextEntity, "sleep", "6 secs");
@@ -406,16 +668,113 @@ public class ParameterContextIT extends NiFiSystemIT {
 
                 waitForRunningProcessor(processorId);
             } finally {
-                getNifiClient().getProcessorClient().stopProcessor(processorId, processorEntity.getRevision().getClientId(), 1L);
-                waitForStoppedProcessor(processorId);
+                getClientUtil().stopProcessor(processorEntity);
                 getNifiClient().getProcessorClient().deleteProcessor(processorId, processorEntity.getRevision().getClientId(), 3);
             }
         } finally {
             getClientUtil().disableControllerService(serviceEntity);
+            getClientUtil().waitForControllerServiceRunStatus(serviceEntity.getId(), "DISABLED");
             getNifiClient().getControllerServicesClient().deleteControllerService(serviceEntity);
         }
     }
 
+    @Test
+    public void testParamChangeWhileReferencingControllerServiceEnabling() throws NiFiClientException, IOException, InterruptedException {
+        final ParameterContextEntity createdContextEntity = createParameterContext("sleep", "7 sec");
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", createdContextEntity);
+
+        final ControllerServiceEntity serviceEntity = createControllerService(TEST_CS_PACKAGE + ".StandardSleepService", "root", NIFI_GROUP_ID, TEST_EXTENSIONS_SERVICES_ARTIFACT_ID, getNiFiVersion());
+
+        // Set service's sleep time to the parameter.
+        serviceEntity.getComponent().setProperties(Collections.singletonMap("@OnEnabled Sleep Time", "#{sleep}"));
+        getNifiClient().getControllerServicesClient().updateControllerService(serviceEntity);
+
+        // Enable the service. It should take 7 seconds for the service to fully enable.
+        getClientUtil().enableControllerService(serviceEntity);
+
+        // Wait for the service to reach of state of ENABLING but not enabled. We want to change the parameter that it references while it's enabling.
+        getClientUtil().waitForControllerServiceState(serviceEntity.getParentGroupId(), "ENABLING", Collections.emptyList());
+
+        // While the service is enabling, change the parameter
+        final ParameterContextUpdateRequestEntity paramUpdateRequestEntity = updateParameterContext(createdContextEntity, "sleep", "1 sec");
+
+        // Wait for the update to complete
+        getClientUtil().waitForParameterContextRequestToComplete(createdContextEntity.getId(), paramUpdateRequestEntity.getRequest().getRequestId());
+    }
+
+    @Test
+    public void testParamChangeWhileReferencingControllerServiceDisabling() throws NiFiClientException, IOException, InterruptedException {
+        testParamChangeWhileReferencingControllerServiceDisabling(true);
+    }
+
+    @Test
+    public void testParamChangeWhileReferencingControllerServiceEnabled() throws NiFiClientException, IOException, InterruptedException {
+        testParamChangeWhileReferencingControllerServiceDisabling(false);
+    }
+
+    private void testParamChangeWhileReferencingControllerServiceDisabling(final boolean disableServiceBeforeUpdate) throws NiFiClientException, IOException, InterruptedException {
+        final ParameterContextEntity createdContextEntity = createParameterContext("sleep", "7 sec");
+
+        // Set the Parameter Context on the root Process Group
+        final ProcessGroupEntity childGroup = getClientUtil().createProcessGroup("child", "root");
+        setParameterContext(childGroup.getId(), createdContextEntity);
+
+        final ControllerServiceEntity serviceEntity = createControllerService(TEST_CS_PACKAGE + ".StandardSleepService", childGroup.getId(),
+            NIFI_GROUP_ID, TEST_EXTENSIONS_SERVICES_ARTIFACT_ID, getNiFiVersion());
+
+        // Set service's sleep time to the parameter.
+        serviceEntity.getComponent().setProperties(Collections.singletonMap("@OnDisabled Sleep Time", "#{sleep}"));
+        getNifiClient().getControllerServicesClient().updateControllerService(serviceEntity);
+
+        // Enable the service.
+        getClientUtil().enableControllerService(serviceEntity);
+
+        // Wait for the service to reach of state of ENABLED.
+        getClientUtil().waitForControllerServiceState(serviceEntity.getParentGroupId(), "ENABLED", Collections.emptyList());
+
+        if (disableServiceBeforeUpdate) {
+            // Disable the service.
+            getClientUtil().disableControllerService(serviceEntity);
+
+            // Wait for service to reach state of DISABLING but not DISABLED. We want to change the parameter that it references while it's disabling.
+            getClientUtil().waitForControllerServiceState(serviceEntity.getParentGroupId(), "DISABLING", Collections.emptyList());
+        }
+
+        // Change the parameter
+        final ParameterContextUpdateRequestEntity paramUpdateRequestEntity = updateParameterContext(createdContextEntity, "sleep", "1 sec");
+
+        // Wait for the update to complete
+        getClientUtil().waitForParameterContextRequestToComplete(createdContextEntity.getId(), paramUpdateRequestEntity.getRequest().getRequestId());
+    }
+
+    @Test
+    public void testParamChangeWhileReferencingProcessorStartingButInvalid() throws NiFiClientException, IOException, InterruptedException {
+        final ParameterContextEntity contextEntity = createParameterContext("clone", "true");
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", contextEntity);
+
+        // Create simple dataflow: GenerateFlowFile -> SplitByLine -> <auto-terminate>
+        // Set SplitByLine to use a parameter for the "Use Clone" property such that it's valid.
+        ProcessorEntity generate = getClientUtil().createProcessor("GenerateFlowFile");
+        ProcessorEntity splitByLine = getClientUtil().createProcessor("SplitByLine");
+
+        getClientUtil().updateProcessorProperties(splitByLine, Collections.singletonMap("Use Clone", "#{clone}"));
+        getClientUtil().setAutoTerminatedRelationships(splitByLine, Collections.singleton("success"));
+        getClientUtil().createConnection(generate, splitByLine, "success");
+
+        getClientUtil().startProcessor(splitByLine);
+
+        // Change parameter to an invalid value. This will result in the processor being stopped, becoming invalid, and then being transitioned to a 'starting' state while invalid.
+        final ParameterContextUpdateRequestEntity updateToInvalidRequestEntity = updateParameterContext(contextEntity, "clone", "invalid");
+        getClientUtil().waitForParameterContextRequestToComplete(contextEntity.getId(), updateToInvalidRequestEntity.getRequest().getRequestId());
+
+        // Change back to a valid value and wait for the update to complete
+        final ParameterContextUpdateRequestEntity updateToValidRequestEntity = updateParameterContext(contextEntity, "clone", "true");
+        getClientUtil().waitForParameterContextRequestToComplete(contextEntity.getId(), updateToValidRequestEntity.getRequest().getRequestId());
+    }
 
     @Test
     public void testProcessorRestartedWhenParameterChanged() throws NiFiClientException, IOException, InterruptedException {
@@ -449,8 +808,8 @@ public class ParameterContextIT extends NiFiSystemIT {
         final ProcessorEntity secondProcessorEntity = createProcessor(TEST_PROCESSORS_PACKAGE + ".CountEvents", NIFI_GROUP_ID, TEST_EXTENSIONS_ARTIFACT_ID, getNiFiVersion());
 
         // Start Processors
-        getNifiClient().getProcessorClient().startProcessor(processorEntity.getId(), processorEntity.getRevision().getClientId(), 1L);
-        getNifiClient().getProcessorClient().startProcessor(secondProcessorEntity.getId(), secondProcessorEntity.getRevision().getClientId(), 1L);
+        getClientUtil().startProcessor(processorEntity);
+        getClientUtil().startProcessor(secondProcessorEntity);
 
         Map<String, Long> counterValues = waitForCounter(processorEntity.getId(), "Scheduled", getNumberOfNodes());
         assertFalse(counterValues.containsKey("Stopped"));
@@ -489,6 +848,468 @@ public class ParameterContextIT extends NiFiSystemIT {
         assertEquals(getNumberOfNodes(), counterValues.get("Scheduled").longValue());
     }
 
+    @Test
+    public void testAssetReference() throws NiFiClientException, IOException, InterruptedException {
+        // Create Parameter Context
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testAssetReference", Map.of("name", "foo", "fileToIngest", ""));
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", paramContext);
+
+        // Create a Processor and update it to reference a parameter
+        final ProcessorEntity ingest = getClientUtil().createProcessor("IngestFile");
+        getClientUtil().updateProcessorProperties(ingest, Map.of("Filename", "#{fileToIngest}", "Delete File", "false"));
+        getClientUtil().updateProcessorSchedulingPeriod(ingest, "10 mins");
+
+        // Create an asset
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetFile);
+
+        // Update parameter to reference the asset
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Connect the ingest processor to terminate processor and produce FlowFiles
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+        final ConnectionEntity connection = getClientUtil().createConnection(ingest, terminate, "success");
+        waitForValidProcessor(ingest.getId());
+
+        getClientUtil().startProcessor(ingest);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+        final String contents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertEquals("Hello, World!", contents);
+
+        // Check that the file exists in the assets directory.
+        final File node1Dir = getNumberOfNodes() == 1 ? getNiFiInstance().getInstanceDirectory() : getNiFiInstance().getNodeInstance(1).getInstanceDirectory();
+        final File node1Assets = new File(node1Dir, "assets");
+        final File node1ContextDir = new File(node1Assets, paramContext.getId());
+        assertTrue(node1ContextDir.exists());
+
+        final File node2Dir = getNumberOfNodes() == 1 ? null : getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2Assets = node2Dir == null ? null : new File(node2Dir, "assets");
+        final File node2ContextDir = node2Assets == null ? null : new File(node2Assets, paramContext.getId());
+        if (node2ContextDir != null) {
+            assertTrue(node2ContextDir.exists());
+        }
+
+        // List assets and verify the expected asset is returned
+        final AssetsEntity assetListing = assertAssetListing(paramContext.getId(), 1);
+        assertAssetExists(asset, assetListing);
+
+        // Attempt to delete the asset should be prevented since it is still referenced
+        assertThrows(NiFiClientException.class, () -> getNifiClient().getParamContextClient().deleteAsset(paramContext.getId(), asset.getAsset().getId()));
+
+        // Change the parameter so that it no longer references the asset
+        final ParameterContextUpdateRequestEntity removeAssetUpdateRequest = getClientUtil().updateParameterContext(paramContext, Map.of("fileToIngest", "invalid"));
+
+        // Wait for the update to complete
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), removeAssetUpdateRequest.getRequest().getRequestId());
+
+        // Attempt to delete the asset should now succeed since no longer referenced
+        final AssetEntity deletedAssetEntity = getNifiClient().getParamContextClient().deleteAsset(paramContext.getId(), asset.getAsset().getId());
+        assertNotNull(deletedAssetEntity);
+        assertNotNull(deletedAssetEntity.getAsset());
+        assertEquals(asset.getAsset().getId(), deletedAssetEntity.getAsset().getId());
+
+        // Ensure that the directories no longer exist
+        waitFor(() -> !node1ContextDir.exists());
+
+        if (node2ContextDir != null) {
+            waitFor(() -> !node2ContextDir.exists());
+        }
+
+        // Ensure that listing is now empty
+        assertAssetListing(paramContext.getId(), 0);
+
+        getClientUtil().stopProcessor(ingest);
+        waitForStoppedProcessor(ingest.getId());
+    }
+
+    @Test
+    public void testAssetReferenceFromDifferentContext() throws NiFiClientException, IOException, InterruptedException {
+        // Create first context
+        final ParameterContextEntity paramContext1 = getClientUtil().createParameterContext("testAssetReferenceFirstContext",
+                Map.of("name", "foo", "fileToIngest", ""));
+
+        // Create asset in first context
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext1.getId(), assetFile);
+
+        // Update parameter in first context to reference asset in first context
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext1, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext1.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Create second context and try to update a parameter to reference the asset from first context
+        final ParameterContextEntity paramContext2 = getClientUtil().createParameterContext("testAssetReferenceSecondContext", Map.of("otherParam", ""));
+        assertThrows(NiFiClientException.class, () -> getClientUtil().updateParameterAssetReferences(paramContext2, Map.of("otherParam", List.of(asset.getAsset().getId()))));
+    }
+
+    @Test
+    public void testAssetsRemovedWhenDeletingParameterContext() throws NiFiClientException, IOException, InterruptedException {
+        // Create context
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testAssetsRemovedWhenDeletingParameterContext",
+                Map.of("name", "foo", "fileToIngest", ""));
+
+        // Create asset in context
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetFile);
+
+        // Update parameter to reference asset
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Check that the file exists in the assets directory.
+        final File node1Dir = getNumberOfNodes() == 1 ? getNiFiInstance().getInstanceDirectory() : getNiFiInstance().getNodeInstance(1).getInstanceDirectory();
+        final File node1Assets = new File(node1Dir, "assets");
+        final File node1ContextDir = new File(node1Assets, paramContext.getId());
+        assertTrue(node1ContextDir.exists());
+
+        final File node2Dir = getNumberOfNodes() == 1 ? null : getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2Assets = node2Dir == null ? null : new File(node2Dir, "assets");
+        final File node2ContextDir = node2Assets == null ? null : new File(node2Assets, paramContext.getId());
+        if (node2ContextDir != null) {
+            assertTrue(node2ContextDir.exists());
+        }
+
+        // Delete context
+        final ParameterContextEntity latestParameterContext = getNifiClient().getParamContextClient().getParamContext(paramContext.getId(), false);
+        getNifiClient().getParamContextClient().deleteParamContext(paramContext.getId(), String.valueOf(latestParameterContext.getRevision().getVersion()));
+
+        // Verify the directory for the context's assets was removed
+        assertFalse(node1ContextDir.exists());
+        if (node2ContextDir != null) {
+            assertFalse(node2ContextDir.exists());
+        }
+    }
+
+    @Test
+    public void testAssetsRemainWhenRemovingReference() throws NiFiClientException, IOException, InterruptedException {
+        // Create context
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testAssetsRemovedWhenDeletingParameterContext",
+                Map.of("name", "foo", "fileToIngest", ""));
+
+        // Create asset
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetFile);
+
+        // Update parameter to reference the asset
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Check that the file exists in the assets directory.
+        final File node1Dir = getNumberOfNodes() == 1 ? getNiFiInstance().getInstanceDirectory() : getNiFiInstance().getNodeInstance(1).getInstanceDirectory();
+        final File node1Assets = new File(node1Dir, "assets");
+        final File node1ContextDir = new File(node1Assets, paramContext.getId());
+        assertTrue(node1ContextDir.exists());
+
+        final File node2Dir = getNumberOfNodes() == 1 ? null : getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2Assets = node2Dir == null ? null : new File(node2Dir, "assets");
+        final File node2ContextDir = node2Assets == null ? null : new File(node2Assets, paramContext.getId());
+        if (node2ContextDir != null) {
+            assertTrue(node2ContextDir.exists());
+        }
+
+        // Update the parameter to no longer reference the asset
+        final ParameterContextUpdateRequestEntity removeReferenceUpdateRequest = getClientUtil().updateParameterAssetReferences(paramContext, Map.of("fileToIngest", List.of()));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), removeReferenceUpdateRequest.getRequest().getRequestId());
+
+        // Verify the directory for the context's assets was not removed
+        assertTrue(node1ContextDir.exists());
+        if (node2ContextDir != null) {
+            assertTrue(node2ContextDir.exists());
+        }
+    }
+
+    @Test
+    public void testUnreferencedAssetsRemovedWhenDeletingParameterContext() throws NiFiClientException, IOException {
+        // Create context
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testUnreferencedAssetsRemovedWhenDeletingParameterContext",
+                Map.of("name", "foo", "fileToIngest", ""));
+
+        // Upload asset
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        createAsset(paramContext.getId(), assetFile);
+
+        // Check that the files exist in the assets directory
+        final File node1Dir = getNumberOfNodes() == 1 ? getNiFiInstance().getInstanceDirectory() : getNiFiInstance().getNodeInstance(1).getInstanceDirectory();
+        final File node1Assets = new File(node1Dir, "assets");
+        final File node1ContextDir = new File(node1Assets, paramContext.getId());
+        assertTrue(node1ContextDir.exists());
+
+        final File node2Dir = getNumberOfNodes() == 1 ? null : getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2Assets = node2Dir == null ? null : new File(node2Dir, "assets");
+        final File node2ContextDir = node2Assets == null ? null : new File(node2Assets, paramContext.getId());
+        if (node2ContextDir != null) {
+            assertTrue(node2ContextDir.exists());
+        }
+
+        // Delete context
+        final ParameterContextEntity latestParameterContext = getNifiClient().getParamContextClient().getParamContext(paramContext.getId(), false);
+        getNifiClient().getParamContextClient().deleteParamContext(paramContext.getId(), String.valueOf(latestParameterContext.getRevision().getVersion()));
+
+        // Verify the directory for the context's assets was removed
+        assertFalse(node1ContextDir.exists());
+        if (node2ContextDir != null) {
+            assertFalse(node2ContextDir.exists());
+        }
+    }
+
+    @Test
+    public void testAssetReplacement() throws NiFiClientException, IOException, InterruptedException {
+        // Create context
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testAssetReplacement", Map.of("name", "foo", "fileToIngest", ""));
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", paramContext);
+
+        // Create a Processor and update it to reference a parameter
+        final ProcessorEntity ingest = getClientUtil().createProcessor("IngestFile");
+        getClientUtil().updateProcessorProperties(ingest, Map.of("Filename", "#{fileToIngest}", "Delete File", "false"));
+        getClientUtil().updateProcessorSchedulingPeriod(ingest, "10 mins");
+
+        // Create an asset
+        final String assetName = "helloworld.txt";
+        final File assetFile1 = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetName, assetFile1);
+
+        // Update the parameter to reference the asset
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Connect the ingest processor to terminate processor and produce FlowFiles
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+        final ConnectionEntity connection = getClientUtil().createConnection(ingest, terminate, "success");
+        waitForValidProcessor(ingest.getId());
+
+        // Run the flow and verify the FlowFiles contain the contents of the asset
+        getClientUtil().startProcessor(ingest);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+        final String contents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertEquals("Hello, World!", contents);
+
+        // Stop ingest processor and clear queue
+        getClientUtil().stopProcessor(ingest);
+        getClientUtil().waitForStoppedProcessor(ingest.getId());
+
+        getClientUtil().startProcessor(terminate);
+        waitForQueueCount(connection.getId(), 0);
+
+        getClientUtil().stopProcessor(terminate);
+        getClientUtil().waitForStoppedProcessor(terminate.getId());
+
+        // Replace the asset by uploading a different file with the same name
+        final File assetFile2 = new File("src/test/resources/sample-assets/helloworld2.txt");
+        final AssetEntity replacedAsset = createAsset(paramContext.getId(), assetName, assetFile2);
+        assertAsset(replacedAsset, assetName);
+
+        // Run the flow again and verify the FlowFiles contain the updated contents of the asset
+        getClientUtil().startProcessor(ingest);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+
+        final String contents2 = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertEquals("Hello, World! 2", contents2);
+
+        getClientUtil().stopProcessor(ingest);
+        waitForStoppedProcessor(ingest.getId());
+    }
+
+    @Test
+    public void testRemoveInheritedContextWithAssetReference() throws NiFiClientException, IOException, InterruptedException {
+        // Create two child parameter contexts
+        final ParameterContextEntity childContext1 = getClientUtil().createParameterContext("childContext1", Map.of("fileToIngest", ""));
+        final ParameterContextEntity childContext2 = getClientUtil().createParameterContext("childContext2", Map.of("otherParam", "otherValue"));
+
+        // Create an asset in child context 1 and update its parameter to reference the asset
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(childContext1.getId(), assetFile);
+
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                childContext1, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(childContext1.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Create a parent context that inherits both child contexts
+        final ParameterContextEntity parentContext = getClientUtil().createParameterContext("parentContext",
+                Collections.emptyMap(), List.of(childContext1.getId(), childContext2.getId()), null);
+
+        // Fetch the parent with inherited parameters included, simulating what the UI does when
+        // loading the parameter context for editing. The response includes inherited parameters
+        // (with inherited=true and referencedAssets populated) from both child contexts.
+        final ParameterContextEntity fetchedParent = getNifiClient().getParamContextClient().getParamContext(parentContext.getId(), true);
+
+        // Verify the fetched parent includes the inherited parameter that references the asset
+        final Set<ParameterEntity> fetchedParams = fetchedParent.getComponent().getParameters();
+        final ParameterEntity inheritedAssetParam = fetchedParams.stream()
+                .filter(p -> "fileToIngest".equals(p.getParameter().getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(inheritedAssetParam);
+        assertTrue(inheritedAssetParam.getParameter().getInherited());
+        assertNotNull(inheritedAssetParam.getParameter().getReferencedAssets());
+        assertFalse(inheritedAssetParam.getParameter().getReferencedAssets().isEmpty());
+
+        // Modify only the inherited contexts list to remove childContext1, keeping all the
+        // parameters from the fetched response intact. This reproduces what the UI sends when
+        // a user removes an inherited context: the full parameter list (including inherited
+        // parameters with asset references from the now-removed context) is still present.
+        fetchedParent.getComponent().setInheritedParameterContexts(
+                fetchedParent.getComponent().getInheritedParameterContexts().stream()
+                        .filter(ref -> ref.getId().equals(childContext2.getId()))
+                        .collect(Collectors.toList()));
+
+        final ParameterContextUpdateRequestEntity removeInheritanceRequest =
+                getNifiClient().getParamContextClient().updateParamContext(fetchedParent);
+        getClientUtil().waitForParameterContextRequestToComplete(parentContext.getId(), removeInheritanceRequest.getRequest().getRequestId());
+
+        // Verify only childContext2 remains as inherited
+        final ParameterContextEntity updatedParent = getNifiClient().getParamContextClient().getParamContext(parentContext.getId(), false);
+        assertEquals(1, updatedParent.getComponent().getInheritedParameterContexts().size());
+        assertEquals(childContext2.getId(), updatedParent.getComponent().getInheritedParameterContexts().get(0).getId());
+
+        final ParameterContextEntity deletedChildContext = getNifiClient().getParamContextClient().getParamContext(childContext1.getId(), false);
+        getNifiClient().getParamContextClient().deleteParamContext(childContext1.getId(), String.valueOf(deletedChildContext.getRevision().getVersion()));
+
+        final ParameterContextsEntity parameterContexts = getNifiClient().getParamContextClient().getParamContexts();
+        final ParameterContextEntity listedParent = parameterContexts.getParameterContexts().stream()
+                .filter(context -> parentContext.getId().equals(context.getId()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(listedParent);
+        assertTrue(parameterContexts.getParameterContexts().stream().anyMatch(context -> childContext2.getId().equals(context.getId())));
+        assertFalse(parameterContexts.getParameterContexts().stream().anyMatch(context -> childContext1.getId().equals(context.getId())));
+        assertEquals(1, listedParent.getComponent().getInheritedParameterContexts().size());
+        assertEquals(childContext2.getId(), listedParent.getComponent().getInheritedParameterContexts().getFirst().getId());
+
+        final ParameterContextEntity survivingParentLocal = getNifiClient().getParamContextClient().getParamContext(parentContext.getId(), false);
+        assertTrue(survivingParentLocal.getComponent().getParameters().stream()
+                .noneMatch(parameter -> "fileToIngest".equals(parameter.getParameter().getName())));
+
+        final ParameterContextEntity survivingParent = getNifiClient().getParamContextClient().getParamContext(parentContext.getId(), true);
+        assertEquals(1, survivingParent.getComponent().getInheritedParameterContexts().size());
+        assertEquals(childContext2.getId(), survivingParent.getComponent().getInheritedParameterContexts().getFirst().getId());
+        final ParameterDTO survivingParameter = survivingParent.getComponent().getParameters().stream()
+                .map(ParameterEntity::getParameter)
+                .filter(parameter -> "otherParam".equals(parameter.getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(survivingParameter);
+        assertTrue(survivingParameter.getInherited());
+        assertEquals(childContext2.getId(), survivingParameter.getParameterContext().getId());
+        assertTrue(survivingParent.getComponent().getParameters().stream()
+                .noneMatch(parameter -> "fileToIngest".equals(parameter.getParameter().getName())));
+    }
+
+    @Test
+    public void testDeleteLocalParameterOverrideRevealsInheritedParameter() throws NiFiClientException, IOException, InterruptedException {
+        final ParameterContextEntity parentContext = getClientUtil().createParameterContext("overrideParent", Map.of("shared", "parent-value"));
+        final ParameterContextEntity childContext = getClientUtil().createParameterContext("overrideChild",
+                Map.of("shared", "child-value"), List.of(parentContext.getId()), null);
+
+        final ParameterContextEntity fetchedChild = getNifiClient().getParamContextClient().getParamContext(childContext.getId(), true);
+        final ParameterEntity localOverride = fetchedChild.getComponent().getParameters().stream()
+                .filter(parameter -> "shared".equals(parameter.getParameter().getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(localOverride);
+        assertFalse(localOverride.getParameter().getInherited());
+        assertEquals("child-value", localOverride.getParameter().getValue());
+
+        final ParameterDTO deletionDto = new ParameterDTO();
+        deletionDto.setName("shared");
+        final ParameterEntity deletionEntity = new ParameterEntity();
+        deletionEntity.setParameter(deletionDto);
+        fetchedChild.getComponent().setParameters(Set.of(deletionEntity));
+
+        final ParameterContextUpdateRequestEntity deleteRequest = getNifiClient().getParamContextClient().updateParamContext(fetchedChild);
+        getClientUtil().waitForParameterContextRequestToComplete(childContext.getId(), deleteRequest.getRequest().getRequestId());
+
+        final ParameterContextEntity updatedChildLocal = getNifiClient().getParamContextClient().getParamContext(childContext.getId(), false);
+        assertTrue(updatedChildLocal.getComponent().getParameters().stream()
+                .noneMatch(parameter -> "shared".equals(parameter.getParameter().getName())));
+
+        final ParameterContextEntity updatedChildEffective = getNifiClient().getParamContextClient().getParamContext(childContext.getId(), true);
+        final ParameterEntity inheritedParameter = updatedChildEffective.getComponent().getParameters().stream()
+                .filter(parameter -> "shared".equals(parameter.getParameter().getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(inheritedParameter);
+        assertTrue(inheritedParameter.getParameter().getInherited());
+        assertEquals("parent-value", inheritedParameter.getParameter().getValue());
+        assertEquals(parentContext.getId(), inheritedParameter.getParameter().getParameterContext().getId());
+    }
+
+    @Test
+    public void testUpdateReferencedLocalParameterPreservesRawReference() throws NiFiClientException, IOException, InterruptedException {
+        final ParameterContextEntity context = getClientUtil().createParameterContext("localReferenceContext",
+                Map.of("X", "original", "Y", "#{X}"));
+
+        final ParameterContextUpdateRequestEntity updateRequest = updateParameterContext(context, "X", "updated");
+        getClientUtil().waitForParameterContextRequestToComplete(context.getId(), updateRequest.getRequest().getRequestId());
+
+        final ParameterContextEntity updatedContext = getNifiClient().getParamContextClient().getParamContext(context.getId(), false);
+        final Map<String, ParameterDTO> parameters = updatedContext.getComponent().getParameters().stream()
+                .map(ParameterEntity::getParameter)
+                .collect(Collectors.toMap(ParameterDTO::getName, Function.identity()));
+
+        assertEquals("updated", parameters.get("X").getValue());
+        assertEquals("#{X}", parameters.get("Y").getValue());
+    }
+
+    @Test
+    public void testAssetReferenceAfterRestart() throws NiFiClientException, IOException, InterruptedException {
+        // Create Parameter Context
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testAssetReferenceAfterRestart",
+                Map.of("name", "foo", "fileToIngest", ""));
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", paramContext);
+
+        // Create a Processor and update it to reference a parameter
+        final ProcessorEntity ingest = getClientUtil().createProcessor("IngestFile");
+        getClientUtil().updateProcessorProperties(ingest, Map.of("Filename", "#{fileToIngest}", "Delete File", "false"));
+        getClientUtil().updateProcessorSchedulingPeriod(ingest, "10 mins");
+
+        // Create an asset
+        final File assetFile1 = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetFile1);
+
+        // Update the parameter to reference the asset
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("fileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Ensure that Asset References are kept intact after restart
+        final boolean clustered = getNumberOfNodes() > 1;
+        if (clustered) {
+            disconnectNode(2);
+        }
+        final NiFiInstance restartNode = clustered ? getNiFiInstance().getNodeInstance(2) : getNiFiInstance();
+        restartNode.stop();
+        restartNode.start(true);
+        if (clustered) {
+            reconnectNode(2);
+            waitForAllNodesConnected();
+        }
+
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+        final ConnectionEntity connection = getClientUtil().createConnection(ingest, terminate, "success");
+        waitForValidProcessor(ingest.getId());
+
+        // Get the new Processor Entity because the revision will be reset on restart
+        final ProcessorEntity ingestAfterRestart = getNifiClient().getProcessorClient().getProcessor(ingest.getId());
+        getClientUtil().startProcessor(ingestAfterRestart);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+
+        final String contents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertEquals("Hello, World!", contents);
+
+        getClientUtil().stopProcessor(ingest);
+        waitForStoppedProcessor(ingest.getId());
+    }
 
     private Map<String, Long> waitForCounter(final String context, final String counterName, final long expectedValue) throws NiFiClientException, IOException, InterruptedException {
         return getClientUtil().waitForCounter(context, counterName, expectedValue);
@@ -502,6 +1323,14 @@ public class ParameterContextIT extends NiFiSystemIT {
         return getClientUtil().createProcessor(type, groupId, artifactId, version);
     }
 
+    private ParameterProviderEntity createParameterProvider(final String type) throws NiFiClientException, IOException {
+        return getClientUtil().createParameterProvider(type);
+    }
+
+    private ParameterProviderEntity updateParameterProviderProperties(final ParameterProviderEntity existingProvider, final Map<String, String> properties) throws NiFiClientException, IOException {
+        return getClientUtil().updateParameterProviderProperties(existingProvider, properties);
+    }
+
     public ControllerServiceEntity createControllerService(final String type, final String processGroupId, final String bundleGroupId, final String artifactId, final String version)
         throws NiFiClientException, IOException {
 
@@ -512,11 +1341,24 @@ public class ParameterContextIT extends NiFiSystemIT {
         return getClientUtil().createParameterEntity(name, description, sensitive, value);
     }
 
-    public ParameterContextEntity createParameterContextEntity(final String name, final String description, final Set<ParameterEntity> parameters) {
-        return getClientUtil().createParameterContextEntity(name, description, parameters);
+    public ParameterContextEntity createParameterContextEntity(final String name, final String description, final Set<ParameterEntity> parameters,
+                                                               final List<ParameterContextEntity> parameterContextRefs,
+                                                               final ParameterProviderEntity parameterProvider, final String parameterGroupName) {
+        final List<String> inheritedParameterContextIds = new ArrayList<>();
+        if (parameterContextRefs != null) {
+            inheritedParameterContextIds.addAll(parameterContextRefs.stream().map(ParameterContextEntity::getId).collect(Collectors.toList()));
+        }
+        final ParameterProviderConfiguration parameterProviderConfiguration = parameterProvider == null ? null
+                : new StandardParameterProviderConfiguration(parameterProvider.getId(), parameterGroupName, true);
+        return getClientUtil().createParameterContextEntity(name, description, parameters, inheritedParameterContextIds,
+                parameterProviderConfiguration);
     }
 
-    private ProcessGroupEntity setParameterContext(final String groupId, final ParameterContextEntity parameterContext) throws NiFiClientException, IOException {
+    public ParameterContextEntity createParameterContextEntity(final String name, final String description, final Set<ParameterEntity> parameters) {
+        return createParameterContextEntity(name, description, parameters, Collections.emptyList(), null, null);
+    }
+
+    protected ProcessGroupEntity setParameterContext(final String groupId, final ParameterContextEntity parameterContext) throws NiFiClientException, IOException {
         return getClientUtil().setParameterContext(groupId, parameterContext);
     }
 
@@ -530,15 +1372,37 @@ public class ParameterContextIT extends NiFiSystemIT {
 
     public ParameterContextUpdateRequestEntity updateParameterContext(final ParameterContextEntity existingEntity, final String paramName, final String paramValue)
                 throws NiFiClientException, IOException {
-        return updateParameterContext(existingEntity, Collections.singletonMap(paramName, paramValue));
+        return getClientUtil().updateParameterContext(existingEntity, paramName, paramValue);
     }
 
-    public ParameterContextUpdateRequestEntity updateParameterContext(final ParameterContextEntity existingEntity, final Map<String, String> parameters) throws NiFiClientException, IOException {
-        return getClientUtil().updateParameterContext(existingEntity, parameters);
+    public ParameterProviderEntity fetchParameters(final ParameterProviderEntity parameterProvider) throws NiFiClientException, IOException {
+        return getClientUtil().fetchParameters(parameterProvider);
     }
 
+    public ParameterProviderApplyParametersRequestEntity applyParameters(final ParameterProviderEntity entity,
+                                                                         final Collection<ParameterGroupConfigurationEntity> parameterNameGroups) throws NiFiClientException, IOException {
+        return getClientUtil().applyParameters(entity, parameterNameGroups);
+    }
 
-    private void waitForValidProcessor(String id) throws InterruptedException, IOException, NiFiClientException {
+    public void waitForAppliedParameters(final ParameterProviderApplyParametersRequestEntity applyParametersRequestEntity) throws NiFiClientException, IOException, InterruptedException {
+        getClientUtil().waitForParameterProviderApplicationRequestToComplete(applyParametersRequestEntity.getRequest().getParameterProvider().getId(),
+                applyParametersRequestEntity.getRequest().getRequestId());
+    }
+
+    public void fetchAndWaitForAppliedParameters(final ParameterProviderEntity entity) throws NiFiClientException, IOException, InterruptedException {
+        this.fetchAndWaitForAppliedParameters(entity, null);
+    }
+
+    public void fetchAndWaitForAppliedParameters(final ParameterProviderEntity entity, Collection<ParameterGroupConfigurationEntity> inputParameterGroupConfigs)
+            throws NiFiClientException, IOException, InterruptedException {
+        final ParameterProviderEntity fetched = fetchParameters(entity);
+        final Collection<ParameterGroupConfigurationEntity> parameterGroupConfigurations = inputParameterGroupConfigs != null
+                ? inputParameterGroupConfigs : fetched.getComponent().getParameterGroupConfigurations();
+        final ParameterProviderApplyParametersRequestEntity request = applyParameters(entity, parameterGroupConfigurations);
+        waitForAppliedParameters(request);
+    }
+
+    void waitForValidProcessor(String id) throws InterruptedException, IOException, NiFiClientException {
         getClientUtil().waitForValidProcessor(id);
     }
 
@@ -553,4 +1417,189 @@ public class ParameterContextIT extends NiFiSystemIT {
     private void waitForStoppedProcessor(final String processorId) throws InterruptedException, IOException, NiFiClientException {
         getClientUtil().waitForStoppedProcessor(processorId);
     }
+
+    protected AssetEntity createAsset(final String paramContextId, final File assetFile) throws NiFiClientException, IOException {
+        return createAsset(paramContextId, assetFile.getName(), assetFile);
+    }
+
+    protected AssetEntity createAsset(final String paramContextId, final String assetName, final File assetFile) throws NiFiClientException, IOException {
+        final AssetEntity asset = getNifiClient().getParamContextClient().createAsset(paramContextId, assetName, assetFile);
+        logger.info("Created asset [{}] in parameter context [{}]", assetName, paramContextId);
+        assertAsset(asset, assetName);
+        return asset;
+    }
+
+    protected AssetsEntity assertAssetListing(final String paramContextId, final int expectedCount) throws NiFiClientException, IOException {
+        final AssetsEntity assetListing = getNifiClient().getParamContextClient().getAssets(paramContextId);
+        assertNotNull(assetListing);
+        assertNotNull(assetListing.getAssets());
+        assertEquals(expectedCount, assetListing.getAssets().size());
+        return assetListing;
+    }
+
+    protected void assertAssetExists(final AssetEntity asset, final AssetsEntity assets) {
+        final AssetEntity assetFromListing = assets.getAssets().stream()
+                .filter(a -> a.getAsset().getId().equals(asset.getAsset().getId()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(assetFromListing);
+    }
+
+    @Test
+    public void testParameterValueReferenceUpdatePropagation() throws NiFiClientException, IOException, InterruptedException {
+        // Create a parameter provider for context S with a parameter db_host
+        ParameterProviderEntity parameterProvider = createParameterProvider("PropertiesParameterProvider");
+        parameterProvider = updateParameterProviderProperties(parameterProvider, Collections.singletonMap("parameters", "db_host=0 sec"));
+
+        final String parameterGroupName = "Parameters";
+        final String sContextName = "S_Context";
+        final ParameterContextEntity sContextEntity = createParameterContextEntity(sContextName, "Inherited provider context",
+                Collections.emptySet(), Collections.emptyList(), parameterProvider, parameterGroupName);
+        final ParameterContextEntity createdS = getNifiClient().getParamContextClient().createParamContext(sContextEntity);
+
+        // Fetch and apply parameters from the provider so db_host becomes a provided parameter
+        final ParameterGroupConfigurationEntity groupConfiguration = new ParameterGroupConfigurationEntity();
+        groupConfiguration.setSynchronized(true);
+        groupConfiguration.setGroupName(parameterGroupName);
+        groupConfiguration.setParameterContextName(sContextName);
+        groupConfiguration.setParameterSensitivities(Collections.singletonMap("db_host", ParameterSensitivity.NON_SENSITIVE));
+        fetchAndWaitForAppliedParameters(parameterProvider, Collections.singletonList(groupConfiguration));
+
+        // Create parent context P with parameter host = #{db_host}, inheriting from S
+        final Set<ParameterEntity> pParams = new HashSet<>();
+        pParams.add(createParameterEntity("host", null, false, "#{db_host}"));
+        final ParameterContextEntity pContextEntity = createParameterContextEntity("P_Context", "Parent context",
+                pParams, Collections.singletonList(createdS), null, null);
+        final ParameterContextEntity createdP = getNifiClient().getParamContextClient().createParamContext(pContextEntity);
+
+        // Bind the root process group to P
+        setParameterContext("root", createdP);
+
+        // Create a processor that references #{host}
+        ProcessorEntity processorEntity = createProcessor(TEST_PROCESSORS_PACKAGE + ".Sleep", NIFI_GROUP_ID, TEST_EXTENSIONS_ARTIFACT_ID, getNiFiVersion());
+        final String processorId = processorEntity.getId();
+
+        final ProcessorConfigDTO config = processorEntity.getComponent().getConfig();
+        config.setProperties(Collections.singletonMap("Validate Sleep Time", "#{host}"));
+        config.setAutoTerminatedRelationships(Collections.singleton("success"));
+        getNifiClient().getProcessorClient().updateProcessor(processorEntity);
+
+        // host resolves to "0 sec" (from the provider), so the processor should be valid
+        waitForValidProcessor(processorId);
+
+        // Start the processor
+        getClientUtil().startProcessor(processorEntity);
+        waitForRunningProcessor(processorId);
+
+        try {
+            // Update db_host via the provider to a new value
+            parameterProvider = updateParameterProviderProperties(parameterProvider, Collections.singletonMap("parameters", "db_host=1 sec"));
+            fetchAndWaitForAppliedParameters(parameterProvider, Collections.singletonList(groupConfiguration));
+
+            // Processor should be running again after the parameter update completes
+            waitForRunningProcessor(processorId);
+        } finally {
+            getClientUtil().stopProcessor(processorEntity);
+            getNifiClient().getProcessorClient().deleteProcessor(processorId, processorEntity.getRevision().getClientId(), 3);
+        }
+    }
+
+    @Test
+    public void testParameterValueReferenceUserManagedUpdatePropagation() throws NiFiClientException, IOException, InterruptedException {
+        // Create user-managed inherited context S with a parameter db_host (no parameter provider involved)
+        final Set<ParameterEntity> sParams = new HashSet<>();
+        sParams.add(createParameterEntity("db_host", null, false, "0 sec"));
+        final ParameterContextEntity sContextEntity = createParameterContextEntity("S_UserContext", "User-managed inherited context",
+                sParams, Collections.emptyList(), null, null);
+        final ParameterContextEntity createdS = getNifiClient().getParamContextClient().createParamContext(sContextEntity);
+
+        // Create parent context P with parameter host = #{db_host}, inheriting from S
+        final Set<ParameterEntity> pParams = new HashSet<>();
+        pParams.add(createParameterEntity("host", null, false, "#{db_host}"));
+        final ParameterContextEntity pContextEntity = createParameterContextEntity("P_UserContext", "Parent context with alias",
+                pParams, Collections.singletonList(createdS), null, null);
+        final ParameterContextEntity createdP = getNifiClient().getParamContextClient().createParamContext(pContextEntity);
+
+        setParameterContext("root", createdP);
+
+        ProcessorEntity processorEntity = createProcessor(TEST_PROCESSORS_PACKAGE + ".Sleep", NIFI_GROUP_ID, TEST_EXTENSIONS_ARTIFACT_ID, getNiFiVersion());
+        final String processorId = processorEntity.getId();
+
+        final ProcessorConfigDTO config = processorEntity.getComponent().getConfig();
+        config.setProperties(Collections.singletonMap("Validate Sleep Time", "#{host}"));
+        config.setAutoTerminatedRelationships(Collections.singleton("success"));
+        getNifiClient().getProcessorClient().updateProcessor(processorEntity);
+
+        // host resolves to "0 sec" via the alias to db_host in S, so the processor should validate
+        waitForValidProcessor(processorId);
+
+        getClientUtil().startProcessor(processorEntity);
+        waitForRunningProcessor(processorId);
+
+        try {
+            // Update db_host on S via a regular parameter context PUT (no provider)
+            final ParameterContextUpdateRequestEntity updateRequestEntity = updateParameterContext(createdS, "db_host", "1 sec");
+
+            // The processor references #{host}, which aliases #{db_host}; it must appear as an affected component
+            final Set<AffectedComponentEntity> affectedComponents = updateRequestEntity.getRequest().getReferencingComponents();
+            final Set<String> affectedComponentIds = affectedComponents.stream()
+                    .map(AffectedComponentEntity::getId)
+                    .collect(Collectors.toSet());
+            assertTrue(affectedComponentIds.contains(processorId));
+
+            getClientUtil().waitForParameterContextRequestToComplete(createdS.getId(), updateRequestEntity.getRequest().getRequestId());
+
+            waitForRunningProcessor(processorId);
+        } finally {
+            getClientUtil().stopProcessor(processorEntity);
+            getNifiClient().getProcessorClient().deleteProcessor(processorId, processorEntity.getRevision().getClientId(), 3);
+        }
+    }
+
+    @Test
+    public void testParameterAliasDisplayedAsRawValue() throws NiFiClientException, IOException {
+        final Set<ParameterEntity> sParams = new HashSet<>();
+        sParams.add(createParameterEntity("db_host", null, false, "myserver.example.com"));
+        final ParameterContextEntity sContextEntity = createParameterContextEntity("S_RawDisplay", "Inherited context",
+                sParams, Collections.emptyList(), null, null);
+        final ParameterContextEntity createdS = getNifiClient().getParamContextClient().createParamContext(sContextEntity);
+
+        final Set<ParameterEntity> pParams = new HashSet<>();
+        pParams.add(createParameterEntity("host", null, false, "#{db_host}"));
+        final ParameterContextEntity pContextEntity = createParameterContextEntity("P_RawDisplay", "Parent context with alias",
+                pParams, Collections.singletonList(createdS), null, null);
+        final ParameterContextEntity createdP = getNifiClient().getParamContextClient().createParamContext(pContextEntity);
+
+        final ParameterContextEntity fetched = getNifiClient().getParamContextClient().getParamContext(createdP.getId(), true);
+        final Set<ParameterEntity> parameters = fetched.getComponent().getParameters();
+
+        final ParameterDTO hostDto = parameters.stream()
+                .map(ParameterEntity::getParameter)
+                .filter(p -> "host".equals(p.getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(hostDto);
+        assertFalse(hostDto.getInherited() != null && hostDto.getInherited());
+        assertEquals("#{db_host}", hostDto.getValue());
+
+        final ParameterDTO dbHostDto = parameters.stream()
+                .map(ParameterEntity::getParameter)
+                .filter(p -> "db_host".equals(p.getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(dbHostDto);
+        assertTrue(dbHostDto.getInherited());
+        assertEquals("myserver.example.com", dbHostDto.getValue());
+    }
+
+    protected void assertAsset(final AssetEntity asset, final String expectedName) {
+        assertNotNull(asset);
+        assertNotNull(asset.getAsset());
+        assertNotNull(asset.getAsset().getId());
+        assertNotNull(asset.getAsset().getDigest());
+        assertNotNull(asset.getAsset().getMissingContent());
+        assertFalse(asset.getAsset().getMissingContent());
+        assertEquals(expectedName, asset.getAsset().getName());
+    }
+
 }

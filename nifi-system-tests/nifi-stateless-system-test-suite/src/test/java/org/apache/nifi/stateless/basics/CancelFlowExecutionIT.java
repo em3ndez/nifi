@@ -17,24 +17,24 @@
 
 package org.apache.nifi.stateless.basics;
 
+import org.apache.nifi.flow.VersionedPort;
+import org.apache.nifi.flow.VersionedProcessor;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.registry.flow.VersionedPort;
-import org.apache.nifi.registry.flow.VersionedProcessor;
 import org.apache.nifi.stateless.StatelessSystemIT;
 import org.apache.nifi.stateless.VersionedFlowBuilder;
 import org.apache.nifi.stateless.config.StatelessConfigurationException;
 import org.apache.nifi.stateless.flow.DataflowTrigger;
 import org.apache.nifi.stateless.flow.StatelessDataflow;
 import org.apache.nifi.stateless.flow.TriggerResult;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class CancelFlowExecutionIT extends StatelessSystemIT {
 
@@ -51,6 +51,7 @@ public class CancelFlowExecutionIT extends StatelessSystemIT {
         flowBuilder.createConnection(sleep, outPort, "success");
 
         final StatelessDataflow dataflow = loadDataflow(flowBuilder.getFlowSnapshot());
+        dataflow.enqueue("Hello World".getBytes(), Collections.emptyMap(), "In");
         final DataflowTrigger trigger = dataflow.trigger();
 
         // Wait up to 250 milliseconds. At that point, the result should not be available.

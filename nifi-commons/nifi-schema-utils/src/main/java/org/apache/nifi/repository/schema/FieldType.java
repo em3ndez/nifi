@@ -30,17 +30,15 @@ public enum FieldType {
     MAP(2, true, Map.class),
     UNION(4, false, NamedValue.class);
 
-
     private final int numBytes;
     private final boolean lengthEncoded;
     private final Class<?> javaClass;
 
-    private FieldType(final int numBytes, final boolean lengthEncoded, final Class<?> javaClass) {
+    FieldType(final int numBytes, final boolean lengthEncoded, final Class<?> javaClass) {
         this.numBytes = numBytes;
         this.lengthEncoded = lengthEncoded;
         this.javaClass = javaClass;
     }
-
 
     /**
      * Indicates the number of bytes that must be read for this field. If this field is length-encoded

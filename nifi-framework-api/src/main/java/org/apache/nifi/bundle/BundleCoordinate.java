@@ -44,7 +44,7 @@ public class BundleCoordinate {
     }
 
     private boolean isBlank(String str) {
-        return str == null || str.trim().length() == 0;
+        return str == null || str.isBlank();
     }
 
     public String getGroup() {
@@ -74,11 +74,10 @@ public class BundleCoordinate {
             return false;
         }
 
-        if (!(obj instanceof BundleCoordinate)) {
+        if (!(obj instanceof final BundleCoordinate other)) {
             return false;
         }
 
-        final BundleCoordinate other = (BundleCoordinate) obj;
         return getCoordinate().equals(other.getCoordinate());
     }
 

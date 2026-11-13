@@ -135,8 +135,6 @@ public class SchemaRecordReader {
         return recordIterator;
     }
 
-
-
     private Object readField(final InputStream in, final RecordField field) throws IOException {
         switch (field.getRepetition()) {
             case ZERO_OR_MORE: {
@@ -179,7 +177,6 @@ public class SchemaRecordReader {
             throw new IOException("Failed to read field '" + field.getFieldName() + "'", ioe);
         }
     }
-
 
     private Object readFieldValue(final InputStream in, final FieldType fieldType, final String fieldName, final List<RecordField> subFields) throws IOException {
         switch (fieldType) {
@@ -229,9 +226,9 @@ public class SchemaRecordReader {
             case COMPLEX: {
                 final int numSubFields = subFields.size();
                 final Map<RecordField, Object> subFieldValues = new HashMap<>(numSubFields);
-                for (int i = 0; i < numSubFields; i++) {
-                    final Object subFieldValue = readField(in, subFields.get(i));
-                    subFieldValues.put(subFields.get(i), subFieldValue);
+                for (RecordField subField : subFields) {
+                    final Object subFieldValue = readField(in, subField);
+                    subFieldValues.put(subField, subFieldValue);
                 }
 
                 return new FieldMapRecord(subFieldValues, new RecordSchema(subFields));
@@ -247,10 +244,8 @@ public class SchemaRecordReader {
                 final RecordField matchingField = fieldOption.get();
                 return readField(in, matchingField);
             }
-            default: {
-                throw new IOException("Unrecognized Field Type " + fieldType + " for field '" + fieldName + "'");
-            }
         }
+        throw new IOException("Unrecognized Field Type " + fieldType + " for field '" + fieldName + "'");
     }
 
     private int readInt(final InputStream in) throws IOException {

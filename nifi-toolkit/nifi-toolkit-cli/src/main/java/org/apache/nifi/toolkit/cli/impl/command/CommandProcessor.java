@@ -21,7 +21,6 @@ import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.Command;
 import org.apache.nifi.toolkit.cli.api.CommandException;
 import org.apache.nifi.toolkit.cli.api.CommandGroup;
@@ -37,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -46,22 +46,18 @@ public class CommandProcessor {
 
     public static final String BACK_REF_INDICATOR = "&";
 
-    private final Map<String,Command> topLevelCommands;
-    private final Map<String,CommandGroup> commandGroups;
+    private final Map<String, Command> topLevelCommands;
+    private final Map<String, CommandGroup> commandGroups;
     private final Context context;
     private final PrintStream out;
 
     private final AtomicReference<ReferenceResolver> backReferenceHolder = new AtomicReference<>(null);
 
-    public CommandProcessor(final Map<String,Command> topLevelCommands, final Map<String,CommandGroup> commandGroups, final Context context) {
-        this.topLevelCommands = topLevelCommands;
-        this.commandGroups = commandGroups;
-        this.context = context;
-        this.out = context.getOutput();
-        Validate.notNull(this.topLevelCommands);
-        Validate.notNull(this.commandGroups);
-        Validate.notNull(this.context);
-        Validate.notNull(this.out);
+    public CommandProcessor(final Map<String, Command> topLevelCommands, final Map<String, CommandGroup> commandGroups, final Context context) {
+        this.topLevelCommands = Objects.requireNonNull(topLevelCommands);
+        this.commandGroups = Objects.requireNonNull(commandGroups);
+        this.context = Objects.requireNonNull(context);
+        this.out = Objects.requireNonNull(context.getOutput());
     }
 
     public void printBasicUsage(String errorMessage) {
@@ -119,7 +115,7 @@ public class CommandProcessor {
 
         final List<ResolvedReference> resolvedReferences = new ArrayList<>();
 
-        for (int i=0; i < args.length; i++) {
+        for (int i = 0; i < args.length; i++) {
             final String arg = args[i];
             if (arg == null || !arg.startsWith(BACK_REF_INDICATOR)) {
                 continue;
@@ -151,7 +147,7 @@ public class CommandProcessor {
                     args[i] = resolvedReference.getResolvedValue();
                     resolvedReferences.add(resolvedReference);
                 }
-            } catch (Exception e) {
+            } catch (Exception ignored) {
                 // skip
             }
         }
@@ -251,14 +247,12 @@ public class CommandProcessor {
             } else {
                 final Result result = command.execute(commandLine);
 
-                if (result instanceof WritableResult) {
-                    final WritableResult writableResult = (WritableResult) result;
+                if (result instanceof final WritableResult writableResult) {
                     writableResult.write(out);
                 }
 
                 // if the Result is Referenceable then create the resolver and store it in the holder for the next command
-                if (result instanceof Referenceable) {
-                    final Referenceable referenceable = (Referenceable) result;
+                if (result instanceof final Referenceable referenceable) {
                     final ReferenceResolver referenceResolver = referenceable.createReferenceResolver(context);
 
                     // only set the resolve if its not empty so that a resolver that was already in there sticks around

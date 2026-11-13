@@ -1,0 +1,644 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.groups;
+
+import org.apache.nifi.asset.AssetManager;
+import org.apache.nifi.components.state.Scope;
+import org.apache.nifi.components.state.StateManager;
+import org.apache.nifi.components.state.StateManagerProvider;
+import org.apache.nifi.components.state.StateMap;
+import org.apache.nifi.connectable.Connectable;
+import org.apache.nifi.connectable.ConnectableType;
+import org.apache.nifi.connectable.Connection;
+import org.apache.nifi.controller.ClusterTopologyProvider;
+import org.apache.nifi.controller.NodeTypeProvider;
+import org.apache.nifi.controller.ProcessScheduler;
+import org.apache.nifi.controller.ReloadComponent;
+import org.apache.nifi.controller.ScheduledState;
+import org.apache.nifi.controller.flow.FlowManager;
+import org.apache.nifi.controller.queue.DropFlowFileRequest;
+import org.apache.nifi.controller.queue.DropFlowFileState;
+import org.apache.nifi.controller.queue.DropFlowFileStatus;
+import org.apache.nifi.controller.queue.FlowFileQueue;
+import org.apache.nifi.controller.queue.QueueSize;
+import org.apache.nifi.controller.service.ControllerServiceProvider;
+import org.apache.nifi.flow.ExecutionEngine;
+import org.apache.nifi.nar.ExtensionManager;
+import org.apache.nifi.registry.flow.VersionControlInformation;
+import org.apache.nifi.registry.flow.VersionedFlowStatus;
+import org.apache.nifi.security.encryption.PropertyEncryptionProvider;
+import org.apache.nifi.util.NiFiProperties;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class StandardProcessGroupTest {
+
+    private static final String ID = "12345678-4321";
+    private static final String ID_PATH = "/12345678-4321";
+    private static final String NAME = "TestGroup";
+    private static final String NAME_PATH = "/TestGroup";
+
+    private static final String PARENT_ID = "87654321-1234";
+    private static final String PARENT_ID_PATH = "/87654321-1234/12345678-4321";
+    private static final String PARENT_NAME = "ParentGroup";
+    private static final String PARENT_NAME_PATH = "/ParentGroup/TestGroup";
+    private static final String PARENT_REGISTERED_FLOW_IDENTIFIER_PATH = "/87654321-4321:1.0.0/UNREGISTERED";
+
+    private static final String REGISTERED_FLOW_IDENTIFIER = "87654321-4321";
+    private static final String REGISTERED_FLOW_VERSION = "1.0.0";
+    private static final String REGISTERED_FLOW_IDENTIFIER_PATH = "/87654321-4321:1.0.0";
+
+    @Mock
+    private ControllerServiceProvider controllerServiceProvider;
+
+    @Mock
+    private ProcessScheduler processScheduler;
+
+    @Mock
+    private PropertyEncryptionProvider propertyEncryptionProvider;
+
+    @Mock
+    private ExtensionManager extensionManager;
+
+    @Mock
+    private StateManagerProvider stateManagerProvider;
+
+    @Mock
+    private FlowManager flowManager;
+
+    @Mock
+    private ReloadComponent reloadComponent;
+
+    @Mock
+    private NodeTypeProvider nodeTypeProvider;
+
+    @Mock
+    private ClusterTopologyProvider clusterTopologyProvider;
+
+    @Mock
+    private NiFiProperties properties;
+
+    @Mock
+    private StatelessGroupNodeFactory statelessGroupNodeFactory;
+
+    @Mock
+    private AssetManager assetManager;
+
+    @Mock
+    private StateManager stateManager;
+
+    @Mock
+    private StateMap stateMap;
+
+    @Mock
+    private ProcessGroup parentProcessGroup;
+
+    @Mock
+    private VersionControlInformation versionControlInformation;
+
+    @Mock
+    private VersionedFlowStatus versionedFlowStatus;
+
+    private StandardProcessGroup processGroup;
+
+    @BeforeEach
+    void setProcessGroup() throws IOException {
+        when(stateManagerProvider.getStateManager(anyString())).thenReturn(stateManager);
+        when(stateManager.getState(eq(Scope.LOCAL))).thenReturn(stateMap);
+
+        processGroup = new StandardProcessGroup(
+                ID,
+                controllerServiceProvider,
+                processScheduler,
+                propertyEncryptionProvider,
+                extensionManager,
+                stateManagerProvider,
+                flowManager,
+                reloadComponent,
+                nodeTypeProvider,
+                clusterTopologyProvider,
+                properties,
+                statelessGroupNodeFactory,
+                assetManager,
+                null
+        );
+    }
+
+    @Test
+    void testStartAndStopProcessingDoNothingWhenParentIsStateless() throws Exception {
+        // Callers that resolve a component's owning stateless group rely on this no-op: only the top-most stateless
+        // group may be started or stopped directly. It is also what terminates the recursive stopComponents() walk,
+        // so making it throw or delegate upward would break stateless shutdown.
+        when(parentProcessGroup.getExecutionEngine()).thenReturn(ExecutionEngine.STATELESS);
+        when(parentProcessGroup.resolveExecutionEngine()).thenReturn(ExecutionEngine.STATELESS);
+        processGroup.setParent(parentProcessGroup);
+        processGroup.setExecutionEngine(ExecutionEngine.STATELESS);
+
+        processGroup.startProcessing();
+
+        final CompletableFuture<Void> stopFuture = processGroup.stopProcessing();
+
+        assertTrue(stopFuture.isDone());
+        assertNull(stopFuture.get());
+        verify(processScheduler, never()).startStatelessGroup(any());
+        verify(processScheduler, never()).stopStatelessGroup(any());
+    }
+
+    @Test
+    void testGetLoggingAttributesWithoutParentProcessGroup() {
+        processGroup.setName(NAME);
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+
+        assertNotNull(loggingAttributes);
+        assertFalse(loggingAttributes.isEmpty());
+
+        final Map<String, String> expected = Map.of(
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID.getAttribute(), ID,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID_PATH.getAttribute(), ID_PATH,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute(), NAME,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME_PATH.getAttribute(), NAME_PATH
+        );
+
+        assertEquals(expected, loggingAttributes);
+    }
+
+    @Test
+    void testGetLoggingAttributesWithParentProcessGroup() {
+        processGroup.setName(NAME);
+
+        when(parentProcessGroup.getIdentifier()).thenReturn(PARENT_ID);
+        when(parentProcessGroup.getName()).thenReturn(PARENT_NAME);
+        processGroup.setParent(parentProcessGroup);
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+
+        assertNotNull(loggingAttributes);
+        assertFalse(loggingAttributes.isEmpty());
+
+        final Map<String, String> expected = Map.of(
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID.getAttribute(), ID,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID_PATH.getAttribute(), PARENT_ID_PATH,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute(), NAME,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME_PATH.getAttribute(), PARENT_NAME_PATH
+        );
+
+        assertEquals(expected, loggingAttributes);
+    }
+
+    @Test
+    void testGetLoggingAttributesWithParentVersionControlInformation() {
+        processGroup.setName(NAME);
+
+        when(versionControlInformation.getFlowIdentifier()).thenReturn(REGISTERED_FLOW_IDENTIFIER);
+        when(versionControlInformation.getVersion()).thenReturn(REGISTERED_FLOW_VERSION);
+
+        when(parentProcessGroup.getIdentifier()).thenReturn(PARENT_ID);
+        when(parentProcessGroup.getName()).thenReturn(PARENT_NAME);
+        when(parentProcessGroup.getVersionControlInformation()).thenReturn(versionControlInformation);
+        processGroup.setParent(parentProcessGroup);
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+
+        assertNotNull(loggingAttributes);
+        assertFalse(loggingAttributes.isEmpty());
+
+        final Map<String, String> expected = Map.of(
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID.getAttribute(), ID,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID_PATH.getAttribute(), PARENT_ID_PATH,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute(), NAME,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME_PATH.getAttribute(), PARENT_NAME_PATH,
+                StandardProcessGroup.LoggingAttribute.REGISTERED_FLOW_IDENTIFIER_PATH.getAttribute(), PARENT_REGISTERED_FLOW_IDENTIFIER_PATH
+        );
+
+        assertEquals(expected, loggingAttributes);
+    }
+
+    @Test
+    void testGetLoggingAttributesWithVersionControlInformation() {
+        processGroup.setName(NAME);
+
+        when(versionControlInformation.getFlowIdentifier()).thenReturn(REGISTERED_FLOW_IDENTIFIER);
+        when(versionControlInformation.getVersion()).thenReturn(REGISTERED_FLOW_VERSION);
+        when(versionControlInformation.getStatus()).thenReturn(versionedFlowStatus);
+        processGroup.setVersionControlInformation(versionControlInformation, Map.of());
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+
+        assertNotNull(loggingAttributes);
+        assertFalse(loggingAttributes.isEmpty());
+
+        final Map<String, String> expected = Map.of(
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID.getAttribute(), ID,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID_PATH.getAttribute(), ID_PATH,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute(), NAME,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME_PATH.getAttribute(), NAME_PATH,
+                StandardProcessGroup.LoggingAttribute.REGISTERED_FLOW_IDENTIFIER.getAttribute(), REGISTERED_FLOW_IDENTIFIER,
+                StandardProcessGroup.LoggingAttribute.REGISTERED_FLOW_VERSION.getAttribute(), REGISTERED_FLOW_VERSION,
+                StandardProcessGroup.LoggingAttribute.REGISTERED_FLOW_IDENTIFIER_PATH.getAttribute(), REGISTERED_FLOW_IDENTIFIER_PATH
+        );
+
+        assertEquals(expected, loggingAttributes);
+    }
+
+    @Test
+    void testSetConnectorLoggingAttributesMergesIntoLoggingAttributes() {
+        processGroup.setName(NAME);
+
+        final Map<String, String> connectorAttributes = Map.of(
+                "connectorId", "connector-1",
+                "connectorName", "My Connector",
+                "connectorComponent", "com.example.MyConnector"
+        );
+
+        processGroup.setConnectorLoggingAttributes(connectorAttributes);
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+        assertEquals("connector-1", loggingAttributes.get("connectorId"));
+        assertEquals("My Connector", loggingAttributes.get("connectorName"));
+        assertEquals("com.example.MyConnector", loggingAttributes.get("connectorComponent"));
+        assertEquals(NAME, loggingAttributes.get(StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute()));
+        assertEquals(ID, loggingAttributes.get(StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID.getAttribute()));
+    }
+
+    @Test
+    void testSetConnectorLoggingAttributesCascadesToChildProcessGroups() {
+        processGroup.setName(NAME);
+
+        final StandardProcessGroup child = createStandardProcessGroup("child-id");
+        child.setName("Child");
+        processGroup.addProcessGroup(child);
+
+        final Map<String, String> connectorAttributes = Map.of(
+                "connectorId", "connector-1",
+                "connectorName", "Postgres CDC"
+        );
+
+        processGroup.setConnectorLoggingAttributes(connectorAttributes);
+
+        assertEquals("connector-1", child.getLoggingAttributes().get("connectorId"));
+        assertEquals("Postgres CDC", child.getLoggingAttributes().get("connectorName"));
+    }
+
+    @Test
+    void testAddProcessGroupInheritsConnectorLoggingAttributesFromParent() {
+        processGroup.setName(NAME);
+        processGroup.setConnectorLoggingAttributes(Map.of(
+                "connectorId", "connector-1",
+                "connectorName", "Postgres CDC"
+        ));
+
+        final StandardProcessGroup lateChild = createStandardProcessGroup("late-child-id");
+        lateChild.setName("Late Child");
+        processGroup.addProcessGroup(lateChild);
+
+        assertEquals("connector-1", lateChild.getLoggingAttributes().get("connectorId"));
+        assertEquals("Postgres CDC", lateChild.getLoggingAttributes().get("connectorName"));
+        assertEquals(Map.copyOf(processGroup.getConnectorLoggingAttributes()), lateChild.getConnectorLoggingAttributes());
+    }
+
+    @Test
+    void testEmptyConnectorLoggingAttributesAddsNothing() {
+        processGroup.setName(NAME);
+        processGroup.setConnectorLoggingAttributes(Map.of());
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+        assertFalse(loggingAttributes.containsKey("connectorId"));
+        assertTrue(processGroup.getConnectorLoggingAttributes().isEmpty());
+        // Verify the PG-level keys are still present.
+        assertEquals(NAME, loggingAttributes.get(StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute()));
+    }
+
+    @Test
+    void testSetConnectorLoggingAttributesReplacesPreviousValues() {
+        processGroup.setName(NAME);
+        processGroup.setConnectorLoggingAttributes(Map.of(
+                "connectorId", "connector-1",
+                "connectorName", "Old Name",
+                "customKey", "customValue"
+        ));
+
+        processGroup.setConnectorLoggingAttributes(Map.of(
+                "connectorId", "connector-1",
+                "connectorName", "New Name"
+        ));
+
+        final Map<String, String> loggingAttributes = processGroup.getLoggingAttributes();
+        assertEquals("New Name", loggingAttributes.get("connectorName"));
+        assertFalse(loggingAttributes.containsKey("customKey"));
+    }
+
+    @Test
+    void shouldPropagateLoggingAttributesChangesToChildren() {
+        final String rootId = "root";
+        final String rootName = "RootGroup";
+
+        final String middleId = "middle";
+        final String middleName = "MiddleGroup";
+
+        final String leafId = "leaf";
+        final String leafName = "LeafGroup";
+
+        final StandardProcessGroup leaf = createStandardProcessGroup(leafId);
+        leaf.setName(leafName);
+
+        final StandardProcessGroup middle = createStandardProcessGroup(middleId);
+        middle.setName(middleName);
+
+        final StandardProcessGroup versionedRoot = createStandardProcessGroup(rootId);
+        versionedRoot.setName(rootName);
+
+        when(flowManager.getFlowAnalyzer()).thenReturn(Optional.empty());
+        versionedRoot.addProcessGroup(middle);
+        middle.addProcessGroup(leaf);
+
+        when(versionControlInformation.getFlowIdentifier()).thenReturn(REGISTERED_FLOW_IDENTIFIER);
+        when(versionControlInformation.getVersion()).thenReturn(REGISTERED_FLOW_VERSION);
+        when(versionControlInformation.getStatus()).thenReturn(versionedFlowStatus);
+        versionedRoot.setVersionControlInformation(versionControlInformation, Map.of());
+
+        final Map<String, String> expected = Map.of(
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID.getAttribute(), leafId,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME.getAttribute(), leafName,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_ID_PATH.getAttribute(), "/" + rootId + "/" + middleId + "/" + leafId,
+                StandardProcessGroup.LoggingAttribute.PROCESS_GROUP_NAME_PATH.getAttribute(), "/" + rootName + "/" + middleName + "/" + leafName,
+                StandardProcessGroup.LoggingAttribute.REGISTERED_FLOW_IDENTIFIER_PATH.getAttribute(), "/" + REGISTERED_FLOW_IDENTIFIER + ":" + REGISTERED_FLOW_VERSION + "/UNREGISTERED/UNREGISTERED"
+        );
+
+        assertEquals(expected, leaf.getLoggingAttributes());
+    }
+
+    @Test
+    void testFindOwningConnectorIdentifierWalksParentHierarchy() {
+        final StandardProcessGroup connectorGroup = createStandardProcessGroup("connector-group", "connector-1");
+        final StandardProcessGroup child = createStandardProcessGroup("child");
+        final StandardProcessGroup grandchild = createStandardProcessGroup("grandchild");
+
+        child.setParent(connectorGroup);
+        grandchild.setParent(child);
+
+        assertEquals(Optional.of("connector-1"), connectorGroup.findOwningConnectorIdentifier());
+        assertEquals(Optional.of("connector-1"), child.findOwningConnectorIdentifier());
+        assertEquals(Optional.of("connector-1"), grandchild.findOwningConnectorIdentifier());
+        assertEquals(Optional.empty(), processGroup.findOwningConnectorIdentifier());
+    }
+
+    @Test
+    void testFindOwningConnectorIdentifierResolvesHierarchyOnlyOnce() {
+        when(parentProcessGroup.getConnectorIdentifier()).thenReturn(Optional.of("connector-1"));
+        processGroup.setParent(parentProcessGroup);
+
+        assertEquals(Optional.of("connector-1"), processGroup.findOwningConnectorIdentifier());
+        assertEquals(Optional.of("connector-1"), processGroup.findOwningConnectorIdentifier());
+        assertEquals(Optional.of("connector-1"), processGroup.findOwningConnectorIdentifier());
+        verify(parentProcessGroup, times(1)).getConnectorIdentifier();
+
+        final ProcessGroup unmanagedParent = mock(ProcessGroup.class);
+        final StandardProcessGroup unmanagedGroup = createStandardProcessGroup("unmanaged-group");
+        unmanagedGroup.setParent(unmanagedParent);
+
+        assertEquals(Optional.empty(), unmanagedGroup.findOwningConnectorIdentifier());
+        assertEquals(Optional.empty(), unmanagedGroup.findOwningConnectorIdentifier());
+
+        verify(unmanagedParent, times(1)).getConnectorIdentifier();
+    }
+
+    @Test
+    void testFindOwningConnectorIdentifierResolvedAgainAfterParentAssigned() {
+        assertEquals(Optional.empty(), processGroup.findOwningConnectorIdentifier());
+
+        when(parentProcessGroup.getConnectorIdentifier()).thenReturn(Optional.of("connector-1"));
+        processGroup.setParent(parentProcessGroup);
+
+        assertEquals(Optional.of("connector-1"), processGroup.findOwningConnectorIdentifier());
+    }
+
+    @Test
+    void testDropAllFlowFilesCompletionWaitsForEveryConnection() {
+        when(flowManager.getFlowAnalyzer()).thenReturn(Optional.empty());
+
+        final DropFlowFileRequest emptyDrop = new DropFlowFileRequest("drop-all");
+        emptyDrop.setOriginalSize(new QueueSize(0, 0L));
+        emptyDrop.setCurrentSize(new QueueSize(0, 0L));
+        emptyDrop.setState(DropFlowFileState.COMPLETE);
+
+        final DropFlowFileRequest pendingDrop = new DropFlowFileRequest("drop-all");
+        pendingDrop.setOriginalSize(new QueueSize(300, 300L));
+        pendingDrop.setCurrentSize(new QueueSize(300, 300L));
+        pendingDrop.setState(DropFlowFileState.DROPPING_FLOWFILES);
+
+        addConnectionWithDropStatus("empty-connection", emptyDrop);
+        addConnectionWithDropStatus("queued-connection", pendingDrop);
+
+        final DropFlowFileStatus dropStatus = processGroup.dropAllFlowFiles("drop-all", "test-user");
+        final CompletableFuture<Void> completionFuture = dropStatus.getCompletionFuture();
+
+        assertFalse(completionFuture.isDone());
+
+        pendingDrop.setState(DropFlowFileState.COMPLETE);
+
+        assertTrue(completionFuture.isDone());
+    }
+
+    @Test
+    void testStatelessContentMaxHeapDefaultsToZeroBytesWithUnsetLimits() {
+        assertNull(processGroup.getStatelessContentMaxHeap());
+        assertNull(processGroup.getStatelessContentMaxHeapPercentage());
+        assertEquals(0L, processGroup.resolveStatelessContentMaxHeap());
+    }
+
+    @Test
+    void testSetStatelessContentMaxHeapParsesDataSize() {
+        processGroup.setStatelessContentMaxHeapPercentage(null);
+        processGroup.setStatelessContentMaxHeap("100 MB");
+        assertEquals("100 MB", processGroup.getStatelessContentMaxHeap());
+        assertEquals(100L * 1024 * 1024, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeap("1 KB");
+        assertEquals(1024L, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeap("1.5 kb");
+        assertEquals(1536L, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeap("0 B");
+        assertEquals("0 B", processGroup.getStatelessContentMaxHeap());
+        assertEquals(0L, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeap("   ");
+        assertNull(processGroup.getStatelessContentMaxHeap());
+        assertEquals(0L, processGroup.resolveStatelessContentMaxHeap());
+    }
+
+    @Test
+    void testSetStatelessContentMaxHeapPercentage() {
+        processGroup.setStatelessContentMaxHeapPercentage(0);
+        assertEquals(0, processGroup.getStatelessContentMaxHeapPercentage());
+        assertEquals(0L, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeapPercentage(50);
+        assertEquals(50, processGroup.getStatelessContentMaxHeapPercentage());
+        assertEquals(Runtime.getRuntime().maxMemory() / 2, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeapPercentage(90);
+        final long expectedNinetyPercent = new BigDecimal("90")
+            .multiply(BigDecimal.valueOf(Runtime.getRuntime().maxMemory()))
+            .divide(BigDecimal.valueOf(100), 0, RoundingMode.DOWN)
+            .longValue();
+        assertEquals(expectedNinetyPercent, processGroup.resolveStatelessContentMaxHeap());
+    }
+
+    @Test
+    void testResolveStatelessContentMaxHeapUsesTheSmallerLimitWhenBothAreSet() {
+        processGroup.setStatelessContentMaxHeap("1 B");
+        processGroup.setStatelessContentMaxHeapPercentage(90);
+        assertEquals(1L, processGroup.resolveStatelessContentMaxHeap());
+
+        processGroup.setStatelessContentMaxHeap(Runtime.getRuntime().maxMemory() + " B");
+        processGroup.setStatelessContentMaxHeapPercentage(50);
+        assertEquals(Runtime.getRuntime().maxMemory() / 2, processGroup.resolveStatelessContentMaxHeap());
+    }
+
+    @Test
+    void testSetStatelessContentMaxHeapRejectsInvalidLimits() {
+        processGroup.setStatelessContentMaxHeapPercentage(null);
+        processGroup.setStatelessContentMaxHeap("1 MB");
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeap("not a size"));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeap("-1 MB"));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeap("limit 1 MB"));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeap("0.9 B"));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeap("999999999999999999999999999999999999999999999 TB"));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeap("50%"));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeapPercentage(91));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.setStatelessContentMaxHeapPercentage(-1));
+        assertThrows(IllegalArgumentException.class, () -> processGroup.verifyCanSetStatelessContentMaxHeap("not a size"));
+        processGroup.verifyCanSetStatelessContentMaxHeapPercentage(0);
+        assertEquals("1 MB", processGroup.getStatelessContentMaxHeap());
+        assertNull(processGroup.getStatelessContentMaxHeapPercentage());
+        assertEquals(1024L * 1024L, processGroup.resolveStatelessContentMaxHeap());
+    }
+
+    @Test
+    void testSetStatelessContentMaxHeapWhileRunningAllowsSameByteCount() {
+        final StatelessGroupNode statelessGroupNode = mock(StatelessGroupNode.class);
+        when(statelessGroupNodeFactory.createStatelessGroupNode(any())).thenReturn(statelessGroupNode);
+        final StandardProcessGroup runningGroup = createStandardProcessGroup("running");
+        runningGroup.setStatelessContentMaxHeapPercentage(null);
+        runningGroup.setStatelessContentMaxHeap("1 MB");
+        runningGroup.setExecutionEngine(ExecutionEngine.STATELESS);
+        when(statelessGroupNode.getCurrentState()).thenReturn(ScheduledState.RUNNING);
+
+        runningGroup.verifyCanSetStatelessContentMaxHeap("1024 KB");
+        runningGroup.setStatelessContentMaxHeap("1024 KB");
+        assertEquals("1024 KB", runningGroup.getStatelessContentMaxHeap());
+        assertThrows(IllegalStateException.class, () -> runningGroup.verifyCanSetStatelessContentMaxHeap("2 MB"));
+        assertThrows(IllegalStateException.class, () -> runningGroup.setStatelessContentMaxHeap("2 MB"));
+        assertEquals(1024L * 1024L, runningGroup.resolveStatelessContentMaxHeap());
+
+        final StandardProcessGroup childGroup = createStandardProcessGroup("child");
+        childGroup.setName("Child");
+        runningGroup.addProcessGroup(childGroup);
+        assertThrows(IllegalStateException.class, () -> childGroup.verifyCanSetStatelessContentMaxHeap("2 MB"));
+        assertThrows(IllegalStateException.class, () -> childGroup.setStatelessContentMaxHeap("2 MB"));
+
+        when(statelessGroupNode.getCurrentState()).thenReturn(ScheduledState.STOPPED);
+        runningGroup.setStatelessContentMaxHeap("2 MB");
+        assertEquals(2L * 1024L * 1024L, runningGroup.resolveStatelessContentMaxHeap());
+        runningGroup.setStatelessContentMaxHeap(null);
+        runningGroup.setStatelessContentMaxHeapPercentage(90);
+
+        when(statelessGroupNode.getCurrentState()).thenReturn(ScheduledState.RUNNING);
+        runningGroup.verifyCanSetStatelessContentMaxHeapPercentage(90);
+        runningGroup.setStatelessContentMaxHeapPercentage(90);
+        assertThrows(IllegalStateException.class, () -> runningGroup.verifyCanSetStatelessContentMaxHeapPercentage(50));
+        assertThrows(IllegalStateException.class, () -> runningGroup.setStatelessContentMaxHeapPercentage(50));
+
+        when(statelessGroupNode.getCurrentState()).thenReturn(ScheduledState.STOPPED);
+        runningGroup.setStatelessContentMaxHeapPercentage(50);
+        assertEquals(50, runningGroup.getStatelessContentMaxHeapPercentage());
+    }
+
+    private StandardProcessGroup createStandardProcessGroup(final String id) {
+        return createStandardProcessGroup(id, null);
+    }
+
+    private StandardProcessGroup createStandardProcessGroup(final String id, final String connectorId) {
+        return new StandardProcessGroup(
+                id,
+                controllerServiceProvider,
+                processScheduler,
+                propertyEncryptionProvider,
+                extensionManager,
+                stateManagerProvider,
+                flowManager,
+                reloadComponent,
+                nodeTypeProvider,
+                clusterTopologyProvider,
+                properties,
+                statelessGroupNodeFactory,
+                assetManager,
+                connectorId
+        );
+    }
+
+    private void addConnectionWithDropStatus(final String connectionId, final DropFlowFileStatus dropStatus) {
+        final Connectable source = mock(Connectable.class);
+        final Connectable destination = mock(Connectable.class);
+        when(source.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(destination.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(source.getProcessGroup()).thenReturn(processGroup);
+        when(destination.getProcessGroup()).thenReturn(processGroup);
+
+        final FlowFileQueue flowFileQueue = mock(FlowFileQueue.class);
+        when(flowFileQueue.dropFlowFiles(eq("drop-all"), eq("test-user"))).thenReturn(dropStatus);
+
+        final Connection connection = mock(Connection.class);
+        when(connection.getIdentifier()).thenReturn(connectionId);
+        when(connection.getSource()).thenReturn(source);
+        when(connection.getDestination()).thenReturn(destination);
+        when(connection.getFlowFileQueue()).thenReturn(flowFileQueue);
+        when(connection.getVersionedComponentId()).thenReturn(Optional.empty());
+
+        processGroup.addConnection(connection);
+    }
+
+}

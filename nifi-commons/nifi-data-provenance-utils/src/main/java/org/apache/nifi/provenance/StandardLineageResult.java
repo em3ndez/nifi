@@ -27,7 +27,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -127,7 +126,7 @@ public class StandardLineageResult implements ComputeLineageResult, ProgressiveR
     public int getPercentComplete() {
         readLock.lock();
         try {
-            return (numSteps < 1) ? 100 : (int) (((float) numCompletedSteps / (float) numSteps) * 100.0F);
+            return (numSteps < 1) ? 100 : (int) (((float) numCompletedSteps / numSteps) * 100.0F);
         } finally {
             readLock.unlock();
         }
@@ -204,16 +203,13 @@ public class StandardLineageResult implements ComputeLineageResult, ProgressiveR
 
         Map<String, LineageNode> lastEventMap = new HashMap<>();    // maps FlowFile UUID to last event for that FlowFile
         final List<ProvenanceEventRecord> sortedRecords = new ArrayList<>(relevantRecords);
-        sortedRecords.sort(new Comparator<ProvenanceEventRecord>() {
-            @Override
-            public int compare(final ProvenanceEventRecord o1, final ProvenanceEventRecord o2) {
-                // Sort on Event Time, then Event ID.
-                final int eventTimeComparison = Long.compare(o1.getEventTime(), o2.getEventTime());
-                if (eventTimeComparison == 0) {
-                    return Long.compare(o1.getEventId(), o2.getEventId());
-                } else {
-                    return eventTimeComparison;
-                }
+        sortedRecords.sort((o1, o2) -> {
+            // Sort on Event Time, then Event ID.
+            final int eventTimeComparison = Long.compare(o1.getEventTime(), o2.getEventTime());
+            if (eventTimeComparison == 0) {
+                return Long.compare(o1.getEventId(), o2.getEventId());
+            } else {
+                return eventTimeComparison;
             }
         });
 
@@ -233,18 +229,10 @@ public class StandardLineageResult implements ComputeLineageResult, ProgressiveR
                 // SPAWN Event's UUID is not necessarily what we want, since a SPAWN Event's UUID pertains to
                 // only one of (potentially) many UUIDs associated with the event. Otherwise, we know that
                 // the UUID of this record is appropriate, so we just use it.
-                final String edgeUuid;
-
-                switch (record.getEventType()) {
-                    case JOIN:
-                    case CLONE:
-                    case REPLAY:
-                        edgeUuid = lastNode.getFlowFileUuid();
-                        break;
-                    default:
-                        edgeUuid = record.getFlowFileUuid();
-                        break;
-                }
+                final String edgeUuid = switch (record.getEventType()) {
+                    case JOIN, CLONE, REPLAY -> lastNode.getFlowFileUuid();
+                    default -> record.getFlowFileUuid();
+                };
 
                 edges.add(new EdgeNode(edgeUuid, lastNode, lineageNode));
             }
@@ -282,8 +270,8 @@ public class StandardLineageResult implements ComputeLineageResult, ProgressiveR
 
                         lastEventMap.put(parentUuid, lineageNode);
                     }
-                }
                     break;
+                }
                 case RECEIVE:
                 case CREATE: {
                     // for a receive event, we want to create a FlowFile Node that represents the FlowFile received
@@ -299,8 +287,8 @@ public class StandardLineageResult implements ComputeLineageResult, ProgressiveR
                     }
                     edges.add(new EdgeNode(record.getFlowFileUuid(), lineageNode, flowFileNode));
                     lastEventMap.put(record.getFlowFileUuid(), flowFileNode);
-                }
                     break;
+                }
                 default:
                     break;
             }

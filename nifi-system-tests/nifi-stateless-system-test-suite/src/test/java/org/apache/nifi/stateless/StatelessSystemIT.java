@@ -18,33 +18,42 @@
 package org.apache.nifi.stateless;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.nifi.registry.flow.Bundle;
+import org.apache.nifi.flow.Bundle;
+import org.apache.nifi.flow.VersionedExternalFlow;
+import org.apache.nifi.flow.VersionedPort;
+import org.apache.nifi.registry.VersionedFlowConverter;
 import org.apache.nifi.registry.flow.VersionedFlowSnapshot;
 import org.apache.nifi.stateless.bootstrap.StatelessBootstrap;
 import org.apache.nifi.stateless.config.ExtensionClientDefinition;
 import org.apache.nifi.stateless.config.ParameterContextDefinition;
+import org.apache.nifi.stateless.config.ParameterValueProviderDefinition;
 import org.apache.nifi.stateless.config.ReportingTaskDefinition;
 import org.apache.nifi.stateless.config.SslContextDefinition;
 import org.apache.nifi.stateless.config.StatelessConfigurationException;
 import org.apache.nifi.stateless.engine.StatelessEngineConfiguration;
 import org.apache.nifi.stateless.flow.DataflowDefinition;
 import org.apache.nifi.stateless.flow.StatelessDataflow;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.rules.TestName;
-import org.junit.rules.Timeout;
+import org.apache.nifi.stateless.flow.StatelessDataflowInitializationContext;
+import org.apache.nifi.stateless.flow.TransactionThresholds;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
+@Timeout(value = 5, unit = TimeUnit.MINUTES)
 public class StatelessSystemIT {
     private final List<StatelessDataflow> createdFlows = new ArrayList<>();
 
@@ -52,21 +61,14 @@ public class StatelessSystemIT {
     // up finding a "compatible bundle" and using that, regardless of the specified version.
     protected static final Bundle SYSTEM_TEST_EXTENSIONS_BUNDLE = new Bundle("org.apache.nifi", "nifi-system-test-extensions-nar", "1.13.0-SNAPSHOT");
 
-    @Rule
-    public TestName name = new TestName();
-
-    @Rule
-    public Timeout defaultTimeout = new Timeout(30, TimeUnit.SECONDS);
-
-
-    @Before
+    @BeforeEach
     public void clearFlows() {
         createdFlows.clear();
     }
 
-    @After
+    @AfterEach
     public void shutdownFlows() {
-        createdFlows.forEach(StatelessDataflow::shutdown);
+        createdFlows.forEach(dataflow -> dataflow.shutdown(true, true, Duration.ofSeconds(1)));
     }
 
     protected StatelessEngineConfiguration getEngineConfiguration() {
@@ -87,8 +89,18 @@ public class StatelessSystemIT {
             }
 
             @Override
+            public Collection<File> getReadOnlyExtensionsDirectories() {
+                return Collections.emptyList();
+            }
+
+            @Override
             public File getKrb5File() {
                 return new File("/etc/krb5.conf");
+            }
+
+            @Override
+            public Optional<File> getContentRepositoryDirectory() {
+                return getContentRepoDirectory();
             }
 
             @Override
@@ -105,7 +117,25 @@ public class StatelessSystemIT {
             public List<ExtensionClientDefinition> getExtensionClients() {
                 return Collections.emptyList();
             }
+
+            @Override
+            public String getStatusTaskInterval() {
+                return null;
+            }
+
+            @Override
+            public String getComponentEnableTimeout() {
+                return StatelessSystemIT.this.getComponentEnableTimeout();
+            }
         };
+    }
+
+    protected String getComponentEnableTimeout() {
+        return "10 sec";
+    }
+
+    protected Optional<File> getContentRepoDirectory() {
+        return Optional.empty();
     }
 
     protected StatelessDataflow loadDataflow(final File versionedFlowSnapshot, final List<ParameterContextDefinition> parameterContexts) throws IOException, StatelessConfigurationException {
@@ -129,12 +159,32 @@ public class StatelessSystemIT {
     }
 
     protected StatelessDataflow loadDataflow(final VersionedFlowSnapshot versionedFlowSnapshot, final List<ParameterContextDefinition> parameterContexts, final Set<String> failurePortNames)
-        throws IOException, StatelessConfigurationException {
+                    throws IOException, StatelessConfigurationException {
+        return loadDataflow(versionedFlowSnapshot, parameterContexts, failurePortNames, TransactionThresholds.SINGLE_FLOWFILE);
+    }
 
-        final DataflowDefinition<VersionedFlowSnapshot> dataflowDefinition = new DataflowDefinition<VersionedFlowSnapshot>() {
+    protected StatelessDataflow loadDataflow(final VersionedFlowSnapshot versionedFlowSnapshot, final List<ParameterContextDefinition> parameterContexts, final Set<String> failurePortNames,
+                                             final TransactionThresholds transactionThresholds) throws IOException, StatelessConfigurationException {
+        return loadDataflow(versionedFlowSnapshot, parameterContexts, Collections.emptyList(), failurePortNames, transactionThresholds);
+    }
+
+    protected StatelessDataflow loadDataflow(final VersionedFlowSnapshot versionedFlowSnapshot, final List<ParameterContextDefinition> parameterContexts,
+                                             final List<ParameterValueProviderDefinition> parameterValueProviderDefinitions, final Set<String> failurePortNames,
+                                             final TransactionThresholds transactionThresholds)
+                throws IOException, StatelessConfigurationException {
+
+        final VersionedExternalFlow externalFlow = VersionedFlowConverter.createVersionedExternalFlow(versionedFlowSnapshot);
+        return loadDataflow(externalFlow, parameterContexts, parameterValueProviderDefinitions, failurePortNames, transactionThresholds);
+    }
+
+    protected StatelessDataflow loadDataflow(final VersionedExternalFlow versionedExternalFlow, final List<ParameterContextDefinition> parameterContexts,
+                                             final List<ParameterValueProviderDefinition> parameterValueProviderDefinitions, final Set<String> failurePortNames,
+                                             final TransactionThresholds transactionThresholds) throws IOException, StatelessConfigurationException {
+
+        final DataflowDefinition dataflowDefinition = new DataflowDefinition() {
             @Override
-            public VersionedFlowSnapshot getFlowSnapshot() {
-                return versionedFlowSnapshot;
+            public VersionedExternalFlow getVersionedExternalFlow() {
+                return versionedExternalFlow;
             }
 
             @Override
@@ -148,6 +198,20 @@ public class StatelessSystemIT {
             }
 
             @Override
+            public Set<String> getInputPortNames() {
+                return versionedExternalFlow.getFlowContents().getInputPorts().stream()
+                    .map(VersionedPort::getName)
+                    .collect(Collectors.toSet());
+            }
+
+            @Override
+            public Set<String> getOutputPortNames() {
+                return versionedExternalFlow.getFlowContents().getOutputPorts().stream()
+                    .map(VersionedPort::getName)
+                    .collect(Collectors.toSet());
+            }
+
+            @Override
             public List<ParameterContextDefinition> getParameterContexts() {
                 return parameterContexts;
             }
@@ -156,16 +220,28 @@ public class StatelessSystemIT {
             public List<ReportingTaskDefinition> getReportingTaskDefinitions() {
                 return Collections.emptyList();
             }
+
+            @Override
+            public List<ParameterValueProviderDefinition> getParameterValueProviderDefinitions() {
+                return parameterValueProviderDefinitions;
+            }
+
+            @Override
+            public TransactionThresholds getTransactionThresholds() {
+                return transactionThresholds;
+            }
         };
 
         final StatelessBootstrap bootstrap = StatelessBootstrap.bootstrap(getEngineConfiguration());
-        final StatelessDataflow dataflow = bootstrap.createDataflow(dataflowDefinition, Collections.emptyList());
+        final StatelessDataflow dataflow = bootstrap.createDataflow(dataflowDefinition);
+        dataflow.initialize(new StatelessDataflowInitializationContext() {
+            @Override
+            public boolean isEnableControllerServices() {
+                return true;
+            }
+        });
 
         createdFlows.add(dataflow);
         return dataflow;
-    }
-
-    protected String getTestName() {
-        return name.getMethodName();
     }
 }

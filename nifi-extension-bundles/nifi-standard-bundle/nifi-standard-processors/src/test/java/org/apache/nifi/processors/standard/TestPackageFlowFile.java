@@ -1,0 +1,170 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.processors.standard;
+
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
+import org.apache.nifi.flowfile.attributes.StandardFlowFileMediaType;
+import org.apache.nifi.util.FlowFileUnpackager;
+import org.apache.nifi.util.FlowFileUnpackagerV3;
+import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.util.PropertyMigrationResult;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+public class TestPackageFlowFile {
+
+    private static final String SAMPLE_CONTENT = "Hello, World!";
+    private static final String SAMPLE_ATTR_FILENAME = "test.txt";
+    private static final String SAMPLE_ATTR_MIME_TYPE = "text/plain";
+    private static final String EXTRA_ATTR_KEY = "myAttribute";
+    private static final String EXTRA_ATTR_VALUE = "my value";
+
+    private final TestRunner runner = TestRunners.newTestRunner(new PackageFlowFile());
+
+    @Test
+    public void testOne() throws IOException {
+        Map<String, String> attributes = new HashMap<>();
+        attributes.put(CoreAttributes.FILENAME.key(), SAMPLE_ATTR_FILENAME);
+        attributes.put(CoreAttributes.MIME_TYPE.key(), SAMPLE_ATTR_MIME_TYPE);
+        attributes.put(EXTRA_ATTR_KEY, EXTRA_ATTR_VALUE);
+
+        runner.enqueue(SAMPLE_CONTENT, attributes);
+        runner.run();
+
+        runner.assertTransferCount(PackageFlowFile.REL_SUCCESS, 1);
+        runner.assertTransferCount(PackageFlowFile.REL_ORIGINAL, 1);
+        final MockFlowFile outputFlowFile = runner.getFlowFilesForRelationship(PackageFlowFile.REL_SUCCESS).getFirst();
+
+        // mime.type has changed
+        assertEquals(StandardFlowFileMediaType.VERSION_3.getMediaType(),
+                outputFlowFile.getAttribute(CoreAttributes.MIME_TYPE.key()));
+
+        // content can be unpacked with FlowFileUnpackagerV3
+        FlowFileUnpackager unpackager = new FlowFileUnpackagerV3();
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(outputFlowFile.toByteArray());
+             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+            Map<String, String> unpackedAttributes = unpackager.unpackageFlowFile(bais, baos);
+            // verify attributes in package
+            assertEquals(5, unpackedAttributes.size());
+            assertNotNull(unpackedAttributes.get(CoreAttributes.UUID.key()));
+            assertNotNull(unpackedAttributes.get(CoreAttributes.PATH.key()));
+            assertEquals(SAMPLE_ATTR_FILENAME, unpackedAttributes.get(CoreAttributes.FILENAME.key()));
+            assertEquals(SAMPLE_ATTR_MIME_TYPE, unpackedAttributes.get(CoreAttributes.MIME_TYPE.key()));
+            assertEquals(EXTRA_ATTR_VALUE, unpackedAttributes.get(EXTRA_ATTR_KEY));
+            // verify content in package
+            assertArrayEquals(SAMPLE_CONTENT.getBytes(), baos.toByteArray());
+        }
+    }
+
+    @Test
+    public void testMany() throws IOException {
+        int fileCount = 10;
+        runner.setProperty(PackageFlowFile.BATCH_SIZE, Integer.toString(fileCount));
+        Map<String, String> attributes = new HashMap<>();
+        attributes.put(CoreAttributes.MIME_TYPE.key(), SAMPLE_ATTR_MIME_TYPE);
+
+        for (int i = 0; i < fileCount; i++) {
+            attributes.put(CoreAttributes.FILENAME.key(), i + SAMPLE_ATTR_FILENAME);
+            runner.enqueue(SAMPLE_CONTENT, attributes);
+        }
+        runner.run();
+
+        runner.assertTransferCount(PackageFlowFile.REL_SUCCESS, 1);
+        runner.assertTransferCount(PackageFlowFile.REL_ORIGINAL, fileCount);
+        final MockFlowFile outputFlowFile = runner.getFlowFilesForRelationship(PackageFlowFile.REL_SUCCESS).getFirst();
+
+        // mime.type has changed
+        assertEquals(StandardFlowFileMediaType.VERSION_3.getMediaType(),
+                outputFlowFile.getAttribute(CoreAttributes.MIME_TYPE.key()));
+
+        // content can be unpacked with FlowFileUnpackagerV3
+        FlowFileUnpackager unpackager = new FlowFileUnpackagerV3();
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(outputFlowFile.toByteArray());
+             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+            for (int i = 0; i < fileCount; i++) {
+                Map<String, String> unpackedAttributes = unpackager.unpackageFlowFile(bais, baos);
+                // verify attributes in package
+                assertEquals(4, unpackedAttributes.size());
+                assertNotNull(unpackedAttributes.get(CoreAttributes.UUID.key()));
+                assertNotNull(unpackedAttributes.get(CoreAttributes.PATH.key()));
+                assertEquals(i + SAMPLE_ATTR_FILENAME, unpackedAttributes.get(CoreAttributes.FILENAME.key()));
+                assertEquals(SAMPLE_ATTR_MIME_TYPE, unpackedAttributes.get(CoreAttributes.MIME_TYPE.key()));
+                // verify content in package
+                assertArrayEquals(SAMPLE_CONTENT.getBytes(), baos.toByteArray());
+                baos.reset();
+            }
+        }
+    }
+
+    @Test
+    public void testBatchSize() {
+        int fileCount = 10;
+        int batchSize = 2;
+        runner.setProperty(PackageFlowFile.BATCH_SIZE, Integer.toString(batchSize));
+        Map<String, String> attributes = new HashMap<>();
+        attributes.put(CoreAttributes.MIME_TYPE.key(), SAMPLE_ATTR_MIME_TYPE);
+
+        for (int i = 0; i < fileCount; i++) {
+            attributes.put(CoreAttributes.FILENAME.key(), i + SAMPLE_ATTR_FILENAME);
+            runner.enqueue(SAMPLE_CONTENT, attributes);
+        }
+        runner.run();
+
+        runner.assertTransferCount(PackageFlowFile.REL_SUCCESS, 1);
+        runner.assertTransferCount(PackageFlowFile.REL_ORIGINAL, batchSize);
+        runner.assertQueueNotEmpty();
+    }
+
+    @Test
+    public void testBatchContentSize() {
+        int fileCount = 10;
+        int batchContentSize = 7 * SAMPLE_CONTENT.length();
+        runner.setProperty(PackageFlowFile.BATCH_SIZE, Integer.toString(fileCount));
+        runner.setProperty(PackageFlowFile.BATCH_CONTENT_SIZE, batchContentSize + " B");
+        Map<String, String> attributes = new HashMap<>();
+        attributes.put(CoreAttributes.MIME_TYPE.key(), SAMPLE_ATTR_MIME_TYPE);
+
+        for (int i = 0; i < fileCount; i++) {
+            attributes.put(CoreAttributes.FILENAME.key(), i + SAMPLE_ATTR_FILENAME);
+            runner.enqueue(SAMPLE_CONTENT, attributes);
+        }
+        runner.run();
+
+        runner.assertTransferCount(PackageFlowFile.REL_SUCCESS, 1);
+        runner.assertTransferCount(PackageFlowFile.REL_ORIGINAL, 7);
+        runner.assertQueueNotEmpty();
+    }
+
+    @Test
+    void testMigrateProperties() {
+        final Map<String, String> expectedRenamed = Map.of("max-batch-size", PackageFlowFile.BATCH_SIZE.getName());
+
+        final PropertyMigrationResult propertyMigrationResult = runner.migrateProperties();
+        assertEquals(expectedRenamed, propertyMigrationResult.getPropertiesRenamed());
+    }
+}

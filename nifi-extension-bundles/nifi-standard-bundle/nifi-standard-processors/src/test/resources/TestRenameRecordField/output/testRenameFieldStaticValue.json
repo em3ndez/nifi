@@ -1,0 +1,9 @@
+[ {
+  "name" : "John Doe",
+  "age" : 30,
+  "favoriteApplication" : "Apache NiFi"
+}, {
+  "name" : "Jane Smith",
+  "age" : 25,
+  "favoriteApplication" : "Apache Kafka"
+} ]

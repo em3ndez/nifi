@@ -16,15 +16,16 @@
  */
 package org.apache.nifi.provenance;
 
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
+import org.apache.nifi.processor.Relationship;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.flowfile.attributes.CoreAttributes;
-import org.apache.nifi.processor.Relationship;
 
 /**
  * Holder for provenance relevant information
@@ -168,6 +169,7 @@ public class StandardProvenanceEventRecord implements ProvenanceEventRecord {
         return allAttrs;
     }
 
+    @Override
     public String getAttribute(final String attributeName) {
         if (updatedAttributes.containsKey(attributeName)) {
             return updatedAttributes.get(attributeName);
@@ -302,9 +304,15 @@ public class StandardProvenanceEventRecord implements ProvenanceEventRecord {
             eventTypeCode = 4812 + eventType.hashCode() + 4 * uuid.hashCode();
         }
 
+        final List<String> sortedChildUuids = new ArrayList<>(getChildUuids());
+        final List<String> sortedParentUuids = new ArrayList<>(getParentUuids());
+
+        Collections.sort(sortedChildUuids);
+        Collections.sort(sortedParentUuids);
+
         return -37423 + 3 * componentId.hashCode() + (transitUri == null ? 0 : 41 * transitUri.hashCode())
                 + (relationship == null ? 0 : 47 * relationship.hashCode()) + 44 * eventTypeCode
-                + 47 * getChildUuids().hashCode() + 47 * getParentUuids().hashCode();
+                + 47 * sortedChildUuids.hashCode() + 47 * sortedParentUuids.hashCode();
     }
 
     @Override
@@ -315,11 +323,10 @@ public class StandardProvenanceEventRecord implements ProvenanceEventRecord {
         if (obj == this) {
             return true;
         }
-        if (!(obj instanceof StandardProvenanceEventRecord)) {
+        if (!(obj instanceof final StandardProvenanceEventRecord other)) {
             return false;
         }
 
-        final StandardProvenanceEventRecord other = (StandardProvenanceEventRecord) obj;
         // If event ID's are populated and not equal, return false. If they have not yet been populated, do not
         // use them in the comparison.
         if (eventId > 0L && other.getEventId() > 0L && eventId != other.getEventId()) {
@@ -512,8 +519,7 @@ public class StandardProvenanceEventRecord implements ProvenanceEventRecord {
 
             sourceQueueIdentifier = event.getSourceQueueIdentifier();
 
-            if (event instanceof StandardProvenanceEventRecord) {
-                final StandardProvenanceEventRecord standardProvEvent = (StandardProvenanceEventRecord) event;
+            if (event instanceof final StandardProvenanceEventRecord standardProvEvent) {
                 storageByteOffset = standardProvEvent.storageByteOffset;
                 storageFilename = standardProvEvent.storageFilename;
             }
@@ -573,7 +579,6 @@ public class StandardProvenanceEventRecord implements ProvenanceEventRecord {
 
             return copy;
         }
-
 
         @Override
         public Builder setFlowFileEntryDate(final long entryDate) {
@@ -821,6 +826,7 @@ public class StandardProvenanceEventRecord implements ProvenanceEventRecord {
                 case RECEIVE:
                 case FETCH:
                 case SEND:
+                case UPLOAD:
                     assertSet(transitUri, "Transit URI");
                     break;
                 case ROUTE:

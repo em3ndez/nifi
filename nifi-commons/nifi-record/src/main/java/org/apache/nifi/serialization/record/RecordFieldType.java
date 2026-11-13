@@ -96,6 +96,11 @@ public enum RecordFieldType {
     TIME("time", "HH:mm:ss"),
 
     /**
+     * A UUID data type. Fields of this type us a {@code java.util.UUID} value
+     */
+    UUID("uuid"),
+
+    /**
      * A char field type. Fields of this type use a {@code char} value.
      */
     CHAR("char"),
@@ -116,24 +121,22 @@ public enum RecordFieldType {
      * created by providing the {@link RecordSchema} for the record:
      * </p>
      *
-     * <code>
-     * final DataType recordType = RecordFieldType.RECORD.getRecordDataType(recordSchema);
-     * </code>
+     * {@snippet :
+     *     final DataType recordType = RecordFieldType.RECORD.getRecordDataType(recordSchema);
+     * }
      *
      * <p>
      * A field of type RECORD should always have a {@link RecordDataType}, so the following idiom is acceptable for use:
      * </p>
      *
-     * <code>
-     * <pre>
-     * final DataType dataType = ...;
-     * if (dataType.getFieldType() == RecordFieldType.RECORD) {
-     *     final RecordDataType recordDataType = (RecordDataType) dataType;
-     *     final RecordSchema childSchema = recordDataType.getChildSchema();
-     *     ...
+     * {@snippet :
+     *     final DataType dataType; // TODO assignment for dataType
+     *     if (dataType.getFieldType() == RecordFieldType.RECORD) {
+     *         final RecordDataType recordDataType = (RecordDataType) dataType;
+     *         final RecordSchema childSchema = recordDataType.getChildSchema();
+     *         // Other code
+     *     }
      * }
-     * </pre>
-     * </code>
      */
     RECORD("record", null, new RecordDataType((RecordSchema) null)),
 
@@ -143,24 +146,22 @@ public enum RecordFieldType {
      * For example, if a field should allow either a Long or an Integer, this can be accomplished by using:
      * </p>
      *
-     * <code>
-     * final DataType choiceType = RecordFieldType.CHOICE.getChoiceDataType( RecordFieldType.INT.getDataType(), RecordFieldType.LONG.getDataType() );
-     * </code>
+     * {@snippet :
+     *     final DataType choiceType = RecordFieldType.CHOICE.getChoiceDataType( RecordFieldType.INT.getDataType(), RecordFieldType.LONG.getDataType() );
+     * }
      *
      * <p>
      * A field of type CHOICE should always have a {@link ChoiceDataType}, so the following idiom is acceptable for use:
      * </p>
      *
-     * <code>
-     * <pre>
-     * final DataType dataType = ...;
-     * if (dataType.getFieldType() == RecordFieldType.CHOICE) {
-     *     final ChoiceDataType choiceDataType = (ChoiceDataType) dataType;
-     *     final List&lt;DataType&gt; allowableTypes = choiceDataType.getPossibleSubTypes();
-     *     ...
+     * {@snippet :
+     *     final DataType dataType; // TODO assignment for dataType
+     *     if (dataType.getFieldType() == RecordFieldType.CHOICE) {
+     *         final ChoiceDataType choiceDataType = (ChoiceDataType) dataType;
+     *         final List<DataType> allowableTypes = choiceDataType.getPossibleSubTypes();
+     *         // Other code
+     *     }
      * }
-     * </pre>
-     * </code>
      */
     CHOICE("choice", null, new ChoiceDataType(Collections.emptyList())),
 
@@ -171,24 +172,22 @@ public enum RecordFieldType {
      * this field should be created using the {@link #getArrayDataType(DataType)} method:
      * </p>
      *
-     * <code>
-     * final DataType arrayType = RecordFieldType.ARRAY.getArrayDataType( RecordFieldType.INT.getDataType() );
-     * </code>
+     * {@snippet :
+     *     final DataType arrayType = RecordFieldType.ARRAY.getArrayDataType( RecordFieldType.INT.getDataType() );
+     * }
      *
      * <p>
      * A field of type ARRAY should always have an {@link ArrayDataType}, so the following idiom is acceptable for use:
      * </p>
      *
-     * <code>
-     * <pre>
-     * final DataType dataType = ...;
-     * if (dataType.getFieldType() == RecordFieldType.ARRAY) {
-     *     final ArrayDataType arrayDataType = (ArrayDataType) dataType;
-     *     final DataType elementType = arrayDataType.getElementType();
-     *     ...
+     * {@snippet :
+     *     final DataType dataType; // TODO assignment for dataType
+     *     if (dataType.getFieldType() == RecordFieldType.ARRAY) {
+     *         final ArrayDataType arrayDataType = (ArrayDataType) dataType;
+     *         final DataType elementType = arrayDataType.getElementType();
+     *         // Other code
+     *     }
      * }
-     * </pre>
-     * </code>
      */
     ARRAY("array", null, new ArrayDataType(null)),
 
@@ -198,29 +197,26 @@ public enum RecordFieldType {
      * created by providing the {@link DataType} for the values:
      * </p>
      *
-     * <code>
-     * final DataType recordType = RecordFieldType.MAP.getRecordDataType( RecordFieldType.STRING.getDataType() );
-     * </code>
+     * {@snippet :
+     *     final DataType recordType = RecordFieldType.MAP.getRecordDataType( RecordFieldType.STRING.getDataType() );
+     * }
      *
      * <p>
      * A field of type MAP should always have a {@link MapDataType}, so the following idiom is acceptable for use:
      * </p>
      *
-     * <code>
-     * <pre>
-     * final DataType dataType = ...;
-     * if (dataType.getFieldType() == RecordFieldType.MAP) {
-     *     final MapDataType mapDataType = (MapDataType) dataType;
-     *     final DataType valueType = mapDataType.getValueType();
-     *     ...
+     * {@snippet :
+     *     final DataType dataType; // TODO assignment for dataType
+     *     if (dataType.getFieldType() == RecordFieldType.MAP) {
+     *         final MapDataType mapDataType = (MapDataType) dataType;
+     *         final DataType valueType = mapDataType.getValueType();
+     *         // Other code
+     *     }
      * }
-     * </pre>
-     * </code>
      */
     MAP("map", null, new MapDataType(null));
 
-
-    private static final Map<String, RecordFieldType> SIMPLE_NAME_MAP = new HashMap<String, RecordFieldType>();
+    private static final Map<String, RecordFieldType> SIMPLE_NAME_MAP = new HashMap<>();
 
     static {
         for (RecordFieldType value : values()) {
@@ -233,14 +229,14 @@ public enum RecordFieldType {
     private final DataType defaultDataType;
     private final Set<RecordFieldType> narrowDataTypes;
 
-    private RecordFieldType(final String simpleName) {
+    RecordFieldType(final String simpleName) {
         this.simpleName = simpleName;
         this.defaultFormat = null;
         this.defaultDataType = new DataType(this, defaultFormat);
         this.narrowDataTypes = Collections.emptySet();
     }
 
-    private RecordFieldType(final String simpleName, final RecordFieldType... narrowDataTypes) {
+    RecordFieldType(final String simpleName, final RecordFieldType... narrowDataTypes) {
         this.simpleName = simpleName;
         this.defaultFormat = null;
         this.defaultDataType = new DataType(this, defaultFormat);
@@ -248,20 +244,19 @@ public enum RecordFieldType {
         this.narrowDataTypes = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(narrowDataTypes)));
     }
 
-    private RecordFieldType(final String simpleName, final String defaultFormat) {
+    RecordFieldType(final String simpleName, final String defaultFormat) {
         this.simpleName = simpleName;
         this.defaultFormat = defaultFormat;
         this.defaultDataType = new DataType(this, defaultFormat);
         this.narrowDataTypes = Collections.emptySet();
     }
 
-    private RecordFieldType(final String simpleName, final String defaultFormat, final DataType defaultDataType) {
+    RecordFieldType(final String simpleName, final String defaultFormat, final DataType defaultDataType) {
         this.simpleName = simpleName;
         this.defaultFormat = defaultFormat;
         this.defaultDataType = defaultDataType;
         this.narrowDataTypes = Collections.emptySet();
     }
-
 
     public String getDefaultFormat() {
         return defaultFormat;
@@ -344,7 +339,6 @@ public enum RecordFieldType {
 
         return new EnumDataType(enums);
     }
-
 
     /**
      * Returns a Data Type that represents a "CHOICE" of multiple possible types. This method is
@@ -436,7 +430,7 @@ public enum RecordFieldType {
     }
 
     public static RecordFieldType of(final String typeString) {
-      return SIMPLE_NAME_MAP.get(typeString);
+        return SIMPLE_NAME_MAP.get(typeString);
     }
 
     public Set<RecordFieldType> getNarrowDataTypes() {

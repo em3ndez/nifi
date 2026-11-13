@@ -21,6 +21,8 @@ import org.apache.nifi.record.path.RecordPathEvaluationContext;
 import org.apache.nifi.record.path.StandardFieldValue;
 import org.apache.nifi.record.path.paths.RecordPathSegment;
 import org.apache.nifi.record.path.util.RecordPathUtils;
+import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.util.DataTypeUtils;
 
 import java.nio.charset.Charset;
@@ -46,8 +48,7 @@ public class ToString extends RecordPathSegment {
                     Object value = fv.getValue();
                     final String stringValue;
 
-                    if (value instanceof Object[]) {
-                        Object[] o = (Object[]) value;
+                    if (value instanceof final Object[] o) {
                         if (o.length > 0) {
 
                             byte[] dest = new byte[o.length];
@@ -61,9 +62,17 @@ public class ToString extends RecordPathSegment {
                     } else if (!(fv.getValue() instanceof byte[])) {
                         stringValue = fv.getValue().toString();
                     } else {
-                        stringValue = DataTypeUtils.toString(fv.getValue(), (String) null, charset);
+                        stringValue = DataTypeUtils.toString(fv.getValue(), null, charset);
                     }
-                    return new StandardFieldValue(stringValue, fv.getField(), fv.getParent().orElse(null));
+                    final RecordField originalField = fv.getField();
+                    final RecordField stringField;
+                    if (originalField != null) {
+                        stringField = new RecordField(originalField.getFieldName(), RecordFieldType.STRING.getDataType(),
+                            null, originalField.getAliases(), false);
+                    } else {
+                        stringField = new RecordField("toString", RecordFieldType.STRING.getDataType());
+                    }
+                    return new StandardFieldValue(stringValue, stringField, fv.getParent().orElse(null));
                 });
     }
 

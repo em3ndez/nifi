@@ -33,7 +33,7 @@ public interface RecordSchema {
 
     /**
      * @param index the 0-based index of which field to return
-     * @return the index'th field
+     * @return the field at the given index
      *
      * @throws IndexOutOfBoundsException if the index is < 0 or >= the number of fields (determined by {@link #getFieldCount()}).
      */
@@ -87,4 +87,41 @@ public interface RecordSchema {
      */
     Optional<String> getSchemaNamespace();
 
+    /**
+     * @param fieldName the name of the field to be removed from the schema
+     */
+    void removeField(String fieldName);
+
+    /**
+     * @param path the sequence of field names to be removed from the schema
+     */
+    void removePath(RecordFieldRemovalPath path);
+
+    /**
+     * Renames the field that corresponds to the given RecordField so that its new name is equal to the given name
+     *
+     * @param currentName the current name of the field
+     * @param newName     the new name for the field
+     * @return <code>true</code> if the field is renamed, <code>false</code> if the field with the given current name cannot be found
+     * @throws IllegalArgumentException if unable to rename the field due to a naming conflict
+     */
+    boolean renameField(String currentName, String newName);
+
+    /**
+     * @return true if the schema contains itself as a nested field type, false if it does not
+     */
+    boolean isRecursive();
+
+    /**
+     * @param schemas the list of schemas to check whether the current schema is contained within
+     * @return true if the current schema is present within the list of schemas (object reference equality), false otherwise
+     */
+    default boolean sameAsAny(final List<RecordSchema> schemas) {
+        for (final RecordSchema schema : schemas) {
+            if (schema == this) {
+                return true;
+            }
+        }
+        return false;
+    }
 }

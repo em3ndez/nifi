@@ -24,8 +24,6 @@ import org.apache.nifi.registry.bucket.Bucket;
 import org.apache.nifi.registry.client.NiFiRegistryClient;
 import org.apache.nifi.registry.client.NiFiRegistryException;
 import org.apache.nifi.toolkit.cli.api.Context;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
 import org.apache.nifi.toolkit.cli.impl.command.nifi.pg.PGImport;
 import org.apache.nifi.toolkit.cli.impl.command.nifi.registry.CreateRegistryClient;
@@ -34,9 +32,11 @@ import org.apache.nifi.toolkit.cli.impl.command.registry.bucket.CreateBucket;
 import org.apache.nifi.toolkit.cli.impl.command.registry.bucket.ListBuckets;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.CreateFlow;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ImportFlowVersion;
-import org.apache.nifi.toolkit.cli.impl.result.registry.BucketsResult;
-import org.apache.nifi.toolkit.cli.impl.result.nifi.RegistryClientIDResult;
 import org.apache.nifi.toolkit.cli.impl.result.StringResult;
+import org.apache.nifi.toolkit.cli.impl.result.nifi.RegistryClientIDResult;
+import org.apache.nifi.toolkit.cli.impl.result.registry.BucketsResult;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 
 import java.io.IOException;
 import java.util.Date;
@@ -99,13 +99,14 @@ public class QuickImport extends AbstractCompositeCommand<StringResult> {
 
     @Override
     public StringResult doExecute(final CommandLine cli, final NiFiClient nifiClient, final Properties nifiProps,
-                                  final NiFiRegistryClient registryClient, final Properties registryProps)
+            final NiFiRegistryClient registryClient, final Properties registryProps)
             throws IOException, NiFiRegistryException, ParseException, NiFiClientException {
 
         final boolean isInteractive = getContext().isInteractive();
 
         // determine the registry client in NiFi to use, or create one
-        // do this first so that we don't get through creating buckets, flows, etc, and then fail on the reg client
+        // do this first so that we don't get through creating buckets, flows, etc, and
+        // then fail on the reg client
         final String registryClientBaseUrl = registryProps.getProperty(CommandOption.URL.getLongName());
         final String registryClientId = getRegistryClientId(nifiClient, registryClientBaseUrl, isInteractive);
 
@@ -160,7 +161,7 @@ public class QuickImport extends AbstractCompositeCommand<StringResult> {
     private String createQuickImportFlow(final NiFiRegistryClient registryClient, final String quickImportBucketId, final boolean isInteractive)
             throws ParseException, IOException, NiFiRegistryException {
         final String flowName = FLOW_NAME + System.currentTimeMillis();
-        final String flowDescription = FLOW_DESC + (new Date()).toString();
+        final String flowDescription = FLOW_DESC + (new Date());
 
         final Properties createFlowProps = new Properties();
         createFlowProps.setProperty(CommandOption.FLOW_NAME.getLongName(), flowName);
@@ -182,9 +183,11 @@ public class QuickImport extends AbstractCompositeCommand<StringResult> {
 
         final BucketsResult bucketsResult = listBuckets.doExecute(registryClient, new Properties());
 
-        final Bucket quickImportBucket = bucketsResult.getResult().stream()
+        final Bucket quickImportBucket = bucketsResult.getResult()
+                .stream()
                 .filter(b -> BUCKET_NAME.equals(b.getName()))
-                .findFirst().orElse(null);
+                .findFirst()
+                .orElse(null);
 
         // if it doesn't exist, then create the quick import bucket
         String quickImportBucketId = null;
@@ -230,7 +233,7 @@ public class QuickImport extends AbstractCompositeCommand<StringResult> {
         if (registryClientId == null) {
             final Properties createRegClientProps = new Properties();
             createRegClientProps.setProperty(CommandOption.REGISTRY_CLIENT_NAME.getLongName(), REG_CLIENT_NAME);
-            createRegClientProps.setProperty(CommandOption.REGISTRY_CLIENT_DESC.getLongName(), REG_CLIENT_DESC + new Date().toString());
+            createRegClientProps.setProperty(CommandOption.REGISTRY_CLIENT_DESC.getLongName(), REG_CLIENT_DESC + new Date());
             createRegClientProps.setProperty(CommandOption.REGISTRY_CLIENT_URL.getLongName(), registryClientBaseUrl);
 
             final StringResult createdRegClient = createRegistryClient.doExecute(nifiClient, createRegClientProps);

@@ -16,6 +16,10 @@
  */
 package org.apache.nifi.util.file.classloader;
 
+import org.apache.nifi.util.security.MessageDigestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.FilenameFilter;
 import java.net.MalformedURLException;
@@ -26,16 +30,12 @@ import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
-import javax.xml.bind.DatatypeConverter;
-
-import org.apache.nifi.util.security.MessageDigestUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class ClassLoaderUtils {
 
@@ -88,7 +88,7 @@ public class ClassLoaderUtils {
     }
 
     private static boolean isNotBlank(final String value) {
-        return value != null && !value.trim().isEmpty();
+        return value != null && !value.isBlank();
     }
 
     protected static URL[] toURLs(Set<String> modulePaths, FilenameFilter filenameFilter, boolean suppressExceptions) throws MalformedURLException {
@@ -98,8 +98,8 @@ public class ClassLoaderUtils {
                 // If the path is already a URL, just add it (but don't check if it exists, too expensive and subject to network availability)
                 boolean isUrl = true;
                 try {
-                    additionalClasspath.add(new URL(modulePathString));
-                } catch (MalformedURLException mue) {
+                    additionalClasspath.add(URI.create(modulePathString).toURL());
+                } catch (IllegalArgumentException | MalformedURLException e) {
                     isUrl = false;
                 }
                 if (!isUrl) {
@@ -116,7 +116,7 @@ public class ClassLoaderUtils {
                                 if (files != null) {
                                     for (File classpathResource : files) {
                                         if (classpathResource.isDirectory()) {
-                                            LOGGER.warn("Recursive directories are not supported, skipping " + classpathResource.getAbsolutePath());
+                                            LOGGER.warn("Recursive directories are not supported, skipping {}", classpathResource.getAbsolutePath());
                                         } else {
                                             additionalClasspath.add(classpathResource.toURI().toURL());
                                         }
@@ -143,24 +143,29 @@ public class ClassLoaderUtils {
      * @param urls URLs used for generating fingerprint string
      * @return Fingerprint string from provided URLs
      */
-    public static String generateAdditionalUrlsFingerprint(final Set<URL> urls) {
+    public static String generateAdditionalUrlsFingerprint(final Set<URL> urls, final String classloaderIsolationKey) {
         final StringBuilder formattedUrls = new StringBuilder();
 
         final List<String> sortedUrls = urls.stream().map(Object::toString).sorted().collect(Collectors.toList());
         sortedUrls.forEach(url -> formattedUrls.append(url).append("-").append(getLastModified(url)).append(";"));
+        formattedUrls.append(classloaderIsolationKey);
         final byte[] formattedUrlsBinary = formattedUrls.toString().getBytes(StandardCharsets.UTF_8);
 
-        return DatatypeConverter.printHexBinary(MessageDigestUtils.getDigest(formattedUrlsBinary));
+        return HexFormat.of().formatHex(MessageDigestUtils.getDigest(formattedUrlsBinary));
     }
 
     private static long getLastModified(String url) {
-        File file = null;
+        long lastModified = 0;
         try {
-            file = new File(new URI(url));
+            final URI uri = new URI(url);
+            if (uri.getScheme().equals("file")) {
+                final File file = new File(uri);
+                lastModified = file.lastModified();
+            }
         } catch (URISyntaxException e) {
-            LOGGER.error("Error getting last modified date for " + url);
+            LOGGER.error("Error getting last modified date for {}", url);
         }
-        return file != null ? file.lastModified() : 0;
+        return lastModified;
     }
 
     protected static ClassLoader createModuleClassLoader(URL[] modules, ClassLoader parentClassLoader) {

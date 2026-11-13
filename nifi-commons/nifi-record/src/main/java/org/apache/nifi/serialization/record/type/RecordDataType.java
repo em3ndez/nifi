@@ -18,9 +18,13 @@
 package org.apache.nifi.serialization.record.type;
 
 import org.apache.nifi.serialization.record.DataType;
+import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordFieldRemovalPath;
 import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.RecordSchema;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -55,6 +59,36 @@ public class RecordDataType extends DataType {
     }
 
     @Override
+    public void removePath(final RecordFieldRemovalPath path) {
+        if (path.length() == 0) {
+            return;
+        }
+        getChildSchema().removePath(path);
+    }
+
+    @Override
+    public boolean isRecursive(final List<RecordSchema> schemas) {
+        // allow for childSchema to be null during schema inference
+        final RecordSchema childSchema = getChildSchema();
+        if (!schemas.isEmpty() && childSchema != null) {
+            if (childSchema.sameAsAny(schemas)) {
+                return true;
+            } else {
+                final List<RecordSchema> schemasWithChildSchema = new ArrayList<>(schemas);
+                schemasWithChildSchema.add(childSchema);
+
+                for (final RecordField childField : childSchema.getFields()) {
+                    if (childField.getDataType().isRecursive(schemasWithChildSchema)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    @Override
     public int hashCode() {
         return 31 + 41 * getFieldType().hashCode();
     }
@@ -67,11 +101,10 @@ public class RecordDataType extends DataType {
         if (obj == null) {
             return false;
         }
-        if (!(obj instanceof RecordDataType)) {
+        if (!(obj instanceof final RecordDataType other)) {
             return false;
         }
 
-        final RecordDataType other = (RecordDataType) obj;
         return Objects.equals(childSchema, other.childSchema);
     }
 

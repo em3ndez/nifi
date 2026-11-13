@@ -17,9 +17,9 @@
 
 package org.apache.nifi.stateless.basics;
 
+import org.apache.nifi.flow.VersionedPort;
+import org.apache.nifi.flow.VersionedProcessor;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.registry.flow.VersionedPort;
-import org.apache.nifi.registry.flow.VersionedProcessor;
 import org.apache.nifi.stateless.StatelessSystemIT;
 import org.apache.nifi.stateless.VersionedFlowBuilder;
 import org.apache.nifi.stateless.config.StatelessConfigurationException;
@@ -27,13 +27,13 @@ import org.apache.nifi.stateless.flow.DataflowTrigger;
 import org.apache.nifi.stateless.flow.FailurePortEncounteredException;
 import org.apache.nifi.stateless.flow.StatelessDataflow;
 import org.apache.nifi.stateless.flow.TriggerResult;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Collections;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 public class RollbackOnExceptionIT extends StatelessSystemIT {
     private static final String EXCEPTION_TEXT = "Intentional Exception to verify behavior in RollbackOnExceptionIT";
@@ -54,11 +54,14 @@ public class RollbackOnExceptionIT extends StatelessSystemIT {
         final DataflowTrigger trigger = dataflow.trigger();
         final TriggerResult result = trigger.getResult();
         assertFalse(result.isSuccessful());
-        assertTrue(result.getFailureCause().get() instanceof ProcessException);
+        assertInstanceOf(ProcessException.class, result.getFailureCause().get());
 
+        // Wait for dataflow to be purged
+        while (dataflow.isFlowFileQueued()) {
+            Thread.sleep(10L);
+        }
         assertFalse(dataflow.isFlowFileQueued());
     }
-
 
     @Test
     public void testFlowFileCompletelyRemovedWhenTransferredToFailurePort() throws IOException, StatelessConfigurationException, InterruptedException {
@@ -75,7 +78,7 @@ public class RollbackOnExceptionIT extends StatelessSystemIT {
         final DataflowTrigger trigger = dataflow.trigger();
         final TriggerResult result = trigger.getResult();
         assertFalse(result.isSuccessful());
-        assertTrue(result.getFailureCause().get() instanceof FailurePortEncounteredException);
+        assertInstanceOf(FailurePortEncounteredException.class, result.getFailureCause().get());
 
         assertFalse(dataflow.isFlowFileQueued());
     }

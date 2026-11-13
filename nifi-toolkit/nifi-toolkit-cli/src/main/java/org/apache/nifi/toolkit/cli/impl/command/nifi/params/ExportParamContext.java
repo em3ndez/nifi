@@ -17,19 +17,19 @@
 package org.apache.nifi.toolkit.cli.impl.command.nifi.params;
 
 import org.apache.commons.cli.MissingOptionException;
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.CommandException;
 import org.apache.nifi.toolkit.cli.api.Context;
 import org.apache.nifi.toolkit.cli.api.WritableResult;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ParamContextClient;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
 import org.apache.nifi.toolkit.cli.impl.command.nifi.AbstractNiFiCommand;
 import org.apache.nifi.toolkit.cli.impl.util.JacksonUtils;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.toolkit.client.ParamContextClient;
 import org.apache.nifi.web.api.dto.ParameterContextDTO;
 import org.apache.nifi.web.api.dto.ParameterDTO;
 import org.apache.nifi.web.api.entity.ParameterContextEntity;
+import org.apache.nifi.web.api.entity.ParameterContextReferenceEntity;
 import org.apache.nifi.web.api.entity.ParameterEntity;
 
 import java.io.FileOutputStream;
@@ -37,6 +37,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.Comparator;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
@@ -66,7 +67,7 @@ public class ExportParamContext extends AbstractNiFiCommand<ExportParamContext.E
 
         // retrieve the context by id
         final ParamContextClient paramContextClient = client.getParamContextClient();
-        final ParameterContextEntity parameterContextEntity = paramContextClient.getParamContext(paramContextId);
+        final ParameterContextEntity parameterContextEntity = paramContextClient.getParamContext(paramContextId, false);
 
         // clear out values that don't make sense for importing to next environment
         final ParameterContextDTO parameterContext = parameterContextEntity.getComponent();
@@ -80,10 +81,20 @@ public class ExportParamContext extends AbstractNiFiCommand<ExportParamContext.E
                 parameterDTO.setValue(null);
             }
             parameterEntity.setCanWrite(null);
+
+            parameterDTO.setParameterContext(null);
+        }
+
+        if (parameterContext.getInheritedParameterContexts() != null) {
+            for (final ParameterContextReferenceEntity ref : parameterContext.getInheritedParameterContexts()) {
+                ref.setId(null);
+                ref.setPermissions(null);
+                ref.getComponent().setId(null);
+            }
         }
 
         // sort the entities so that each export is in consistent order
-        final Comparator<ParameterEntity> entityComparator = (p1, p2) ->{
+        final Comparator<ParameterEntity> entityComparator = (p1, p2) -> {
             final String p1Name = p1.getParameter().getName();
             final String p2Name = p2.getParameter().getName();
             return p1Name.compareTo(p2Name);
@@ -105,9 +116,8 @@ public class ExportParamContext extends AbstractNiFiCommand<ExportParamContext.E
         private final String outputFilename;
 
         public ExportedParamContextResult(final ParameterContextDTO parameterContext, final String outputFilename) {
-            this.parameterContext = parameterContext;
+            this.parameterContext = Objects.requireNonNull(parameterContext);
             this.outputFilename = outputFilename;
-            Validate.notNull(this.parameterContext);
         }
 
         @Override

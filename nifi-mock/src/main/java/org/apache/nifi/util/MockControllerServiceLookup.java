@@ -16,13 +16,14 @@
  */
 package org.apache.nifi.util;
 
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.controller.ControllerService;
+import org.apache.nifi.controller.ControllerServiceLookup;
+
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import org.apache.nifi.annotation.behavior.InputRequirement;
-import org.apache.nifi.controller.ControllerService;
-import org.apache.nifi.controller.ControllerServiceLookup;
 
 public abstract class MockControllerServiceLookup implements ControllerServiceLookup {
 
@@ -55,7 +56,7 @@ public abstract class MockControllerServiceLookup implements ControllerServiceLo
         this.controllerServiceMap.putAll(other.controllerServiceMap);
     }
 
-    protected ControllerServiceConfiguration getConfiguration(final String identifier) {
+    public ControllerServiceConfiguration getConfiguration(final String identifier) {
         return controllerServiceMap.get(identifier);
     }
 

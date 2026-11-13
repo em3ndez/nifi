@@ -16,25 +16,12 @@
  */
 package org.apache.nifi.util;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.function.Predicate;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.controller.ControllerService;
+import org.apache.nifi.controller.ControllerServiceInitializationContext;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
@@ -42,10 +29,36 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processor.metrics.CommitTiming;
 import org.apache.nifi.reporting.InitializationException;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class TestStandardProcessorTestRunner {
+
+    private static final String NAMED_GAUGE = "Processing Time";
+    private static final double FIRST_NAMED_GAUGE_VALUE = 120.35;
+    private static final double SECOND_NAMED_GAUGE_VALUE = 121.35;
+    private static final double THIRD_NAMED_GAUGE_VALUE = 122.35;
+    private static final List<Double> NAMED_GAUGE_VALUES = List.of(FIRST_NAMED_GAUGE_VALUE, SECOND_NAMED_GAUGE_VALUE, THIRD_NAMED_GAUGE_VALUE);
+    private static final List<Double> ATTRIBUTED_NAMED_GAUGE_VALUES = List.of(FIRST_NAMED_GAUGE_VALUE, THIRD_NAMED_GAUGE_VALUE);
+    private static final String NAMED_COUNTER = "Processed Records";
+    private static final long NAMED_COUNTER_DELTA = 5;
+    private static final Map<String, String> METRIC_ATTRIBUTES = Map.of("service.name", "Processing", "deployment.environment", "production");
+    private static final Map<String, String> UNRECORDED_METRIC_ATTRIBUTES = Map.of("service.name", "Unrecorded");
 
     @Test
     public void testProcessContextPassedToOnStoppedMethods() {
@@ -106,6 +119,48 @@ public class TestStandardProcessorTestRunner {
     }
 
     @Test
+    public void testRecordGaugeNow() {
+        final RecordMetricProcessor processor = new RecordMetricProcessor(CommitTiming.NOW);
+        final TestRunner runner = TestRunners.newTestRunner(processor);
+
+        runner.run();
+
+        assertGaugeValues(runner);
+    }
+
+    @Test
+    public void testRecordGaugeSessionCommitted() {
+        final RecordMetricProcessor processor = new RecordMetricProcessor(CommitTiming.SESSION_COMMITTED);
+        final TestRunner runner = TestRunners.newTestRunner(processor);
+
+        runner.run();
+
+        assertGaugeValues(runner);
+    }
+
+    private void assertGaugeValues(final TestRunner runner) {
+        assertEquals(NAMED_GAUGE_VALUES, runner.getGaugeValues(NAMED_GAUGE));
+        assertEquals(ATTRIBUTED_NAMED_GAUGE_VALUES, runner.getGaugeValues(NAMED_GAUGE, METRIC_ATTRIBUTES));
+        assertEquals(List.of(SECOND_NAMED_GAUGE_VALUE), runner.getGaugeValues(NAMED_GAUGE, Map.of()));
+        assertTrue(runner.getGaugeValues(NAMED_GAUGE, UNRECORDED_METRIC_ATTRIBUTES).isEmpty());
+    }
+
+    @Test
+    public void testAdjustCounter() {
+        final RecordMetricProcessor processor = new RecordMetricProcessor(CommitTiming.NOW);
+        final TestRunner runner = TestRunners.newTestRunner(processor);
+
+        runner.run();
+
+        // Measurements recorded without attributes and with attributes are both summed for the Counter name
+        assertEquals(NAMED_COUNTER_DELTA * 2, runner.getCounterValue(NAMED_COUNTER));
+
+        assertEquals(NAMED_COUNTER_DELTA, runner.getCounterValue(NAMED_COUNTER, METRIC_ATTRIBUTES));
+        assertEquals(NAMED_COUNTER_DELTA, runner.getCounterValue(NAMED_COUNTER, Map.of()));
+        assertNull(runner.getCounterValue(NAMED_COUNTER, UNRECORDED_METRIC_ATTRIBUTES));
+    }
+
+    @Test
     public void testNumThreads() {
         final ProcessorWithOnStop proc = new ProcessorWithOnStop();
         final TestRunner runner = TestRunners.newTestRunner(proc);
@@ -123,35 +178,25 @@ public class TestStandardProcessorTestRunner {
         runner.assertTransferCount(AddAttributeProcessor.REL_SUCCESS, 3);
         runner.assertTransferCount(AddAttributeProcessor.REL_FAILURE, 2);
         runner.assertAllFlowFilesContainAttribute(AddAttributeProcessor.REL_SUCCESS, AddAttributeProcessor.KEY);
-        runner.assertAllFlowFiles(AddAttributeProcessor.REL_SUCCESS, new FlowFileValidator() {
-            @Override
-            public void assertFlowFile(FlowFile f) {
-                assertEquals("value", f.getAttribute(AddAttributeProcessor.KEY));
-            }
-        });
+        runner.assertAllFlowFiles(AddAttributeProcessor.REL_SUCCESS, f -> assertEquals("value", f.getAttribute(AddAttributeProcessor.KEY)));
     }
 
-    @Test(expected = AssertionError.class)
+    @Test
     public void testFailFlowFileValidator() {
         final AddAttributeProcessor proc = new AddAttributeProcessor();
         final TestRunner runner = TestRunners.newTestRunner(proc);
 
         runner.run(5, true);
-        runner.assertAllFlowFiles(new FlowFileValidator() {
-            @Override
-            public void assertFlowFile(FlowFile f) {
-                assertEquals("value", f.getAttribute(AddAttributeProcessor.KEY));
-            }
-        });
+        assertThrows(AssertionError.class, () -> runner.assertAllFlowFiles(f -> assertEquals("value", f.getAttribute(AddAttributeProcessor.KEY))));
     }
 
-    @Test(expected = AssertionError.class)
+    @Test
     public void testFailAllFlowFilesContainAttribute() {
         final AddAttributeProcessor proc = new AddAttributeProcessor();
         final TestRunner runner = TestRunners.newTestRunner(proc);
 
         runner.run(5, true);
-        runner.assertAllFlowFilesContainAttribute(AddAttributeProcessor.KEY);
+        assertThrows(AssertionError.class, () -> runner.assertAllFlowFilesContainAttribute(AddAttributeProcessor.KEY));
     }
 
     @Test
@@ -164,22 +209,8 @@ public class TestStandardProcessorTestRunner {
     }
 
     @Test
-    public void testVariables() {
-        final AddAttributeProcessor proc = new AddAttributeProcessor();
-        final TestRunner runner = TestRunners.newTestRunner(proc);
-        assertNull(runner.getVariableValue("hello"));
-
-        runner.setVariable("hello", "world");
-        assertEquals("world", runner.getVariableValue("hello"));
-
-        assertEquals("world", runner.removeVariable("hello"));
-        assertNull(runner.getVariableValue("hello"));
-    }
-
-    @Test
     public void testControllerServiceUpdateShouldCallOnSetProperty() {
-        // Arrange
-        final ControllerService testService = new SimpleTestService();
+        final SimpleTestService testService = new SimpleTestService();
         final AddAttributeProcessor proc = new AddAttributeProcessor();
         final TestRunner runner = TestRunners.newTestRunner(proc);
         final String serviceIdentifier = "test";
@@ -191,12 +222,10 @@ public class TestStandardProcessorTestRunner {
             fail(e.getMessage());
         }
 
-        assertFalse("onPropertyModified has been called", ((SimpleTestService) testService).isOpmCalled());
+        assertFalse(testService.isOpmCalled(), "onPropertyModified has been called");
 
-        // Act
         ValidationResult vr = runner.setProperty(testService, pdName, pdValue);
 
-        // Assert
         assertTrue(vr.isValid());
 
         ControllerServiceConfiguration csConf = ((MockProcessContext) runner.getProcessContext()).getConfiguration(serviceIdentifier);
@@ -204,14 +233,14 @@ public class TestStandardProcessorTestRunner {
         String retrievedPDValue = csConf.getProperties().get(propertyDescriptor);
 
         assertEquals(pdValue, retrievedPDValue);
-        assertTrue("onPropertyModified has not been called", ((SimpleTestService) testService).isOpmCalled());
+        assertTrue(testService.isOpmCalled(), "onPropertyModified has not been called");
     }
 
     @Test
     public void testProcessorNameShouldBeSet() {
         final AddAttributeProcessor proc = new AddAttributeProcessor();
         final TestRunner runner = TestRunners.newTestRunner(proc, "TestName");
-        assertEquals("TestName",runner.getProcessContext().getName());
+        assertEquals("TestName", runner.getProcessContext().getName());
     }
 
     @Test
@@ -220,7 +249,6 @@ public class TestStandardProcessorTestRunner {
         final AddAttributeProcessor proc = new AddAttributeProcessor();
         final TestRunner runner = TestRunners.newTestRunner(proc);
         final String serviceIdentifier = "test";
-        final String pdName = "name";
         final String pdValue = "exampleName";
         try {
             runner.addControllerService(serviceIdentifier, testService);
@@ -241,6 +269,24 @@ public class TestStandardProcessorTestRunner {
         runner.enableControllerService(testService);
         runner.assertValid(testService);
         runner.assertValid();
+    }
+
+    private static class RecordMetricProcessor extends AbstractProcessor {
+        private final CommitTiming gaugeCommitTiming;
+
+        private RecordMetricProcessor(final CommitTiming gaugeCommitTiming) {
+            this.gaugeCommitTiming = gaugeCommitTiming;
+        }
+
+        @Override
+        public void onTrigger(final ProcessContext context, final ProcessSession session) {
+            session.recordGauge(NAMED_GAUGE, FIRST_NAMED_GAUGE_VALUE, METRIC_ATTRIBUTES, gaugeCommitTiming);
+            session.recordGauge(NAMED_GAUGE, SECOND_NAMED_GAUGE_VALUE, Map.of(), gaugeCommitTiming);
+            session.recordGauge(NAMED_GAUGE, THIRD_NAMED_GAUGE_VALUE, METRIC_ATTRIBUTES, gaugeCommitTiming);
+
+            session.adjustCounter(NAMED_COUNTER, NAMED_COUNTER_DELTA, true);
+            session.adjustCounter(NAMED_COUNTER, NAMED_COUNTER_DELTA, METRIC_ATTRIBUTES, CommitTiming.NOW);
+        }
     }
 
     private static class ProcessorWithOnStop extends AbstractProcessor {
@@ -282,10 +328,7 @@ public class TestStandardProcessorTestRunner {
 
         @Override
         protected void init(final ProcessorInitializationContext context) {
-            final Set<Relationship> relationships = new HashSet<>();
-            relationships.add(REL_SUCCESS);
-            relationships.add(REL_FAILURE);
-            this.relationships = Collections.unmodifiableSet(relationships);
+            this.relationships = Set.of(REL_SUCCESS, REL_FAILURE);
         }
 
         @Override
@@ -321,10 +364,7 @@ public class TestStandardProcessorTestRunner {
         private final Set<Relationship> relationships;
 
         public GoodProcessor() {
-            final Set<Relationship> r = new HashSet<>();
-            r.add(REL_SUCCESS);
-            r.add(REL_FAILURE);
-            relationships = Collections.unmodifiableSet(r);
+            relationships = Set.of(REL_SUCCESS, REL_FAILURE);
         }
 
         @Override
@@ -342,8 +382,8 @@ public class TestStandardProcessorTestRunner {
     }
 
     private static class SimpleTestService extends AbstractControllerService {
-        private final String PD_NAME = "name";
-        private PropertyDescriptor namePropertyDescriptor = new PropertyDescriptor.Builder()
+        private static final String PD_NAME = "name";
+        private final PropertyDescriptor namePropertyDescriptor = new PropertyDescriptor.Builder()
                 .name(PD_NAME)
                 .displayName("Controller Service Name")
                 .required(false)
@@ -353,12 +393,14 @@ public class TestStandardProcessorTestRunner {
 
         private boolean opmCalled = false;
 
+        @Override
         protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-            return Arrays.asList(namePropertyDescriptor);
+            return List.of(namePropertyDescriptor);
         }
 
+        @Override
         public void onPropertyModified(final PropertyDescriptor descriptor, final String oldValue, final String newValue) {
-            getLogger().info("onPropertyModified called for PD {} with old value {} and new value {}", new Object[]{descriptor.getName(), oldValue, newValue});
+            getLogger().info("onPropertyModified called for PD {} with old value {} and new value {}", descriptor.getName(), oldValue, newValue);
             opmCalled = true;
         }
 
@@ -377,27 +419,52 @@ public class TestStandardProcessorTestRunner {
                 .allowableValues("exampleName", "anotherExampleName")
                 .build();
 
+        @Override
         protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-            return Arrays.asList(namePropertyDescriptor);
+            return List.of(namePropertyDescriptor);
         }
     }
 
     @Test
     public void testErrorLogMessageArguments() {
+        final String compName = "name of component";
+        final MockComponentLog logger = new MockComponentLog("first id", compName);
 
-        String compName = "name of component";
-        final MockComponentLog logger = new MockComponentLog("first id",compName);
+        final Throwable t = new RuntimeException("Intentional Exception for testing purposes");
+        logger.error("expected test error", t);
 
-        Throwable t = new ArithmeticException();
-        logger.error("expected test error",t);
+        final List<LogMessage>  log = logger.getErrorMessages();
+        final LogMessage msg = log.getFirst();
 
-        String expected_throwable = "java.lang.ArithmeticException";
+        assertTrue(msg.getMsg().contains("expected test error"));
+        assertNotNull(msg.getThrowable());
+    }
 
-        List<LogMessage>  log = logger.getErrorMessages();
-        LogMessage msg = log.get(0);
-        // checking if the error messages are recorded in the correct throwable argument.
-        assertEquals(expected_throwable,msg.getThrowable().toString());
-        assertEquals("{} expected test error",msg.getMsg());
+    @Test
+    public void testControllerServiceReceivesConfiguredForClusteringSetting() throws InitializationException {
+        final ClusterAwareTestService testService = new ClusterAwareTestService();
+        final AddAttributeProcessor proc = new AddAttributeProcessor();
+        final TestRunner runner = TestRunners.newTestRunner(proc);
 
+        assertFalse(testService.isConfiguredForClustering());
+
+        runner.setIsConfiguredForClustering(true);
+        runner.addControllerService("clusterService", testService);
+
+        assertTrue(testService.isConfiguredForClustering());
+    }
+
+    private static class ClusterAwareTestService extends AbstractControllerService {
+        private boolean configuredForClustering = false;
+
+        @Override
+        protected void init(final ControllerServiceInitializationContext context) {
+            // Capture the value during initialization
+            this.configuredForClustering = context.getNodeTypeProvider().isConfiguredForClustering();
+        }
+
+        public boolean isConfiguredForClustering() {
+            return configuredForClustering;
+        }
     }
 }

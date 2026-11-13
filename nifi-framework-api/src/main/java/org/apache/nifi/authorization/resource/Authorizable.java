@@ -85,8 +85,8 @@ public interface Authorizable {
             return AuthorizationResult.denied("Unknown user.");
         }
 
-        final Map<String,String> userContext;
-        if (user.getClientAddress() != null && !user.getClientAddress().trim().isEmpty()) {
+        final Map<String, String> userContext;
+        if (user.getClientAddress() != null && !user.getClientAddress().isBlank()) {
             userContext = new HashMap<>();
             userContext.put(UserContextKeys.CLIENT_ADDRESS.name(), user.getClientAddress());
         } else {
@@ -197,8 +197,8 @@ public interface Authorizable {
             throw new AccessDeniedException("Unknown user.");
         }
 
-        final Map<String,String> userContext;
-        if (user.getClientAddress() != null && !user.getClientAddress().trim().isEmpty()) {
+        final Map<String, String> userContext;
+        if (user.getClientAddress() != null && !user.getClientAddress().isBlank()) {
             userContext = new HashMap<>();
             userContext.put(UserContextKeys.CLIENT_ADDRESS.name(), user.getClientAddress());
         } else {
@@ -239,8 +239,8 @@ public interface Authorizable {
                 final AuthorizationResult failure = AuthorizationResult.denied("No applicable policies could be found.");
 
                 // audit authorization request
-                if (authorizer instanceof AuthorizationAuditor) {
-                    ((AuthorizationAuditor) authorizer).auditAccessAttempt(request, failure);
+                if (authorizer instanceof final AuthorizationAuditor authorizationAuditor) {
+                    authorizationAuditor.auditAccessAttempt(request, failure);
                 }
 
                 // denied

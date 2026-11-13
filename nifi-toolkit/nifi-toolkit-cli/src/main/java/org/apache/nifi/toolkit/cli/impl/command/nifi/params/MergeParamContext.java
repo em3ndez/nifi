@@ -20,12 +20,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.cli.MissingOptionException;
 import org.apache.nifi.toolkit.cli.api.CommandException;
 import org.apache.nifi.toolkit.cli.api.Context;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ParamContextClient;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
 import org.apache.nifi.toolkit.cli.impl.result.VoidResult;
 import org.apache.nifi.toolkit.cli.impl.util.JacksonUtils;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.toolkit.client.ParamContextClient;
 import org.apache.nifi.web.api.dto.ParameterContextDTO;
 import org.apache.nifi.web.api.dto.ParameterDTO;
 import org.apache.nifi.web.api.entity.ParameterContextEntity;
@@ -46,7 +46,8 @@ public class MergeParamContext extends AbstractUpdateParamContextCommand<VoidRes
 
     @Override
     public String getDescription() {
-        return "Adds any parameters that exist in the exported context that don't exist in the existing context.";
+        return "Adds any parameters that exist in the exported context that don't exist in the existing context.  Overwrites any " +
+                "existing inherited parameter contexts with the provided list.";
     }
 
     @Override
@@ -62,6 +63,9 @@ public class MergeParamContext extends AbstractUpdateParamContextCommand<VoidRes
 
         final String existingContextId = getRequiredArg(properties, CommandOption.PARAM_CONTEXT_ID);
 
+        // Optional args...
+        final int updateTimeout = getUpdateTimeout(properties);
+
         // read the content of the input source into memory
         final String inputSource = getRequiredArg(properties, CommandOption.INPUT_SOURCE);
         final String paramContextJson = getInputSourceContent(inputSource);
@@ -75,7 +79,7 @@ public class MergeParamContext extends AbstractUpdateParamContextCommand<VoidRes
 
         // retrieve the existing context by id
         final ParamContextClient paramContextClient = client.getParamContextClient();
-        final ParameterContextEntity existingContextEntity = paramContextClient.getParamContext(existingContextId);
+        final ParameterContextEntity existingContextEntity = paramContextClient.getParamContext(existingContextId, false);
 
         final ParameterContextDTO existingContext = existingContextEntity.getComponent();
         if (existingContext.getParameters() == null) {
@@ -89,7 +93,8 @@ public class MergeParamContext extends AbstractUpdateParamContextCommand<VoidRes
             final ParameterDTO incomingParameter = incomingParameterEntity.getParameter();
             final String parameterName = incomingParameter.getName();
 
-            final Optional<ParameterDTO> existingParameter = existingContext.getParameters().stream()
+            final Optional<ParameterDTO> existingParameter = existingContext.getParameters()
+                    .stream()
                     .map(p -> p.getParameter())
                     .filter(p -> p.getName().equals(parameterName))
                     .findFirst();
@@ -110,15 +115,19 @@ public class MergeParamContext extends AbstractUpdateParamContextCommand<VoidRes
         updatedContextEntity.setComponent(updatedContextDto);
         updatedContextEntity.setRevision(existingContextEntity.getRevision());
 
+        if (incomingContext.getInheritedParameterContexts() != null) {
+            updatedContextDto.setInheritedParameterContexts(incomingContext.getInheritedParameterContexts());
+        }
+
         // Submit the update request...
         final ParameterContextUpdateRequestEntity updateRequestEntity = paramContextClient.updateParamContext(updatedContextEntity);
-        performUpdate(paramContextClient, updatedContextEntity, updateRequestEntity);
+        performUpdate(paramContextClient, updatedContextEntity, updateRequestEntity, updateTimeout);
 
         printlnIfInteractive("");
         return VoidResult.getInstance();
     }
 
-    private ParameterEntity createParameter(final ParameterDTO incomingParam) throws CommandException {
+    private ParameterEntity createParameter(final ParameterDTO incomingParam) {
         final String parameterName = incomingParam.getName();
         printlnIfInteractive("Found parameter to add - '" + parameterName + "'");
 
@@ -126,6 +135,7 @@ public class MergeParamContext extends AbstractUpdateParamContextCommand<VoidRes
         newParameter.setName(incomingParam.getName());
         newParameter.setDescription(incomingParam.getDescription());
         newParameter.setSensitive(incomingParam.getSensitive());
+        newParameter.setProvided(incomingParam.getProvided());
         newParameter.setValue(incomingParam.getValue());
 
         final ParameterEntity newParameterEntity = new ParameterEntity();

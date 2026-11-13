@@ -28,5 +28,8 @@ public enum UiExtensionType {
     ContentViewer,
     ProcessorConfiguration,
     ControllerServiceConfiguration,
-    ReportingTaskConfiguration
+    ReportingTaskConfiguration,
+    ParameterProviderConfiguration,
+    FlowRegistryClientConfiguration,
+    Connector,
 }

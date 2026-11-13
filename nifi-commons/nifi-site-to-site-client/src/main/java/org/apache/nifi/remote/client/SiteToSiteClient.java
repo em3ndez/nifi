@@ -16,23 +16,8 @@
  */
 package org.apache.nifi.remote.client;
 
-import java.io.Closeable;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.Serializable;
-import java.net.InetAddress;
-import java.security.KeyStore;
-import java.security.SecureRandom;
-import java.util.LinkedHashSet;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManagerFactory;
 import org.apache.nifi.components.state.StateManager;
-import org.apache.nifi.events.EventReporter;
+import org.apache.nifi.remote.SiteToSiteEventReporter;
 import org.apache.nifi.remote.Transaction;
 import org.apache.nifi.remote.TransferDirection;
 import org.apache.nifi.remote.client.http.HttpClient;
@@ -44,8 +29,22 @@ import org.apache.nifi.remote.exception.UnknownPortException;
 import org.apache.nifi.remote.protocol.DataPacket;
 import org.apache.nifi.remote.protocol.SiteToSiteTransportProtocol;
 import org.apache.nifi.remote.protocol.http.HttpProxy;
-import org.apache.nifi.security.util.KeyStoreUtils;
-import org.apache.nifi.security.util.TlsConfiguration;
+import org.apache.nifi.security.ssl.StandardKeyStoreBuilder;
+import org.apache.nifi.security.ssl.StandardSslContextBuilder;
+
+import java.io.Closeable;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.Serializable;
+import java.net.InetAddress;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.security.KeyStore;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import javax.net.ssl.SSLContext;
 
 /**
  * <p>
@@ -108,10 +107,10 @@ public interface SiteToSiteClient extends Closeable {
      *
      * @return a Transaction to use for sending or receiving data, or
      * <code>null</code> if all nodes are penalized.
-     * @throws org.apache.nifi.remote.exception.HandshakeException he
-     * @throws org.apache.nifi.remote.exception.PortNotRunningException pnre
+     * @throws HandshakeException he
+     * @throws PortNotRunningException pnre
      * @throws IOException ioe
-     * @throws org.apache.nifi.remote.exception.UnknownPortException upe
+     * @throws UnknownPortException upe
      */
     Transaction createTransaction(TransferDirection direction) throws HandshakeException, PortNotRunningException, ProtocolException, UnknownPortException, IOException;
 
@@ -163,7 +162,7 @@ public interface SiteToSiteClient extends Closeable {
         private String truststoreFilename;
         private String truststorePass;
         private KeystoreType truststoreType;
-        private EventReporter eventReporter = EventReporter.NO_OP;
+        private SiteToSiteEventReporter eventReporter = SiteToSiteEventReporter.DISABLED;
         private File peerPersistenceFile;
         private StateManager stateManager;
         private boolean useCompression;
@@ -222,7 +221,7 @@ public interface SiteToSiteClient extends Closeable {
          */
         public Builder url(final String url) {
             final Set<String> urls = new LinkedHashSet<>();
-            if (url != null && url.length() > 0) {
+            if (url != null && !url.isEmpty()) {
                 urls.add(url);
             }
             this.urls = urls;
@@ -329,7 +328,7 @@ public interface SiteToSiteClient extends Closeable {
          * Site-to-Site communications are secure (i.e., the client will always
          * use secure or non-secure communications, depending on what the server
          * dictates). <b>Note:</b> The SSLContext provided by this method will be
-         * ignored if using a Serializable Configuration (see {@link #buildSerializableConfig()}).
+         * ignored if using a Serializable Configuration
          * If a Serializable Configuration is required and communications are to be
          * secure, the {@link #keystoreFilename(String)}, {@link #keystorePass(String)},
          * {@link #keystoreType}, {@link #truststoreFilename}, {@link #truststorePass(String)},
@@ -476,7 +475,7 @@ public interface SiteToSiteClient extends Closeable {
          * @param eventReporter reporter
          * @return the builder
          */
-        public Builder eventReporter(final EventReporter eventReporter) {
+        public Builder eventReporter(final SiteToSiteEventReporter eventReporter) {
             this.eventReporter = eventReporter;
             return this;
         }
@@ -639,21 +638,17 @@ public interface SiteToSiteClient extends Closeable {
                 throw new IllegalStateException("Must specify either Port Name or Port Identifier to build Site-to-Site client");
             }
 
-            switch (transportProtocol){
-                case RAW:
-                    return new SocketClient(buildConfig());
-                case HTTP:
-                    return new HttpClient(buildConfig());
-                default:
-                    throw new IllegalStateException("Transport protocol '" + transportProtocol + "' is not supported.");
-            }
+            return switch (transportProtocol) {
+                case RAW -> new SocketClient(buildConfig());
+                case HTTP -> new HttpClient(buildConfig());
+            };
         }
 
         /**
          * @return the configured URL for the remote NiFi instance
          */
         public String getUrl() {
-            if (urls != null && urls.size() > 0) {
+            if (urls != null && !urls.isEmpty()) {
                 return urls.iterator().next();
             }
             return null;
@@ -696,7 +691,7 @@ public interface SiteToSiteClient extends Closeable {
          * @return the EventReporter that is to be used by clients to report
          * events
          */
-        public EventReporter getEventReporter() {
+        public SiteToSiteEventReporter getEventReporter() {
             return eventReporter;
         }
 
@@ -719,7 +714,7 @@ public interface SiteToSiteClient extends Closeable {
         /**
          * @return the transport protocol to use, defaults to RAW
          */
-        public SiteToSiteTransportProtocol getTransportProtocol(){
+        public SiteToSiteTransportProtocol getTransportProtocol() {
             return transportProtocol;
         }
 
@@ -738,7 +733,6 @@ public interface SiteToSiteClient extends Closeable {
             return portIdentifier;
         }
 
-
         /**
          * Specify a HTTP proxy information to use with HTTP protocol of Site-to-Site communication.
          * @param httpProxy HTTP proxy information
@@ -755,8 +749,6 @@ public interface SiteToSiteClient extends Closeable {
 
     }
 
-
-    @SuppressWarnings("deprecation")
     class StandardSiteToSiteClientConfig implements SiteToSiteClientConfig, Serializable {
 
         private static final long serialVersionUID = 1L;
@@ -774,7 +766,7 @@ public interface SiteToSiteClient extends Closeable {
         private final String truststoreFilename;
         private final String truststorePass;
         private final KeystoreType truststoreType;
-        private final EventReporter eventReporter;
+        private final SiteToSiteEventReporter eventReporter;
         private final File peerPersistenceFile;
         private final transient StateManager stateManager;
         private final boolean useCompression;
@@ -849,14 +841,6 @@ public interface SiteToSiteClient extends Closeable {
         }
 
         @Override
-        public String getUrl() {
-            if (urls != null && urls.size() > 0) {
-                return urls.iterator().next();
-            }
-            return null;
-        }
-
-        @Override
         public Set<String> getUrls() {
             return urls;
         }
@@ -882,45 +866,48 @@ public interface SiteToSiteClient extends Closeable {
                 return sslContext;
             }
 
-            final KeyManagerFactory keyManagerFactory;
+            final KeyStore keyStore;
             if (keystoreFilename != null && keystorePass != null && keystoreType != null) {
-                try {
-                    // prepare the keystore
-                    final KeyStore keyStore = KeyStoreUtils.getKeyStore(getKeystoreType().name());
-                    try (final InputStream keyStoreStream = new FileInputStream(new File(getKeystoreFilename()))) {
-                        keyStore.load(keyStoreStream, keystorePass.toCharArray());
-                    }
-                    keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-                    keyManagerFactory.init(keyStore, keystorePass.toCharArray());
-                } catch (final Exception e) {
-                    throw new IllegalStateException("Failed to load Keystore", e);
+                try (final InputStream keyStoreStream = Files.newInputStream(Paths.get(keystoreFilename))) {
+                    keyStore = new StandardKeyStoreBuilder()
+                            .inputStream(keyStoreStream)
+                            .password(keystorePass.toCharArray())
+                            .type(keystoreType.name())
+                            .build();
+                } catch (final IOException e) {
+                    throw new IllegalStateException(String.format("Read Key Store [%s] failed", keystoreFilename), e);
                 }
             } else {
-                keyManagerFactory = null;
+                keyStore = null;
             }
 
-            final TrustManagerFactory trustManagerFactory;
+            final KeyStore trustStore;
             if (truststoreFilename != null && truststorePass != null && truststoreType != null) {
-                try {
-                    trustManagerFactory = KeyStoreUtils.loadTrustManagerFactory(truststoreFilename, truststorePass, getTruststoreType().name());
-                } catch (final Exception e) {
-                    throw new IllegalStateException("Failed to load Truststore", e);
+                try (final InputStream keyStoreStream = Files.newInputStream(Paths.get(truststoreFilename))) {
+                    trustStore = new StandardKeyStoreBuilder()
+                            .inputStream(keyStoreStream)
+                            .password(truststorePass.toCharArray())
+                            .type(truststoreType.name())
+                            .build();
+                } catch (final IOException e) {
+                    throw new IllegalStateException(String.format("Read Trust Store [%s] failed", truststoreFilename), e);
                 }
             } else {
-                trustManagerFactory = null;
+                trustStore = null;
             }
 
-            if (keyManagerFactory != null && trustManagerFactory != null) {
-                try {
-                    // initialize the ssl context
-                    final SSLContext sslContext = SSLContext.getInstance(TlsConfiguration.getHighestCurrentSupportedTlsProtocolVersion());
-                    sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), new SecureRandom());
-                    sslContext.getDefaultSSLParameters().setNeedClientAuth(true);
+            if (keyStore != null || trustStore != null) {
+                final StandardSslContextBuilder builder = new StandardSslContextBuilder();
 
-                    return sslContext;
-                } catch (final Exception e) {
-                    throw new IllegalStateException("Created keystore and truststore but failed to initialize SSLContext", e);
+                if (keyStore != null) {
+                    final char[] keyPassword = keystorePass.toCharArray();
+                    builder.keyPassword(keyPassword);
+                    builder.keyStore(keyStore);
                 }
+                if (trustStore != null) {
+                    builder.trustStore(trustStore);
+                }
+                return builder.build();
             } else {
                 return null;
             }
@@ -964,7 +951,7 @@ public interface SiteToSiteClient extends Closeable {
         }
 
         @Override
-        public EventReporter getEventReporter() {
+        public SiteToSiteEventReporter getEventReporter() {
             return eventReporter;
         }
 

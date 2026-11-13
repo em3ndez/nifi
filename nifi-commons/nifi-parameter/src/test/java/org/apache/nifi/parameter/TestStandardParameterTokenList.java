@@ -16,15 +16,15 @@
  */
 package org.apache.nifi.parameter;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 public class TestStandardParameterTokenList {
 
@@ -34,8 +34,8 @@ public class TestStandardParameterTokenList {
         referenceList.add(new StandardParameterReference("foo", 0, 5, "#{foo}"));
 
         final ParameterLookup paramLookup = Mockito.mock(ParameterLookup.class);
-        Mockito.when(paramLookup.getParameter("foo")).thenReturn(Optional.of(new Parameter(new ParameterDescriptor.Builder().name("foo").build(), "bar")));
-        Mockito.when(paramLookup.getParameter("bazz")).thenReturn(Optional.of(new Parameter(new ParameterDescriptor.Builder().name("bazz").build(), "baz")));
+        Mockito.when(paramLookup.getParameter("foo")).thenReturn(Optional.of(new Parameter.Builder().name("foo").value("bar").build()));
+        Mockito.when(paramLookup.getParameter("bazz")).thenReturn(Optional.of(new Parameter.Builder().name("bazz").value("baz").build()));
 
         StandardParameterTokenList references = new StandardParameterTokenList("#{foo}", referenceList);
         assertEquals("bar", references.substitute(paramLookup));
@@ -71,7 +71,7 @@ public class TestStandardParameterTokenList {
         referenceList.add(new EscapedParameterReference(2, 8, "##{foo}"));
 
         final ParameterLookup paramContext = Mockito.mock(ParameterLookup.class);
-        Mockito.when(paramContext.getParameter("foo")).thenReturn(Optional.of(new Parameter(new ParameterDescriptor.Builder().name("foo").build(), "bar")));
+        Mockito.when(paramContext.getParameter("foo")).thenReturn(Optional.of(new Parameter.Builder().name("foo").value("bar").build()));
 
         StandardParameterTokenList references = new StandardParameterTokenList("####{foo}", referenceList);
         assertEquals("##{foo}", references.substitute(paramContext));

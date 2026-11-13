@@ -19,7 +19,6 @@ package org.apache.nifi.attribute.expression.language;
 import org.antlr.runtime.tree.Tree;
 import org.apache.nifi.attribute.expression.language.compile.ExpressionCompiler;
 import org.apache.nifi.attribute.expression.language.evaluation.Evaluator;
-import org.apache.nifi.attribute.expression.language.evaluation.EvaluatorState;
 import org.apache.nifi.attribute.expression.language.evaluation.QueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.selection.AttributeEvaluator;
 import org.apache.nifi.attribute.expression.language.exception.AttributeExpressionLanguageParsingException;
@@ -50,7 +49,6 @@ public class Query {
     private final Tree tree;
     private final Evaluator<?> evaluator;
     private final AtomicBoolean evaluated = new AtomicBoolean(false);
-    private final EvaluatorState context = new EvaluatorState();
 
     private Query(final String query, final Tree tree, final Evaluator<?> evaluator) {
         this.query = query;
@@ -68,7 +66,7 @@ public class Query {
     }
 
     public static ResultType getResultType(final String value) throws AttributeExpressionLanguageParsingException {
-        return Query.compile(value).getResultType();
+        return compile(value).getResultType();
     }
 
     public static List<ResultType> extractResultTypes(final String value) throws AttributeExpressionLanguageParsingException {
@@ -91,7 +89,6 @@ public class Query {
 
         return expressions;
     }
-
 
     public static List<Range> extractExpressionRanges(final String value) throws AttributeExpressionLanguageParsingException {
         return extractExpressionRanges(value, false);
@@ -185,7 +182,7 @@ public class Query {
 
             final Range range = ranges.get(0);
             final String expression = value.substring(range.getStart(), range.getEnd() + 1);
-            Query.compile(expression);
+            compile(expression);
 
             if (range.getStart() > 0 || range.getEnd() < value.length() - 1) {
                 throw new AttributeExpressionLanguageParsingException("Found characters outside of Expression");
@@ -193,7 +190,7 @@ public class Query {
         } else {
             for (final Range range : extractExpressionRanges(value)) {
                 final String expression = value.substring(range.getStart(), range.getEnd() + 1);
-                Query.compile(expression);
+                compile(expression);
             }
         }
     }
@@ -233,7 +230,7 @@ public class Query {
 
     static String evaluateExpressions(final String rawValue, Map<String, String> expressionMap, final AttributeValueDecorator decorator, final Map<String, String> stateVariables,
                                       final ParameterLookup parameterLookup) throws ProcessException {
-        return Query.prepare(rawValue).evaluateExpressions(new StandardEvaluationContext(expressionMap, stateVariables, parameterLookup), decorator);
+        return prepare(rawValue).evaluateExpressions(new StandardEvaluationContext(expressionMap, stateVariables, parameterLookup), decorator);
     }
 
     static String evaluateExpressions(final String rawValue, final Map<String, String> valueLookup, final ParameterLookup parameterLookup) throws ProcessException {
@@ -242,9 +239,8 @@ public class Query {
 
     static String evaluateExpressions(final String rawValue, final Map<String, String> valueLookup, final AttributeValueDecorator decorator, final ParameterLookup parameterLookup)
             throws ProcessException {
-        return Query.prepare(rawValue).evaluateExpressions(new StandardEvaluationContext(valueLookup, Collections.emptyMap(), parameterLookup), decorator);
+        return prepare(rawValue).evaluateExpressions(new StandardEvaluationContext(valueLookup, Collections.emptyMap(), parameterLookup), decorator);
     }
-
 
     /**
      * Un-escapes ${...} patterns that were escaped
@@ -253,7 +249,7 @@ public class Query {
      * @return un-escaped value
      */
     public static String unescape(final String value) {
-        return value.replaceAll("\\$\\$(?=\\$*\\{.*?\\})", "\\$");
+        return value.replaceAll("\\$\\$(?=\\$*\\{.*?})", "\\$");
     }
 
     public static Query fromTree(final Tree tree, final String text) {
@@ -278,7 +274,7 @@ public class Query {
 
         // count number of $$ at end of string
         int dollars = 0;
-        for (int i=value.length()-1; i >= 0; i--) {
+        for (int i = value.length() - 1; i >= 0; i--) {
             final char c = value.charAt(i);
             if (c == '$') {
                 dollars++;
@@ -296,7 +292,6 @@ public class Query {
         final int newLength = value.length() - charsToRemove;
         return value.substring(0, newLength);
     }
-
 
     public static PreparedQuery prepareWithParametersPreEvaluated(final String query) throws AttributeExpressionLanguageParsingException {
         return prepare(query, true);
@@ -336,6 +331,7 @@ public class Query {
                 }
 
                 addLiteralsAndParameters(parameterParser, treeText, expressions, true);
+                lastIndex = range.getEnd() + 1;
             }
 
             if (escapedRanges.isEmpty()) {
@@ -461,7 +457,6 @@ public class Query {
         return evaluator.evaluate(evaluationContext);
     }
 
-
     Tree getTree() {
         return this.tree;
     }
@@ -470,8 +465,6 @@ public class Query {
     public String toString() {
         return "Query [" + query + "]";
     }
-
-
 
     public static class Range {
 

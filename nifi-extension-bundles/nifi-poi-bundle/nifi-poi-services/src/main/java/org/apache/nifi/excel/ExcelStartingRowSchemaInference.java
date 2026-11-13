@@ -1,0 +1,215 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.excel;
+
+import org.apache.nifi.components.AllowableValue;
+import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.schema.access.SchemaNotFoundException;
+import org.apache.nifi.schema.inference.FieldTypeInference;
+import org.apache.nifi.schema.inference.RecordSource;
+import org.apache.nifi.schema.inference.SchemaInferenceEngine;
+import org.apache.nifi.schema.inference.TimeValueInference;
+import org.apache.nifi.serialization.SimpleRecordSchema;
+import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordSchema;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.util.CellReference;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalInt;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+public class ExcelStartingRowSchemaInference implements SchemaInferenceEngine<Row> {
+
+    static final AllowableValue USE_STARTING_ROW = new AllowableValue("Use Starting Row", "Use Starting Row",
+            "The configured first row of the Excel file is a header line that contains the names of the columns. The schema will be derived by using the "
+                    + "column names in the header of the first sheet and dependent on the strategy chosen either the subsequent "
+                    + RowEvaluationStrategy.NUM_ROWS_TO_DETERMINE_TYPES + " rows or all of the subsequent rows. However the configured header rows of subsequent sheets are skipped. "
+                    + "NOTE: If there are duplicate column names then each subsequent duplicate column name is given a one up number. "
+                    + "For example, column names \"Name\", \"Name\" will be changed to \"Name\", \"Name_1\".");
+    private final RowEvaluationStrategy rowEvaluationStrategy;
+    private final int firstRow;
+    private final CellFieldTypeReader cellFieldTypeReader;
+    private final DataFormatter dataFormatter;
+    private final boolean ignoreCellsBeyondHeader;
+    private final ComponentLog logger;
+
+    public ExcelStartingRowSchemaInference(RowEvaluationStrategy rowEvaluationStrategy, int firstRow, TimeValueInference timeValueInference,
+                                           boolean ignoreCellsBeyondHeader, ComponentLog logger) {
+        this.rowEvaluationStrategy = rowEvaluationStrategy;
+        this.firstRow = firstRow;
+        this.cellFieldTypeReader = new StandardCellFieldTypeReader(timeValueInference);
+        this.dataFormatter = new DataFormatter();
+        this.ignoreCellsBeyondHeader = ignoreCellsBeyondHeader;
+        this.logger = logger;
+    }
+
+    @Override
+    public RecordSchema inferSchema(RecordSource<Row> recordSource) throws IOException {
+        final Map<String, FieldTypeInference> typeMap = new LinkedHashMap<>();
+        final Map<String, IgnoredCells> ignoredCellsBySheet = new LinkedHashMap<>();
+        final int zeroBasedFirstRow = ExcelReader.getZeroBasedIndex(firstRow);
+        List<String> fieldNames = null;
+        int index = 0;
+        Row row;
+
+        while ((row = recordSource.next()) != null) {
+            if (index == 0) {
+                fieldNames = getFieldNames(firstRow, row);
+                // Initialize the typeMap with all the determined field names thereby setting data type defaults for all fields
+                // just in case a specific field data type cannot be inferred.
+                for (String fieldName : fieldNames) {
+                    typeMap.put(fieldName, new FieldTypeInference());
+                }
+            } else if (row.getRowNum() == zeroBasedFirstRow) { // skip first row of all sheets
+                continue;
+            } else {
+                if (RowEvaluationStrategy.STANDARD == rowEvaluationStrategy) {
+                    if (index <= RowEvaluationStrategy.NUM_ROWS_TO_DETERMINE_TYPES) {
+                        inferSchema(row, fieldNames, typeMap, ignoredCellsBySheet);
+                    } else {
+                        break;
+                    }
+                } else {
+                    inferSchema(row, fieldNames, typeMap, ignoredCellsBySheet);
+                }
+            }
+            index++;
+        }
+
+        for (Map.Entry<String, IgnoredCells> entry : ignoredCellsBySheet.entrySet()) {
+            final IgnoredCells ignoredCells = entry.getValue();
+            logger.warn("Ignored non-empty cells beyond the {} header columns in {} row(s) of sheet [{}], first at row {} column {}",
+                    fieldNames.size(), ignoredCells.rowCount(), entry.getKey(), ignoredCells.firstRowNumber(), ignoredCells.firstColumnName());
+        }
+        return createSchema(typeMap);
+    }
+
+    private List<String> getFieldNames(int firstRowIndex, Row row) throws IOException {
+        if (!ExcelUtils.hasCells(row)) {
+            throw new IOException(new SchemaNotFoundException(String.format("Field names could not be determined from configured header row %s, as this row has no cells with data", firstRowIndex)));
+        }
+
+        final List<String> fieldNames = new ArrayList<>();
+        for (int index = 0; index < row.getLastCellNum(); index++) {
+            final Cell cell = row.getCell(index);
+            final String fieldName = dataFormatter.formatCellValue(cell);
+
+            // NOTE: This accounts for column(s) which may be empty in the configured starting row.
+            if (fieldName == null || fieldName.isEmpty()) {
+                fieldNames.add(ExcelUtils.FIELD_NAME_PREFIX + index);
+            } else {
+                fieldNames.add(fieldName);
+            }
+        }
+        final List<String> renamedDuplicateFieldNames = renameDuplicateFieldNames(fieldNames);
+
+        return renamedDuplicateFieldNames;
+    }
+
+    private List<String> renameDuplicateFieldNames(final List<String> fieldNames) {
+        final Map<String, Integer> fieldNameCounts = new HashMap<>();
+        final List<String> renamedDuplicateFieldNames = new ArrayList<>();
+
+        for (String fieldName : fieldNames) {
+            if (fieldNameCounts.containsKey(fieldName)) {
+                final int count = fieldNameCounts.get(fieldName);
+                renamedDuplicateFieldNames.add("%s_%d".formatted(fieldName, count));
+                fieldNameCounts.put(fieldName, count + 1);
+            } else {
+                fieldNameCounts.put(fieldName, 1);
+                renamedDuplicateFieldNames.add(fieldName);
+            }
+        }
+        return renamedDuplicateFieldNames;
+    }
+
+    private void inferSchema(final Row row, final List<String> fieldNames, final Map<String, FieldTypeInference> typeMap,
+                             final Map<String, IgnoredCells> ignoredCellsBySheet) throws IOException {
+        // NOTE: This allows rows to be blank when inferring the schema
+        if (ExcelUtils.hasCells(row)) {
+            final int cellCount;
+            if (row.getLastCellNum() > fieldNames.size()) {
+                if (!ignoreCellsBeyondHeader) {
+                    throw new IOException(new SchemaNotFoundException(String.format("Row %s has %s cells, more than the expected %s number of field names",
+                            row.getRowNum(), row.getLastCellNum(), fieldNames.size())));
+                }
+
+                cellCount = fieldNames.size();
+                trackIgnoredCells(row, fieldNames.size(), ignoredCellsBySheet);
+            } else {
+                cellCount = row.getLastCellNum();
+            }
+
+            IntStream.range(0, cellCount)
+                    .forEach(index -> {
+                        final Cell cell = row.getCell(index);
+                        final String fieldName = fieldNames.get(index);
+                        cellFieldTypeReader.inferCellFieldType(cell, fieldName, typeMap);
+                    });
+        }
+    }
+
+    private void trackIgnoredCells(final Row row, final int headerCellCount, final Map<String, IgnoredCells> ignoredCellsBySheet) {
+        // NOTE: Cells without content, such as formatted blank cells, are ignored silently
+        final OptionalInt firstColumnWithContent = IntStream.range(headerCellCount, row.getLastCellNum())
+                .filter(index -> hasContent(row.getCell(index)))
+                .findFirst();
+
+        if (firstColumnWithContent.isPresent()) {
+            final IgnoredCells ignoredCells = new IgnoredCells(1, row.getRowNum() + 1, CellReference.convertNumToColString(firstColumnWithContent.getAsInt()));
+            ignoredCellsBySheet.merge(row.getSheet().getSheetName(), ignoredCells,
+                    (existing, added) -> new IgnoredCells(existing.rowCount() + 1, existing.firstRowNumber(), existing.firstColumnName()));
+        }
+    }
+
+    private static boolean hasContent(final Cell cell) {
+        if (cell == null) {
+            return false;
+        }
+
+        final CellType cellType = cell.getCellType() == CellType.FORMULA ? cell.getCachedFormulaResultType() : cell.getCellType();
+        return switch (cellType) {
+            case STRING -> !cell.getStringCellValue().isBlank();
+            case BLANK, _NONE -> false;
+            default -> true;
+        };
+    }
+
+    private RecordSchema createSchema(final Map<String, FieldTypeInference> inferences) throws IOException {
+        if (inferences.isEmpty()) {
+            throw new IOException(new SchemaNotFoundException("Failed to infer schema from empty rows"));
+        }
+
+        final List<RecordField> recordFields = inferences.entrySet().stream()
+                .map(entry -> new RecordField(entry.getKey(), entry.getValue().toDataType(), true))
+                .collect(Collectors.toList());
+        return new SimpleRecordSchema(recordFields);
+    }
+
+    private record IgnoredCells(int rowCount, int firstRowNumber, String firstColumnName) {
+    }
+}

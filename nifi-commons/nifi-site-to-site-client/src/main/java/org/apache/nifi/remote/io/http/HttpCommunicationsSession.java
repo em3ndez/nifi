@@ -31,14 +31,13 @@ public class HttpCommunicationsSession extends AbstractCommunicationsSession {
     protected String checksum;
     private String dataTransferUrl;
 
-    public HttpCommunicationsSession(){
-        super();
+    public HttpCommunicationsSession() {
         this.input = new HttpInput();
         this.output = new HttpOutput();
     }
 
     @Override
-    public void setTimeout(final int millis) throws IOException {
+    public void setTimeout(final int millis) {
         this.timeout = millis;
     }
 

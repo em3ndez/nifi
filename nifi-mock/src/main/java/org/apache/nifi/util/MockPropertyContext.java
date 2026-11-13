@@ -16,11 +16,12 @@
  */
 package org.apache.nifi.util;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.context.PropertyContext;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 public class MockPropertyContext implements PropertyContext {
 
@@ -36,12 +37,12 @@ public class MockPropertyContext implements PropertyContext {
         if (value == null) {
             value = property.getDefaultValue();
         }
-        return new MockPropertyValue(value);
+        return new MockPropertyValue(value, null);
     }
 
     @Override
     public Map<String, String> getAllProperties() {
-        final Map<String,String> propValueMap = new LinkedHashMap<>();
+        final Map<String, String> propValueMap = new LinkedHashMap<>();
         for (final Map.Entry<PropertyDescriptor, String> entry : properties.entrySet()) {
             propValueMap.put(entry.getKey().getName(), entry.getValue());
         }

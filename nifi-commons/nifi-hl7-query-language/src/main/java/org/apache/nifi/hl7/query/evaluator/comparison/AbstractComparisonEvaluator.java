@@ -16,12 +16,12 @@
  */
 package org.apache.nifi.hl7.query.evaluator.comparison;
 
-import java.util.Collection;
-import java.util.Map;
-
 import org.apache.nifi.hl7.model.HL7Field;
 import org.apache.nifi.hl7.query.evaluator.BooleanEvaluator;
 import org.apache.nifi.hl7.query.evaluator.Evaluator;
+
+import java.util.Collection;
+import java.util.Map;
 
 public abstract class AbstractComparisonEvaluator extends BooleanEvaluator {
 
@@ -53,19 +53,19 @@ public abstract class AbstractComparisonEvaluator extends BooleanEvaluator {
             return false;
         }
 
-        if (lhsValue instanceof HL7Field) {
-            lhsValue = ((HL7Field) lhsValue).getValue();
+        if (lhsValue instanceof final HL7Field hl7Field) {
+            lhsValue = hl7Field.getValue();
         }
 
-        if (rhsValue instanceof HL7Field) {
-            rhsValue = ((HL7Field) rhsValue).getValue();
+        if (rhsValue instanceof final HL7Field hl7Field) {
+            rhsValue = hl7Field.getValue();
         }
 
         if (lhsValue == null || rhsValue == null) {
             return false;
         }
 
-        /**
+        /*
          * both are collections, and compare(lhsValue, rhsValue) is false.
          * this would be the case, for instance, if we compared field 1 of one segment to
          * a field in another segment, and both fields had components.
@@ -74,7 +74,7 @@ public abstract class AbstractComparisonEvaluator extends BooleanEvaluator {
             return false;
         }
 
-        /**
+        /*
          * if one side is a collection but the other is not, check if any element in that
          * collection compares to the other element in a way that satisfies the condition.
          * this would happen, for instance, if we check Segment1.Field5 = 'X' and field 5 repeats

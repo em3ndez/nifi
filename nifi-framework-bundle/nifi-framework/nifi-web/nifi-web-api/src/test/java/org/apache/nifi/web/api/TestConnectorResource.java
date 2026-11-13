@@ -1,0 +1,1453 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.web.api;
+
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriBuilder;
+import jakarta.ws.rs.core.UriInfo;
+import org.apache.nifi.asset.Asset;
+import org.apache.nifi.authorization.AccessDeniedException;
+import org.apache.nifi.authorization.AuthorizableLookup;
+import org.apache.nifi.authorization.AuthorizeAccess;
+import org.apache.nifi.authorization.Authorizer;
+import org.apache.nifi.authorization.ProcessGroupAuthorizable;
+import org.apache.nifi.authorization.RequestAction;
+import org.apache.nifi.authorization.resource.Authorizable;
+import org.apache.nifi.authorization.user.NiFiUser;
+import org.apache.nifi.authorization.user.NiFiUserDetails;
+import org.apache.nifi.authorization.user.StandardNiFiUser;
+import org.apache.nifi.components.BacklogReportingException;
+import org.apache.nifi.controller.ScheduledState;
+import org.apache.nifi.flow.VersionedProcessGroup;
+import org.apache.nifi.registry.flow.RegisteredFlowSnapshot;
+import org.apache.nifi.util.NiFiProperties;
+import org.apache.nifi.web.NiFiServiceFacade;
+import org.apache.nifi.web.Revision;
+import org.apache.nifi.web.api.dto.AllowableValueDTO;
+import org.apache.nifi.web.api.dto.BacklogDTO;
+import org.apache.nifi.web.api.dto.ComponentStateDTO;
+import org.apache.nifi.web.api.dto.ConfigurationStepConfigurationDTO;
+import org.apache.nifi.web.api.dto.ConnectorDTO;
+import org.apache.nifi.web.api.dto.ConnectorValueReferenceDTO;
+import org.apache.nifi.web.api.dto.FlowSnippetDTO;
+import org.apache.nifi.web.api.dto.MigrationRequestDTO;
+import org.apache.nifi.web.api.dto.MigrationRequestLocalSourceDTO;
+import org.apache.nifi.web.api.dto.ParameterContextDTO;
+import org.apache.nifi.web.api.dto.ParameterDTO;
+import org.apache.nifi.web.api.dto.ProcessGroupDTO;
+import org.apache.nifi.web.api.dto.PropertyGroupConfigurationDTO;
+import org.apache.nifi.web.api.dto.RevisionDTO;
+import org.apache.nifi.web.api.dto.VerifyConnectorConfigStepRequestDTO;
+import org.apache.nifi.web.api.dto.flow.ProcessGroupFlowDTO;
+import org.apache.nifi.web.api.entity.AllowableValueEntity;
+import org.apache.nifi.web.api.entity.BacklogEntity;
+import org.apache.nifi.web.api.entity.BacklogRequestEntity;
+import org.apache.nifi.web.api.entity.ComponentStateEntity;
+import org.apache.nifi.web.api.entity.ConfigurationStepEntity;
+import org.apache.nifi.web.api.entity.ConnectorEntity;
+import org.apache.nifi.web.api.entity.ConnectorPropertyAllowableValuesEntity;
+import org.apache.nifi.web.api.entity.ConnectorRunStatusEntity;
+import org.apache.nifi.web.api.entity.ControllerServiceEntity;
+import org.apache.nifi.web.api.entity.ControllerServicesEntity;
+import org.apache.nifi.web.api.entity.MigrationPayloadEntity;
+import org.apache.nifi.web.api.entity.MigrationRequestEntity;
+import org.apache.nifi.web.api.entity.ParameterContextEntity;
+import org.apache.nifi.web.api.entity.ParameterEntity;
+import org.apache.nifi.web.api.entity.ProcessGroupEntity;
+import org.apache.nifi.web.api.entity.ProcessGroupFlowEntity;
+import org.apache.nifi.web.api.entity.SecretsEntity;
+import org.apache.nifi.web.api.entity.VerifyConnectorConfigStepRequestEntity;
+import org.apache.nifi.web.api.entity.VersionedFlowMigrationSourcesEntity;
+import org.apache.nifi.web.api.request.ClientIdParameter;
+import org.apache.nifi.web.api.request.LongParameter;
+import org.apache.nifi.web.security.token.NiFiAuthenticationToken;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+public class TestConnectorResource {
+
+    @InjectMocks
+    private ConnectorResource connectorResource;
+
+    @Mock
+    private NiFiServiceFacade serviceFacade;
+
+    @Mock
+    private Authorizer authorizer;
+
+    @Mock
+    private HttpServletRequest httpServletRequest;
+
+    @Mock
+    private ServletContext servletContext;
+
+    @Mock
+    private NiFiProperties properties;
+
+    @Mock
+    private UriInfo uriInfo;
+
+    @Mock
+    private UriBuilder uriBuilder;
+
+    @Mock
+    private FlowResource flowResource;
+
+    @Mock
+    private ControllerServiceResource controllerServiceResource;
+
+    @Mock
+    private ProcessGroupResource processGroupResource;
+
+    private static final String CONNECTOR_ID = "test-connector-id";
+    private static final String CONNECTOR_NAME = "Test Connector";
+    private static final String CONNECTOR_TYPE = "TestConnectorType";
+    private static final String CONFIGURATION_STEP_NAME = "test-step";
+    private static final String PROPERTY_GROUP_NAME = "test-group";
+    private static final String PROPERTY_NAME = "test-property";
+    private static final String SECRET_PROVIDER_ID = "parameter-provider-1";
+    private static final String PROCESS_GROUP_ID = "test-process-group-id";
+    private static final String PROCESSOR_ID = "test-processor-id";
+    private static final String CONTROLLER_SERVICE_ID = "test-controller-service-id";
+
+    @BeforeEach
+    public void setUp() throws Exception {
+        lenient().when(httpServletRequest.getHeader(any())).thenReturn(null);
+        lenient().when(httpServletRequest.getServletContext()).thenReturn(servletContext);
+        lenient().when(httpServletRequest.getContextPath()).thenReturn("/nifi-api");
+        lenient().when(httpServletRequest.getScheme()).thenReturn("http");
+        lenient().when(httpServletRequest.getServerName()).thenReturn("localhost");
+        lenient().when(httpServletRequest.getServerPort()).thenReturn(8080);
+        lenient().when(servletContext.getInitParameter(any())).thenReturn(null);
+        lenient().when(properties.isNode()).thenReturn(Boolean.FALSE);
+
+        lenient().when(uriInfo.getBaseUriBuilder()).thenReturn(uriBuilder);
+        lenient().when(uriBuilder.segment(any(String[].class))).thenReturn(uriBuilder);
+        lenient().when(uriBuilder.build()).thenReturn(new URI("http://localhost:8080/nifi-api/connectors/" + CONNECTOR_ID));
+
+        connectorResource.setServiceFacade(serviceFacade);
+        connectorResource.setFlowResource(flowResource);
+        connectorResource.setControllerServiceResource(controllerServiceResource);
+        connectorResource.setProcessGroupResource(processGroupResource);
+        connectorResource.httpServletRequest = httpServletRequest;
+        connectorResource.properties = properties;
+        connectorResource.uriInfo = uriInfo;
+    }
+
+    @AfterEach
+    public void tearDown() {
+        SecurityContextHolder.clearContext();
+    }
+
+    @Test
+    public void testGetConnector() {
+        final ConnectorEntity connectorEntity = createConnectorEntity();
+
+        when(serviceFacade.getConnector(CONNECTOR_ID, false)).thenReturn(connectorEntity);
+
+        try (Response response = connectorResource.getConnector(CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(connectorEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnector(CONNECTOR_ID, false);
+    }
+
+    @Test
+    public void testGetMigrationSources() {
+        final VersionedFlowMigrationSourcesEntity migrationSourcesEntity = new VersionedFlowMigrationSourcesEntity();
+        when(serviceFacade.getConnectorMigrationSources(CONNECTOR_ID)).thenReturn(migrationSourcesEntity);
+
+        try (final Response response = connectorResource.getMigrationSources(CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(migrationSourcesEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorMigrationSources(CONNECTOR_ID);
+    }
+
+    @Test
+    public void testCreateMigrationRequestRejectsMismatchedConnectorId() {
+        final MigrationRequestDTO requestDto = new MigrationRequestDTO();
+        requestDto.setConnectorId("different-connector");
+        requestDto.setLocalSource(createLocalMigrationSource(PROCESS_GROUP_ID));
+
+        final MigrationRequestEntity requestEntity = new MigrationRequestEntity();
+        requestEntity.setRequest(requestDto);
+
+        assertThrows(IllegalArgumentException.class, () -> connectorResource.createMigrationRequest(CONNECTOR_ID, requestEntity));
+    }
+
+    @Test
+    public void testCreateMigrationRequestRequiresExactlyOneSource() {
+        final MigrationRequestDTO requestDto = new MigrationRequestDTO();
+        requestDto.setConnectorId(CONNECTOR_ID);
+        requestDto.setLocalSource(createLocalMigrationSource(PROCESS_GROUP_ID));
+        requestDto.setPayloadId("payload-1");
+
+        final MigrationRequestEntity requestEntity = new MigrationRequestEntity();
+        requestEntity.setRequest(requestDto);
+
+        assertThrows(IllegalArgumentException.class, () -> connectorResource.createMigrationRequest(CONNECTOR_ID, requestEntity));
+    }
+
+    @Test
+    public void testCreateMigrationRequestVerifiesConnectorReadinessBeforeSubmission() {
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(false).when(spyResource).isReplicateRequest();
+
+        final MigrationRequestDTO requestDto = new MigrationRequestDTO();
+        requestDto.setConnectorId(CONNECTOR_ID);
+        requestDto.setLocalSource(createLocalMigrationSource(PROCESS_GROUP_ID));
+
+        final MigrationRequestEntity requestEntity = new MigrationRequestEntity();
+        requestEntity.setRequest(requestDto);
+
+        doThrow(new IllegalStateException("Connector must be stopped before it can be migrated"))
+                .when(serviceFacade).verifyConnectorReadyForMigration(CONNECTOR_ID);
+
+        final IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> spyResource.createMigrationRequest(CONNECTOR_ID, requestEntity));
+        assertEquals("Connector must be stopped before it can be migrated", thrown.getMessage());
+
+        // Readiness is checked first, so an unready Connector aborts before the source-specific verification.
+        verify(serviceFacade).verifyConnectorReadyForMigration(CONNECTOR_ID);
+        verify(serviceFacade, never()).verifyCanMigrateConnector(anyString(), anyString());
+    }
+
+    @Test
+    public void testCreateMigrationRequestDeniedWhenLocalSourceProcessGroupNotAuthorized() {
+        authenticate();
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(false).when(spyResource).isReplicateRequest();
+
+        final AuthorizableLookup lookup = wireMigrationAuthorization();
+        final ProcessGroupAuthorizable sourceGroup = mock(ProcessGroupAuthorizable.class);
+        final Authorizable sourceGroupAuthorizable = mock(Authorizable.class);
+        when(sourceGroup.getAuthorizable()).thenReturn(sourceGroupAuthorizable);
+        when(lookup.getProcessGroup(PROCESS_GROUP_ID)).thenReturn(sourceGroup);
+        doThrow(new AccessDeniedException("Not authorized to write the source Process Group"))
+                .when(sourceGroupAuthorizable).authorize(any(), eq(RequestAction.WRITE), any());
+
+        final MigrationRequestDTO requestDto = new MigrationRequestDTO();
+        requestDto.setConnectorId(CONNECTOR_ID);
+        requestDto.setLocalSource(createLocalMigrationSource(PROCESS_GROUP_ID));
+
+        final MigrationRequestEntity requestEntity = new MigrationRequestEntity();
+        requestEntity.setRequest(requestDto);
+
+        assertThrows(AccessDeniedException.class, () -> spyResource.createMigrationRequest(CONNECTOR_ID, requestEntity));
+
+        verify(lookup).getProcessGroup(PROCESS_GROUP_ID);
+        verify(serviceFacade, never()).verifyConnectorReadyForMigration(anyString());
+        verify(serviceFacade, never()).verifyCanMigrateConnector(anyString(), anyString());
+    }
+
+    @Test
+    public void testCreateMigrationRequestFromUploadedPayloadDoesNotAuthorizeProcessGroup() throws IOException {
+        authenticate();
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(false).when(spyResource).isReplicateRequest();
+
+        final AuthorizableLookup lookup = wireMigrationAuthorization();
+
+        final String payloadId;
+        try (Response payloadResponse = spyResource.createMigrationPayload(CONNECTOR_ID, new ByteArrayInputStream("{}".getBytes(StandardCharsets.UTF_8)))) {
+            payloadId = ((MigrationPayloadEntity) payloadResponse.getEntity()).getPayload().getPayloadId();
+        }
+
+        final MigrationRequestDTO requestDto = new MigrationRequestDTO();
+        requestDto.setConnectorId(CONNECTOR_ID);
+        requestDto.setPayloadId(payloadId);
+
+        final MigrationRequestEntity requestEntity = new MigrationRequestEntity();
+        requestEntity.setRequest(requestDto);
+
+        // Stopping at the readiness check keeps the migration from being submitted asynchronously while still
+        // exercising the authorization callback, which runs before verification.
+        doThrow(new IllegalStateException("Connector must be stopped before it can be migrated"))
+                .when(serviceFacade).verifyConnectorReadyForMigration(CONNECTOR_ID);
+
+        assertThrows(IllegalStateException.class, () -> spyResource.createMigrationRequest(CONNECTOR_ID, requestEntity));
+
+        verify(lookup, never()).getProcessGroup(anyString());
+    }
+
+    private AuthorizableLookup wireMigrationAuthorization() {
+        final AuthorizableLookup lookup = mock(AuthorizableLookup.class);
+        when(lookup.getConnector(CONNECTOR_ID)).thenReturn(mock(Authorizable.class));
+
+        doAnswer(invocation -> {
+            final AuthorizeAccess authorizeAccess = invocation.getArgument(0);
+            authorizeAccess.authorize(lookup);
+            return null;
+        }).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        return lookup;
+    }
+
+    @Test
+    public void testCreateMigrationRequestRequiresLocalSourceOrPayload() {
+        final MigrationRequestDTO requestDto = new MigrationRequestDTO();
+        requestDto.setConnectorId(CONNECTOR_ID);
+
+        final MigrationRequestEntity requestEntity = new MigrationRequestEntity();
+        requestEntity.setRequest(requestDto);
+
+        assertThrows(IllegalArgumentException.class, () -> connectorResource.createMigrationRequest(CONNECTOR_ID, requestEntity));
+    }
+
+    @Test
+    public void testGetConnectorClusterNodeRequestBypassesAuth() {
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(false).when(spyResource).isReplicateRequest();
+        doReturn(true).when(spyResource).isRequestFromClusterNode();
+
+        final ConnectorEntity connectorEntity = createConnectorEntity();
+        when(serviceFacade.getConnector(CONNECTOR_ID, true)).thenReturn(connectorEntity);
+
+        try (Response response = spyResource.getConnector(CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(connectorEntity, response.getEntity());
+        }
+
+        verify(serviceFacade, never()).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnector(CONNECTOR_ID, true);
+    }
+
+    @Test
+    public void testGetAssetsClusterNodeRequestBypassesAuth() {
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(false).when(spyResource).isReplicateRequest();
+        doReturn(true).when(spyResource).isRequestFromClusterNode();
+
+        when(serviceFacade.getConnectorAssets(CONNECTOR_ID)).thenReturn(List.of());
+
+        try (Response response = spyResource.getAssets(CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+        }
+
+        verify(serviceFacade, never()).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorAssets(CONNECTOR_ID);
+    }
+
+    @Test
+    public void testGetAssetContentClusterNodeRequestBypassesAuth() throws Exception {
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(true).when(spyResource).isRequestFromClusterNode();
+
+        final File tempFile = File.createTempFile("test-asset", ".txt");
+        tempFile.deleteOnExit();
+        Files.writeString(tempFile.toPath(), "asset-content");
+
+        final Asset mockAsset = mock(Asset.class);
+        when(mockAsset.getOwnerIdentifier()).thenReturn(CONNECTOR_ID);
+        when(mockAsset.getFile()).thenReturn(tempFile);
+        when(mockAsset.getName()).thenReturn("test-asset.txt");
+
+        final String assetId = "test-asset-id";
+        when(serviceFacade.getConnectorAsset(assetId)).thenReturn(Optional.of(mockAsset));
+
+        try (Response response = spyResource.getAssetContent(CONNECTOR_ID, assetId)) {
+            assertEquals(200, response.getStatus());
+        }
+
+        verify(serviceFacade, never()).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorAsset(assetId);
+    }
+
+    @Test
+    public void testGetConnectorNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () -> connectorResource.getConnector(CONNECTOR_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnector(anyString());
+    }
+
+    @Test
+    public void testUpdateConnector() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        final ConnectorEntity responseEntity = createConnectorEntity();
+
+        when(serviceFacade.updateConnector(any(Revision.class), any(ConnectorDTO.class))).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.updateConnector(CONNECTOR_ID, requestEntity)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).verifyUpdateConnector(any(ConnectorDTO.class));
+        verify(serviceFacade).updateConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testUpdateConnectorNotAuthorized() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () -> connectorResource.updateConnector(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).verifyUpdateConnector(any(ConnectorDTO.class));
+        verify(serviceFacade, never()).updateConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testUpdateConnectorWithMismatchedId() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.getComponent().setId("different-id");
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.updateConnector(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).updateConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testUpdateConnectorWithNullEntity() {
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.updateConnector(CONNECTOR_ID, null));
+
+        verify(serviceFacade, never()).updateConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testUpdateConnectorWithNullComponent() {
+        final ConnectorEntity requestEntity = new ConnectorEntity();
+        requestEntity.setComponent(null);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.updateConnector(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).updateConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testUpdateConnectorWithNullRevision() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.setRevision(null);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.updateConnector(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).updateConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testDeleteConnector() {
+        final ConnectorEntity responseEntity = createConnectorEntity();
+
+        when(serviceFacade.deleteConnector(any(Revision.class), eq(CONNECTOR_ID))).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.deleteConnector(new LongParameter("1"), new ClientIdParameter("client-id"), false, CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).verifyDeleteConnector(CONNECTOR_ID);
+        verify(serviceFacade).deleteConnector(any(Revision.class), eq(CONNECTOR_ID));
+    }
+
+    @Test
+    public void testDeleteConnectorNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.deleteConnector(new LongParameter("1"), new ClientIdParameter("client-id"), false, CONNECTOR_ID));
+
+        verify(serviceFacade, never()).verifyDeleteConnector(anyString());
+        verify(serviceFacade, never()).deleteConnector(any(Revision.class), anyString());
+    }
+
+    @Test
+    public void testUpdateRunStatus() {
+        final ConnectorRunStatusEntity requestEntity = createConnectorRunStatusEntity();
+        final ConnectorEntity responseEntity = createConnectorEntity();
+
+        when(serviceFacade.scheduleConnector(any(Revision.class), eq(CONNECTOR_ID), eq(ScheduledState.RUNNING)))
+            .thenReturn(responseEntity);
+
+        try (Response response = connectorResource.updateRunStatus(CONNECTOR_ID, requestEntity)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).verifyUpdateConnector(any(ConnectorDTO.class));
+        verify(serviceFacade).scheduleConnector(any(Revision.class), eq(CONNECTOR_ID), eq(ScheduledState.RUNNING));
+    }
+
+    @Test
+    public void testUpdateRunStatusNotAuthorized() {
+        final ConnectorRunStatusEntity requestEntity = createConnectorRunStatusEntity();
+
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.updateRunStatus(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).verifyUpdateConnector(any(ConnectorDTO.class));
+        verify(serviceFacade, never()).scheduleConnector(any(Revision.class), anyString(), any(ScheduledState.class));
+    }
+
+    @Test
+    public void testUpdateRunStatusWithNullEntity() {
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.updateRunStatus(CONNECTOR_ID, null));
+
+        verify(serviceFacade, never()).scheduleConnector(any(Revision.class), anyString(), any(ScheduledState.class));
+    }
+
+    @Test
+    public void testUpdateRunStatusWithNullRevision() {
+        final ConnectorRunStatusEntity requestEntity = createConnectorRunStatusEntity();
+        requestEntity.setRevision(null);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.updateRunStatus(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).scheduleConnector(any(Revision.class), anyString(), any(ScheduledState.class));
+    }
+
+    @Test
+    public void testGetConnectorPropertyAllowableValues() {
+        final ConnectorPropertyAllowableValuesEntity responseEntity = createConnectorPropertyAllowableValuesEntity();
+
+        when(serviceFacade.getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, null))
+            .thenReturn(responseEntity);
+
+        try (Response response = connectorResource.getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, null)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, null);
+    }
+
+    @Test
+    public void testGetConnectorPropertyAllowableValuesWithFilter() {
+        final String filter = "test-filter";
+        final ConnectorPropertyAllowableValuesEntity responseEntity = createConnectorPropertyAllowableValuesEntity();
+
+        when(serviceFacade.getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, filter))
+            .thenReturn(responseEntity);
+
+        try (Response response = connectorResource.getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, filter)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, filter);
+    }
+
+    @Test
+    public void testGetConnectorPropertyAllowableValuesNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getConnectorPropertyAllowableValues(CONNECTOR_ID, CONFIGURATION_STEP_NAME, PROPERTY_GROUP_NAME, PROPERTY_NAME, null));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorPropertyAllowableValues(anyString(), anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    public void testGetSecrets() {
+        final SecretsEntity responseEntity = new SecretsEntity();
+        responseEntity.setSecrets(List.of());
+
+        when(serviceFacade.getSecrets()).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.getSecrets(CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getSecrets();
+    }
+
+    @Test
+    public void testGetSecretsNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () -> connectorResource.getSecrets(CONNECTOR_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getSecrets();
+    }
+
+    private ConfigurationStepConfigurationDTO createConfigurationStepWithSecretReference() {
+        final ConnectorValueReferenceDTO secretReference = new ConnectorValueReferenceDTO();
+        secretReference.setValueType("SECRET_REFERENCE");
+        secretReference.setSecretProviderId(SECRET_PROVIDER_ID);
+        secretReference.setSecretName("api-key");
+
+        final PropertyGroupConfigurationDTO propertyGroup = new PropertyGroupConfigurationDTO();
+        propertyGroup.setPropertyGroupName(PROPERTY_GROUP_NAME);
+        propertyGroup.setPropertyValues(Map.of(PROPERTY_NAME, secretReference));
+
+        final ConfigurationStepConfigurationDTO configurationStep = new ConfigurationStepConfigurationDTO();
+        configurationStep.setConfigurationStepName(CONFIGURATION_STEP_NAME);
+        configurationStep.setPropertyGroupConfigurations(List.of(propertyGroup));
+        return configurationStep;
+    }
+
+    private VerifyConnectorConfigStepRequestEntity createVerifyConfigStepRequestEntity() {
+        final VerifyConnectorConfigStepRequestDTO requestDto = new VerifyConnectorConfigStepRequestDTO();
+        requestDto.setConnectorId(CONNECTOR_ID);
+        requestDto.setConfigurationStepName(CONFIGURATION_STEP_NAME);
+        requestDto.setConfigurationStep(createConfigurationStepWithSecretReference());
+
+        final VerifyConnectorConfigStepRequestEntity requestEntity = new VerifyConnectorConfigStepRequestEntity();
+        requestEntity.setRequest(requestDto);
+        return requestEntity;
+    }
+
+    private ConfigurationStepEntity createUpdateConfigurationStepEntity() {
+        final RevisionDTO revision = new RevisionDTO();
+        revision.setVersion(1L);
+        revision.setClientId("client-id");
+
+        final ConfigurationStepEntity entity = new ConfigurationStepEntity();
+        entity.setParentConnectorId(CONNECTOR_ID);
+        entity.setParentConnectorRevision(revision);
+        entity.setConfigurationStep(createConfigurationStepWithSecretReference());
+        return entity;
+    }
+
+    private AuthorizableLookup wireDeniedSecretReferenceAuthorization() {
+        final AuthorizableLookup lookup = mock(AuthorizableLookup.class);
+
+        final Authorizable connector = mock(Authorizable.class);
+        when(lookup.getConnector(CONNECTOR_ID)).thenReturn(connector);
+
+        final Authorizable secretProvider = mock(Authorizable.class);
+        when(lookup.getConnectorSecretProvider(SECRET_PROVIDER_ID, null, null)).thenReturn(secretProvider);
+        doThrow(new AccessDeniedException("Not authorized to read the referenced secret's Parameter Provider"))
+                .when(secretProvider).authorize(any(), eq(RequestAction.READ), any());
+
+        doAnswer(invocation -> {
+            final AuthorizeAccess authorizeAccess = invocation.getArgument(0);
+            authorizeAccess.authorize(lookup);
+            return null;
+        }).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        return lookup;
+    }
+
+    @Test
+    public void testSubmitConfigStepVerificationAuthorizesReferencesBeforeVerification() {
+        authenticate();
+        final AuthorizableLookup lookup = wireDeniedSecretReferenceAuthorization();
+
+        final VerifyConnectorConfigStepRequestEntity requestEntity = createVerifyConfigStepRequestEntity();
+
+        assertThrows(AccessDeniedException.class,
+                () -> connectorResource.submitConfigurationStepVerificationRequest(CONNECTOR_ID, CONFIGURATION_STEP_NAME, requestEntity));
+
+        verify(lookup).getConnectorSecretProvider(SECRET_PROVIDER_ID, null, null);
+        verify(serviceFacade, never()).verifyCanVerifyConnectorConfigurationStep(anyString(), anyString());
+        verify(serviceFacade, never()).performConnectorConfigurationStepVerification(anyString(), anyString(), any());
+    }
+
+    @Test
+    public void testUpdateConfigStepAuthorizesReferencesBeforeUpdate() {
+        final AuthorizableLookup lookup = wireDeniedSecretReferenceAuthorization();
+
+        final ConfigurationStepEntity requestEntity = createUpdateConfigurationStepEntity();
+
+        assertThrows(AccessDeniedException.class,
+                () -> connectorResource.updateConnectorConfigurationStep(CONNECTOR_ID, CONFIGURATION_STEP_NAME, requestEntity));
+
+        verify(lookup).getConnectorSecretProvider(SECRET_PROVIDER_ID, null, null);
+        verify(serviceFacade, never()).updateConnectorConfigurationStep(any(Revision.class), anyString(), anyString(), any());
+    }
+
+    @Test
+    public void testGetFlow() {
+        final ProcessGroupFlowEntity responseEntity = createProcessGroupFlowEntity();
+        when(serviceFacade.getConnectorFlow(CONNECTOR_ID, PROCESS_GROUP_ID, false)).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.getFlow(CONNECTOR_ID, PROCESS_GROUP_ID, false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorFlow(CONNECTOR_ID, PROCESS_GROUP_ID, false);
+    }
+
+    @Test
+    public void testGetFlowNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () -> connectorResource.getFlow(CONNECTOR_ID, PROCESS_GROUP_ID, false));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorFlow(anyString(), anyString(), eq(false));
+    }
+
+    @Test
+    public void testGetControllerServicesFromConnectorProcessGroup() {
+        final Set<ControllerServiceEntity> controllerServices = Set.of();
+        when(serviceFacade.getConnectorControllerServices(CONNECTOR_ID, PROCESS_GROUP_ID, true, false, true)).thenReturn(controllerServices);
+
+        try (Response response = connectorResource.getControllerServicesFromConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID, true, false, true)) {
+            assertEquals(200, response.getStatus());
+            final ControllerServicesEntity entity = (ControllerServicesEntity) response.getEntity();
+            assertEquals(controllerServices, entity.getControllerServices());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorControllerServices(CONNECTOR_ID, PROCESS_GROUP_ID, true, false, true);
+        verify(controllerServiceResource).populateRemainingControllerServiceEntitiesContent(controllerServices);
+    }
+
+    @Test
+    public void testGetControllerServicesFromConnectorProcessGroupNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getControllerServicesFromConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID, true, false, true));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorControllerServices(anyString(), anyString(), eq(true), eq(false), eq(true));
+    }
+
+    @Test
+    public void testGetParameterContextForConnectorProcessGroup() {
+        final ParameterContextEntity responseEntity = createParameterContextEntity();
+        when(serviceFacade.getConnectorParameterContext(CONNECTOR_ID, PROCESS_GROUP_ID)).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.getParameterContextForConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorParameterContext(CONNECTOR_ID, PROCESS_GROUP_ID);
+    }
+
+    @Test
+    public void testGetParameterContextForConnectorProcessGroupReturnsNoContentWhenUnbound() {
+        when(serviceFacade.getConnectorParameterContext(CONNECTOR_ID, PROCESS_GROUP_ID)).thenReturn(null);
+
+        try (Response response = connectorResource.getParameterContextForConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID)) {
+            assertEquals(204, response.getStatus());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorParameterContext(CONNECTOR_ID, PROCESS_GROUP_ID);
+    }
+
+    @Test
+    public void testGetParameterContextForConnectorProcessGroupNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getParameterContextForConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorParameterContext(anyString(), anyString());
+    }
+
+    @Test
+    public void testInitiateDrain() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        final ConnectorEntity responseEntity = createConnectorEntity();
+        responseEntity.getComponent().setState("DRAINING");
+
+        when(serviceFacade.drainConnector(any(Revision.class), eq(CONNECTOR_ID))).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.initiateDrain(CONNECTOR_ID, requestEntity)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(responseEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).verifyDrainConnector(CONNECTOR_ID);
+        verify(serviceFacade).drainConnector(any(Revision.class), eq(CONNECTOR_ID));
+    }
+
+    @Test
+    public void testInitiateDrainNotAuthorized() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.initiateDrain(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).verifyDrainConnector(anyString());
+        verify(serviceFacade, never()).drainConnector(any(Revision.class), anyString());
+    }
+
+    @Test
+    public void testInitiateDrainWithNullEntity() {
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.initiateDrain(CONNECTOR_ID, null));
+
+        verify(serviceFacade, never()).drainConnector(any(Revision.class), anyString());
+    }
+
+    @Test
+    public void testInitiateDrainWithNullRevision() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.setRevision(null);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.initiateDrain(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).drainConnector(any(Revision.class), anyString());
+    }
+
+    @Test
+    public void testInitiateDrainWithMismatchedId() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.setId("different-id");
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.initiateDrain(CONNECTOR_ID, requestEntity));
+
+        verify(serviceFacade, never()).drainConnector(any(Revision.class), anyString());
+    }
+
+    private ConnectorEntity createConnectorEntity() {
+        final ConnectorEntity entity = new ConnectorEntity();
+
+        final ConnectorDTO dto = new ConnectorDTO();
+        dto.setId(CONNECTOR_ID);
+        dto.setName(CONNECTOR_NAME);
+        dto.setType(CONNECTOR_TYPE);
+        dto.setState("STOPPED");
+        entity.setComponent(dto);
+
+        final RevisionDTO revision = new RevisionDTO();
+        revision.setVersion(1L);
+        revision.setClientId("client-id");
+        entity.setRevision(revision);
+
+        return entity;
+    }
+
+    private ConnectorRunStatusEntity createConnectorRunStatusEntity() {
+        final ConnectorRunStatusEntity entity = new ConnectorRunStatusEntity();
+        entity.setState("RUNNING");
+
+        final RevisionDTO revision = new RevisionDTO();
+        revision.setVersion(1L);
+        revision.setClientId("client-id");
+        entity.setRevision(revision);
+
+        return entity;
+    }
+
+    private ConnectorPropertyAllowableValuesEntity createConnectorPropertyAllowableValuesEntity() {
+        final ConnectorPropertyAllowableValuesEntity entity = new ConnectorPropertyAllowableValuesEntity();
+        entity.setConfigurationStepName(CONFIGURATION_STEP_NAME);
+        entity.setPropertyGroupName(PROPERTY_GROUP_NAME);
+        entity.setPropertyName(PROPERTY_NAME);
+
+        final AllowableValueDTO allowableValueDto1 = new AllowableValueDTO();
+        allowableValueDto1.setValue("value1");
+        allowableValueDto1.setDisplayName("Value 1");
+        allowableValueDto1.setDescription("First allowable value");
+
+        final AllowableValueEntity allowableValueEntity1 = new AllowableValueEntity();
+        allowableValueEntity1.setAllowableValue(allowableValueDto1);
+        allowableValueEntity1.setCanRead(true);
+
+        final AllowableValueDTO allowableValueDto2 = new AllowableValueDTO();
+        allowableValueDto2.setValue("value2");
+        allowableValueDto2.setDisplayName("Value 2");
+        allowableValueDto2.setDescription("Second allowable value");
+
+        final AllowableValueEntity allowableValueEntity2 = new AllowableValueEntity();
+        allowableValueEntity2.setAllowableValue(allowableValueDto2);
+        allowableValueEntity2.setCanRead(true);
+
+        entity.setAllowableValues(List.of(allowableValueEntity1, allowableValueEntity2));
+
+        return entity;
+    }
+
+    private ProcessGroupFlowEntity createProcessGroupFlowEntity() {
+        final ProcessGroupFlowEntity entity = new ProcessGroupFlowEntity();
+        final ProcessGroupFlowDTO flowDTO = new ProcessGroupFlowDTO();
+        flowDTO.setId("root-process-group-id");
+        entity.setProcessGroupFlow(flowDTO);
+        return entity;
+    }
+
+    private ParameterContextEntity createParameterContextEntity() {
+        final ParameterContextEntity entity = new ParameterContextEntity();
+        entity.setId("test-parameter-context-id");
+
+        final ParameterContextDTO dto = new ParameterContextDTO();
+        dto.setId("test-parameter-context-id");
+        dto.setName("Test Parameter Context");
+
+        final ParameterDTO parameterDto = new ParameterDTO();
+        parameterDto.setName("test-parameter");
+        parameterDto.setValue("test-value");
+        parameterDto.setSensitive(false);
+
+        final ParameterEntity parameterEntity = new ParameterEntity();
+        parameterEntity.setParameter(parameterDto);
+        parameterEntity.setCanWrite(false);
+
+        dto.setParameters(Set.of(parameterEntity));
+        entity.setComponent(dto);
+        return entity;
+    }
+
+    @Test
+    public void testCreateConnectorWithValidClientSpecifiedUuid() {
+        final String uppercaseUuid = "A1B2C3D4-E5F6-7890-ABCD-EF1234567890";
+        final String normalizedUuid = uppercaseUuid.toLowerCase();
+
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.getComponent().setId(uppercaseUuid);
+        requestEntity.getComponent().setType(CONNECTOR_TYPE);
+        requestEntity.getRevision().setVersion(0L);
+
+        final ConnectorEntity responseEntity = createConnectorEntity();
+        responseEntity.getComponent().setId(normalizedUuid);
+
+        when(serviceFacade.createConnector(any(Revision.class), any(ConnectorDTO.class))).thenReturn(responseEntity);
+
+        try (Response response = connectorResource.createConnector(requestEntity)) {
+            assertEquals(201, response.getStatus());
+            final ConnectorEntity entity = (ConnectorEntity) response.getEntity();
+            assertEquals(normalizedUuid, entity.getComponent().getId());
+        }
+
+        verify(serviceFacade).verifyCreateConnector(any(ConnectorDTO.class));
+        verify(serviceFacade).createConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testCreateConnectorWithInvalidClientSpecifiedUuid() {
+        final String invalidId = "not-a-valid-uuid";
+
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.getComponent().setId(invalidId);
+        requestEntity.getComponent().setType(CONNECTOR_TYPE);
+        requestEntity.getRevision().setVersion(0L);
+
+        final IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.createConnector(requestEntity));
+
+        assertEquals("ID [" + invalidId + "] is not a valid UUID.", exception.getMessage());
+
+        verify(serviceFacade, never()).createConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testCreateConnectorWithNullEntity() {
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.createConnector(null));
+
+        verify(serviceFacade, never()).createConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testCreateConnectorWithNullComponent() {
+        final ConnectorEntity requestEntity = new ConnectorEntity();
+        requestEntity.setComponent(null);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.createConnector(requestEntity));
+
+        verify(serviceFacade, never()).createConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testCreateConnectorWithInvalidRevision() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.getComponent().setType(CONNECTOR_TYPE);
+        requestEntity.getRevision().setVersion(1L);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.createConnector(requestEntity));
+
+        verify(serviceFacade, never()).createConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testCreateConnectorWithBlankType() {
+        final ConnectorEntity requestEntity = createConnectorEntity();
+        requestEntity.getComponent().setType("");
+        requestEntity.getRevision().setVersion(0L);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            connectorResource.createConnector(requestEntity));
+
+        verify(serviceFacade, never()).createConnector(any(Revision.class), any(ConnectorDTO.class));
+    }
+
+    @Test
+    public void testGetConnectorProcessorState() {
+        final ComponentStateDTO stateDTO = new ComponentStateDTO();
+        stateDTO.setComponentId(PROCESSOR_ID);
+        when(serviceFacade.getConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID)).thenReturn(stateDTO);
+
+        try (Response response = connectorResource.getConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID)) {
+            assertEquals(200, response.getStatus());
+            final ComponentStateEntity entity = (ComponentStateEntity) response.getEntity();
+            assertEquals(PROCESSOR_ID, entity.getComponentState().getComponentId());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID);
+    }
+
+    @Test
+    public void testGetConnectorProcessorStateNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorProcessorState(anyString(), anyString());
+    }
+
+    @Test
+    public void testClearConnectorProcessorState() {
+        final ComponentStateDTO stateDTO = new ComponentStateDTO();
+        stateDTO.setComponentId(PROCESSOR_ID);
+        when(serviceFacade.clearConnectorProcessorState(eq(CONNECTOR_ID), eq(PROCESSOR_ID), any())).thenReturn(stateDTO);
+
+        try (Response response = connectorResource.clearConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID, null)) {
+            assertEquals(200, response.getStatus());
+            final ComponentStateEntity entity = (ComponentStateEntity) response.getEntity();
+            assertEquals(PROCESSOR_ID, entity.getComponentState().getComponentId());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).verifyCanClearConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID);
+        verify(serviceFacade).clearConnectorProcessorState(eq(CONNECTOR_ID), eq(PROCESSOR_ID), any());
+    }
+
+    @Test
+    public void testClearConnectorProcessorStateNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.clearConnectorProcessorState(CONNECTOR_ID, PROCESSOR_ID, null));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).verifyCanClearConnectorProcessorState(anyString(), anyString());
+        verify(serviceFacade, never()).clearConnectorProcessorState(anyString(), anyString(), any());
+    }
+
+    @Test
+    public void testGetConnectorControllerService() {
+        final ControllerServiceEntity controllerServiceEntity = new ControllerServiceEntity();
+        controllerServiceEntity.setId(CONTROLLER_SERVICE_ID);
+        when(serviceFacade.getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, true)).thenReturn(controllerServiceEntity);
+        when(controllerServiceResource.populateRemainingControllerServiceEntityContent(controllerServiceEntity)).thenReturn(controllerServiceEntity);
+
+        try (Response response = connectorResource.getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(controllerServiceEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, true);
+        verify(controllerServiceResource).populateRemainingControllerServiceEntityContent(controllerServiceEntity);
+    }
+
+    @Test
+    public void testGetConnectorControllerServiceUiOnly() {
+        final ControllerServiceEntity controllerServiceEntity = new ControllerServiceEntity();
+        controllerServiceEntity.setId(CONTROLLER_SERVICE_ID);
+        when(serviceFacade.getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, true)).thenReturn(controllerServiceEntity);
+        when(controllerServiceResource.populateRemainingControllerServiceEntityContent(controllerServiceEntity)).thenReturn(controllerServiceEntity);
+
+        try (Response response = connectorResource.getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, true)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(controllerServiceEntity, response.getEntity());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, true);
+        verify(controllerServiceResource).populateRemainingControllerServiceEntityContent(controllerServiceEntity);
+    }
+
+    @Test
+    public void testGetConnectorControllerServiceNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getConnectorControllerService(CONNECTOR_ID, CONTROLLER_SERVICE_ID, false));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorControllerService(anyString(), anyString(), eq(true));
+    }
+
+    @Test
+    public void testGetConnectorProcessGroup() {
+        final ProcessGroupDTO processGroupDto = new ProcessGroupDTO();
+        processGroupDto.setId(PROCESS_GROUP_ID);
+        processGroupDto.setContents(new FlowSnippetDTO());
+
+        final ProcessGroupEntity processGroupEntity = new ProcessGroupEntity();
+        processGroupEntity.setId(PROCESS_GROUP_ID);
+        processGroupEntity.setComponent(processGroupDto);
+        when(serviceFacade.getConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID)).thenReturn(processGroupEntity);
+        when(processGroupResource.populateRemainingProcessGroupEntityContent(processGroupEntity)).thenReturn(processGroupEntity);
+
+        try (Response response = connectorResource.getConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(processGroupEntity, response.getEntity());
+            assertNull(processGroupDto.getContents());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID);
+        verify(processGroupResource).populateRemainingProcessGroupEntityContent(processGroupEntity);
+    }
+
+    @Test
+    public void testGetConnectorProcessGroupNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorProcessGroup(anyString(), anyString());
+    }
+
+    @Test
+    public void testExportConnectorProcessGroup() {
+        final AuthorizableLookup lookup = wireMigrationAuthorization();
+        final Authorizable connector = lookup.getConnector(CONNECTOR_ID);
+        final VersionedProcessGroup processGroup = new VersionedProcessGroup();
+        processGroup.setName("Test Process Group");
+        final RegisteredFlowSnapshot flowSnapshot = new RegisteredFlowSnapshot();
+        flowSnapshot.setFlowContents(processGroup);
+        when(serviceFacade.getConnectorCurrentFlowSnapshot(CONNECTOR_ID, PROCESS_GROUP_ID, true, false)).thenReturn(flowSnapshot);
+
+        try (Response response = connectorResource.exportConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID, true, false)) {
+            assertEquals(200, response.getStatus());
+            assertEquals(flowSnapshot, response.getEntity());
+            assertEquals("attachment; filename=\"Test_Process_Group.json\"", response.getHeaderString("Content-Disposition"));
+        }
+
+        verify(connector).authorize(eq(authorizer), eq(RequestAction.READ), any());
+        verify(serviceFacade).getConnectorCurrentFlowSnapshot(CONNECTOR_ID, PROCESS_GROUP_ID, true, false);
+    }
+
+    @Test
+    public void testExportConnectorProcessGroupWithComponentStateRequiresWrite() {
+        final AuthorizableLookup lookup = wireMigrationAuthorization();
+        final Authorizable connector = lookup.getConnector(CONNECTOR_ID);
+        final VersionedProcessGroup processGroup = new VersionedProcessGroup();
+        processGroup.setName("Test Process Group");
+        final RegisteredFlowSnapshot flowSnapshot = new RegisteredFlowSnapshot();
+        flowSnapshot.setFlowContents(processGroup);
+        when(serviceFacade.getConnectorCurrentFlowSnapshot(CONNECTOR_ID, PROCESS_GROUP_ID, false, true)).thenReturn(flowSnapshot);
+
+        try (Response response = connectorResource.exportConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID, false, true)) {
+            assertEquals(200, response.getStatus());
+        }
+
+        verify(connector).authorize(eq(authorizer), eq(RequestAction.WRITE), any());
+        verify(serviceFacade).getConnectorCurrentFlowSnapshot(CONNECTOR_ID, PROCESS_GROUP_ID, false, true);
+    }
+
+    @Test
+    public void testExportConnectorProcessGroupNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+                connectorResource.exportConnectorProcessGroup(CONNECTOR_ID, PROCESS_GROUP_ID, false, false));
+
+        verify(serviceFacade, never()).getConnectorCurrentFlowSnapshot(anyString(), anyString(), eq(false), eq(false));
+    }
+
+    @Test
+    public void testGetConnectorControllerServiceState() {
+        final ComponentStateDTO stateDTO = new ComponentStateDTO();
+        stateDTO.setComponentId(CONTROLLER_SERVICE_ID);
+        when(serviceFacade.getConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID)).thenReturn(stateDTO);
+
+        try (Response response = connectorResource.getConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID)) {
+            assertEquals(200, response.getStatus());
+            final ComponentStateEntity entity = (ComponentStateEntity) response.getEntity();
+            assertEquals(CONTROLLER_SERVICE_ID, entity.getComponentState().getComponentId());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).getConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID);
+    }
+
+    @Test
+    public void testGetConnectorControllerServiceStateNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.getConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).getConnectorControllerServiceState(anyString(), anyString());
+    }
+
+    @Test
+    public void testClearConnectorControllerServiceState() {
+        final ComponentStateDTO stateDTO = new ComponentStateDTO();
+        stateDTO.setComponentId(CONTROLLER_SERVICE_ID);
+        when(serviceFacade.clearConnectorControllerServiceState(eq(CONNECTOR_ID), eq(CONTROLLER_SERVICE_ID), any())).thenReturn(stateDTO);
+
+        try (Response response = connectorResource.clearConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID, null)) {
+            assertEquals(200, response.getStatus());
+            final ComponentStateEntity entity = (ComponentStateEntity) response.getEntity();
+            assertEquals(CONTROLLER_SERVICE_ID, entity.getComponentState().getComponentId());
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).verifyCanClearConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID);
+        verify(serviceFacade).clearConnectorControllerServiceState(eq(CONNECTOR_ID), eq(CONTROLLER_SERVICE_ID), any());
+    }
+
+    @Test
+    public void testClearConnectorControllerServiceStateNotAuthorized() {
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () ->
+            connectorResource.clearConnectorControllerServiceState(CONNECTOR_ID, CONTROLLER_SERVICE_ID, null));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade, never()).verifyCanClearConnectorControllerServiceState(anyString(), anyString());
+        verify(serviceFacade, never()).clearConnectorControllerServiceState(anyString(), anyString(), any());
+    }
+
+    @Test
+    public void testCreateMigrationPayloadRejectsContentExceedingSizeCap() {
+        final ConnectorResource spyResource = spy(connectorResource);
+        doReturn(false).when(spyResource).isReplicateRequest();
+
+        // A stream that never ends will surpass the payload size cap, at which point the read fails and the upload is
+        // rejected rather than buffering an unbounded amount of content in memory.
+        final InputStream unboundedWhitespace = new InputStream() {
+            @Override
+            public int read() {
+                return ' ';
+            }
+
+            @Override
+            public int read(final byte[] b, final int off, final int len) {
+                Arrays.fill(b, off, off + len, (byte) ' ');
+                return len;
+            }
+        };
+
+        final IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> spyResource.createMigrationPayload(CONNECTOR_ID, unboundedWhitespace));
+        assertEquals("Deserialization of uploaded migration payload failed", thrown.getMessage());
+        assertEquals(IOException.class, thrown.getCause().getClass());
+        assertTrue(thrown.getCause().getMessage().contains("maximum allowed length"), thrown.getCause().getMessage());
+    }
+
+    private MigrationRequestLocalSourceDTO createLocalMigrationSource(final String processGroupId) {
+        final MigrationRequestLocalSourceDTO localSource = new MigrationRequestLocalSourceDTO();
+        localSource.setProcessGroupId(processGroupId);
+        return localSource;
+    }
+
+    private NiFiUser authenticate() {
+        final NiFiUser user = new StandardNiFiUser.Builder().identity("unit-test-user").build();
+        final Authentication authentication = new NiFiAuthenticationToken(new NiFiUserDetails(user));
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        return user;
+    }
+
+    @Test
+    public void testSubmitConnectorBacklogRequestHappyPath() throws Exception {
+        authenticate();
+
+        final BacklogEntity entity = new BacklogEntity();
+        final BacklogDTO dto = new BacklogDTO();
+        dto.setFlowFileCount(5L);
+        dto.setPrecision("EXACT");
+        entity.setBacklog(dto);
+        when(serviceFacade.getConnectorBacklog(CONNECTOR_ID)).thenReturn(entity);
+
+        final String requestId;
+        try (Response response = connectorResource.submitConnectorBacklogRequest(CONNECTOR_ID)) {
+            assertEquals(200, response.getStatus());
+            final BacklogRequestEntity body = (BacklogRequestEntity) response.getEntity();
+            assertEquals(CONNECTOR_ID, body.getRequest().getComponentId());
+            assertNotNull(body.getRequest().getRequestId());
+            requestId = body.getRequest().getRequestId();
+        }
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).verifyCanReportConnectorBacklog(CONNECTOR_ID);
+
+        final BacklogRequestEntity completedEntity = awaitBacklogRequestCompletion(requestId);
+        assertEquals(5L, completedEntity.getRequest().getBacklog().getFlowFileCount());
+
+        try (Response deleteResponse = connectorResource.deleteConnectorBacklogRequest(CONNECTOR_ID, requestId)) {
+            assertEquals(200, deleteResponse.getStatus());
+        }
+    }
+
+    @Test
+    public void testSubmitConnectorBacklogRequestSurfacesRootCauseOfFailure() throws Exception {
+        authenticate();
+
+        final RuntimeException rootCause = new RuntimeException("Timed out waiting for a node assignment");
+        when(serviceFacade.getConnectorBacklog(CONNECTOR_ID))
+                .thenThrow(new BacklogReportingException("Failed to determine Kafka backlog", rootCause));
+
+        final String requestId;
+        try (Response response = connectorResource.submitConnectorBacklogRequest(CONNECTOR_ID)) {
+            requestId = ((BacklogRequestEntity) response.getEntity()).getRequest().getRequestId();
+        }
+
+        final BacklogRequestEntity completedEntity = awaitBacklogRequestCompletion(requestId);
+        final String failureReason = completedEntity.getRequest().getFailureReason();
+        assertTrue(failureReason.contains("Failed to determine Kafka backlog"));
+        assertTrue(failureReason.contains("Timed out waiting for a node assignment"));
+    }
+
+    @Test
+    public void testSubmitConnectorBacklogRequestVerificationFailsNeverCallsServiceFacade() throws Exception {
+        authenticate();
+        doThrow(new IllegalStateException("Connector is disabled")).when(serviceFacade).verifyCanReportConnectorBacklog(CONNECTOR_ID);
+
+        assertThrows(IllegalStateException.class, () -> connectorResource.submitConnectorBacklogRequest(CONNECTOR_ID));
+
+        verify(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+        verify(serviceFacade).verifyCanReportConnectorBacklog(CONNECTOR_ID);
+        verify(serviceFacade, never()).getConnectorBacklog(anyString());
+    }
+
+    @Test
+    public void testSubmitConnectorBacklogRequestNotAuthorized() {
+        authenticate();
+        doThrow(AccessDeniedException.class).when(serviceFacade).authorizeAccess(any(AuthorizeAccess.class));
+
+        assertThrows(AccessDeniedException.class, () -> connectorResource.submitConnectorBacklogRequest(CONNECTOR_ID));
+
+        verify(serviceFacade, never()).verifyCanReportConnectorBacklog(anyString());
+    }
+
+    @Test
+    public void testDeleteConnectorBacklogRequestCancelsInProgressRequestAndInterruptsBackgroundThread() throws Exception {
+        authenticate();
+
+        final CountDownLatch backlogDeterminationStarted = new CountDownLatch(1);
+        final CountDownLatch backlogDeterminationInterrupted = new CountDownLatch(1);
+        when(serviceFacade.getConnectorBacklog(CONNECTOR_ID)).thenAnswer(invocation -> {
+            backlogDeterminationStarted.countDown();
+            try {
+                Thread.sleep(30_000L);
+            } catch (final InterruptedException e) {
+                backlogDeterminationInterrupted.countDown();
+                throw new BacklogReportingException("Interrupted while determining backlog");
+            }
+            return new BacklogEntity();
+        });
+
+        final String requestId;
+        try (Response response = connectorResource.submitConnectorBacklogRequest(CONNECTOR_ID)) {
+            requestId = ((BacklogRequestEntity) response.getEntity()).getRequest().getRequestId();
+        }
+
+        assertTrue(backlogDeterminationStarted.await(5, TimeUnit.SECONDS));
+
+        try (Response deleteResponse = connectorResource.deleteConnectorBacklogRequest(CONNECTOR_ID, requestId)) {
+            assertEquals(200, deleteResponse.getStatus());
+            final BacklogRequestEntity body = (BacklogRequestEntity) deleteResponse.getEntity();
+            assertTrue(body.getRequest().isComplete());
+            assertEquals("Request cancelled by user", body.getRequest().getFailureReason());
+        }
+
+        assertTrue(backlogDeterminationInterrupted.await(5, TimeUnit.SECONDS));
+    }
+
+    private BacklogRequestEntity awaitBacklogRequestCompletion(final String requestId) throws Exception {
+        final long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(5);
+        BacklogRequestEntity entity;
+        do {
+            try (Response response = connectorResource.getConnectorBacklogRequest(CONNECTOR_ID, requestId)) {
+                entity = (BacklogRequestEntity) response.getEntity();
+            }
+            if (entity.getRequest().isComplete()) {
+                return entity;
+            }
+            Thread.sleep(20L);
+        } while (System.currentTimeMillis() < deadline);
+
+        fail("Backlog request did not complete within the expected time");
+        return entity;
+    }
+}

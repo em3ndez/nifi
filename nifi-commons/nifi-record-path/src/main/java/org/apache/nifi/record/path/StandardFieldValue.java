@@ -21,8 +21,10 @@ import org.apache.nifi.record.path.util.Filters;
 import org.apache.nifi.serialization.record.DataType;
 import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordFieldType;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -65,18 +67,17 @@ public class StandardFieldValue implements FieldValue {
         if (obj == null) {
             return false;
         }
-        if (!(obj instanceof StandardFieldValue)) {
+        if (!(obj instanceof final StandardFieldValue other)) {
             return false;
         }
 
-        final StandardFieldValue other = (StandardFieldValue) obj;
         return Objects.equals(getValue(), other.getValue()) && Objects.equals(getField(), other.getField()) && Objects.equals(getParent(), other.getParent());
     }
 
     @Override
     public String toString() {
-        if (value instanceof Object[]) {
-            return Arrays.toString((Object[]) value);
+        if (value instanceof final Object[] objects) {
+            return Arrays.toString(objects);
         }
 
         return String.valueOf(value);
@@ -128,11 +129,32 @@ public class StandardFieldValue implements FieldValue {
         updateValue(newValue, recordField);
     }
 
+    @Override
+    public void remove() {
+        getParent().ifPresent(p -> {
+            if (Filters.isRecord(p)) {
+                final Record parentRecord = (Record) p.getValue();
+                if (parentRecord != null) {
+                    parentRecord.remove(field);
+                }
+            }
+        });
+    }
+
+    @Override
+    public void removeContent() {
+        if (field.getDataType().getFieldType() == RecordFieldType.ARRAY) {
+            updateValue(new Object[0]);
+        } else if (field.getDataType().getFieldType() == RecordFieldType.MAP) {
+            updateValue(Collections.emptyMap());
+        }
+    }
+
     private void updateValue(final Object newValue, final RecordField field) {
         final Optional<Record> parentRecord = getParentRecord();
         if (!parentRecord.isPresent()) {
-            if (value instanceof Record) {
-                ((Record) value).setValue(field, newValue);
+            if (value instanceof final Record recordObj) {
+                recordObj.setValue(field, newValue);
                 return;
             } else if (value == null) {
                 return; // value is null, nothing to update

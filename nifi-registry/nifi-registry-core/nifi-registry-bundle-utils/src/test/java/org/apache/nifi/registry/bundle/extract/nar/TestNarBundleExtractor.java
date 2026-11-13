@@ -1,0 +1,229 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.registry.bundle.extract.nar;
+
+import org.apache.nifi.registry.bundle.extract.BundleException;
+import org.apache.nifi.registry.bundle.extract.BundleExtractor;
+import org.apache.nifi.registry.bundle.model.BundleDetails;
+import org.apache.nifi.registry.bundle.model.BundleIdentifier;
+import org.apache.nifi.registry.extension.bundle.BuildInfo;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class TestNarBundleExtractor {
+
+    private BundleExtractor extractor;
+
+    @BeforeEach
+    public void setup() {
+        this.extractor = new NarBundleExtractor();
+    }
+
+    @Test
+    public void testExtractFromGoodNarNoDependencies() throws IOException {
+        try (final InputStream in = new FileInputStream("src/test/resources/nars/nifi-framework-nar.nar")) {
+            final BundleDetails bundleDetails = extractor.extract(in);
+            assertNotNull(bundleDetails);
+            assertNotNull(bundleDetails.getBundleIdentifier());
+            assertNotNull(bundleDetails.getDependencies());
+            assertEquals(0, bundleDetails.getDependencies().size());
+
+            final BundleIdentifier bundleIdentifier = bundleDetails.getBundleIdentifier();
+            assertEquals("org.apache.nifi", bundleIdentifier.getGroupId());
+            assertEquals("nifi-framework-nar", bundleIdentifier.getArtifactId());
+            assertEquals("1.8.0", bundleIdentifier.getVersion());
+
+            assertNotNull(bundleDetails.getExtensions());
+            assertEquals(0, bundleDetails.getExtensions().size());
+            assertEquals("1.8.0", bundleDetails.getSystemApiVersion());
+        }
+    }
+
+    @Test
+    public void testExtractFromGoodNarWithDependencies() throws IOException {
+        try (final InputStream in = new FileInputStream("src/test/resources/nars/nifi-foo-nar.nar")) {
+            final BundleDetails bundleDetails = extractor.extract(in);
+            assertNotNull(bundleDetails);
+            assertNotNull(bundleDetails.getBundleIdentifier());
+            assertNotNull(bundleDetails.getDependencies());
+            assertEquals(1, bundleDetails.getDependencies().size());
+
+            final BundleIdentifier bundleIdentifier = bundleDetails.getBundleIdentifier();
+            assertEquals("org.apache.nifi", bundleIdentifier.getGroupId());
+            assertEquals("nifi-foo-nar", bundleIdentifier.getArtifactId());
+            assertEquals("1.8.0", bundleIdentifier.getVersion());
+
+            final BundleIdentifier dependencyCoordinate = bundleDetails.getDependencies().stream().findFirst().get();
+            assertEquals("org.apache.nifi", dependencyCoordinate.getGroupId());
+            assertEquals("nifi-bar-nar", dependencyCoordinate.getArtifactId());
+            assertEquals("2.0.0", dependencyCoordinate.getVersion());
+
+            final Map<String, String> additionalDetails = bundleDetails.getAdditionalDetails();
+            assertNotNull(additionalDetails);
+            assertEquals(0, additionalDetails.size());
+        }
+    }
+
+    @Test
+    public void testExtractFromNarMissingRequiredManifestEntries() throws IOException {
+        try (final InputStream in = new FileInputStream("src/test/resources/nars/nifi-missing-manifest-entries.nar")) {
+            assertThrows(IllegalArgumentException.class, () -> extractor.extract(in));
+        }
+    }
+
+    @Test
+    public void testExtractFromNarWithParentDirectoryCoordinates(@TempDir final Path tempDir) throws IOException {
+        final Path narPath = writeNar(tempDir, "..", "..", "1.0.0");
+        try (final InputStream in = Files.newInputStream(narPath)) {
+            assertThrows(IllegalArgumentException.class, () -> extractor.extract(in));
+        }
+    }
+
+    @Test
+    public void testExtractFromNarMissingManifest() throws IOException {
+        try (final InputStream in = new FileInputStream("src/test/resources/nars/nifi-missing-manifest.nar")) {
+            assertThrows(BundleException.class, () -> extractor.extract(in));
+        }
+    }
+
+    @Test
+    public void testExtractFromNarMissingExtensionDescriptor() throws IOException {
+        try (final InputStream in = new FileInputStream("src/test/resources/nars/nifi-foo-nar-missing-extension-descriptor.nar")) {
+            final BundleDetails bundleDetails = extractor.extract(in);
+            assertNotNull(bundleDetails);
+            assertNotNull(bundleDetails.getBundleIdentifier());
+            assertNotNull(bundleDetails.getExtensions());
+            assertEquals(0, bundleDetails.getExtensions().size());
+            assertEquals(NarBundleExtractor.NA, bundleDetails.getSystemApiVersion());
+        }
+    }
+
+    @Test
+    public void testExtractFromNarWithDescriptorAndAdditionalDetails() throws IOException {
+        try (final InputStream in = new FileInputStream("src/test/resources/nars/nifi-hadoop-nar.nar")) {
+            final BundleDetails bundleDetails = extractor.extract(in);
+            assertNotNull(bundleDetails);
+            assertNotNull(bundleDetails.getBundleIdentifier());
+            assertNotNull(bundleDetails.getDependencies());
+            assertEquals(1, bundleDetails.getDependencies().size());
+
+            final BundleIdentifier bundleIdentifier = bundleDetails.getBundleIdentifier();
+            assertEquals("org.apache.nifi", bundleIdentifier.getGroupId());
+            assertEquals("nifi-hadoop-nar", bundleIdentifier.getArtifactId());
+            assertEquals("1.9.0-SNAPSHOT", bundleIdentifier.getVersion());
+
+            final BuildInfo buildDetails = bundleDetails.getBuildInfo();
+            assertNotNull(buildDetails);
+            assertEquals("1.8.0_162", buildDetails.getBuildTool());
+            assertEquals(NarBundleExtractor.NA, buildDetails.getBuildFlags());
+            assertEquals("master", buildDetails.getBuildBranch());
+            assertEquals("HEAD", buildDetails.getBuildTag());
+            assertEquals("1a937b6", buildDetails.getBuildRevision());
+            assertEquals("jsmith", buildDetails.getBuiltBy());
+            assertEquals(1544541725000L, buildDetails.getBuilt());
+
+            assertEquals("1.10.0-SNAPSHOT", bundleDetails.getSystemApiVersion());
+            assertNotNull(bundleDetails.getExtensions());
+            assertEquals(10, bundleDetails.getExtensions().size());
+
+            final Map<String, String> additionalDetails = bundleDetails.getAdditionalDetails();
+            assertNotNull(additionalDetails);
+            assertEquals(3, additionalDetails.size());
+
+            final String listHdfsKey = "org.apache.nifi.processors.hadoop.ListHDFS";
+            assertTrue(additionalDetails.containsKey(listHdfsKey));
+        }
+    }
+
+    @Test
+    public void testExtractFromNarWithMetaInfDirectoryBeforeManifest(@TempDir final Path tempDir) throws IOException {
+        final Path narPath = tempDir.resolve("manifest-after-dir.nar");
+
+        try (final JarOutputStream jarOutputStream = new JarOutputStream(Files.newOutputStream(narPath))) {
+            // META-INF directory entry before the manifest file
+            final JarEntry metaInfDir = new JarEntry("META-INF/");
+            jarOutputStream.putNextEntry(metaInfDir);
+            jarOutputStream.closeEntry();
+
+            final JarEntry manifestEntry = new JarEntry("META-INF/MANIFEST.MF");
+            jarOutputStream.putNextEntry(manifestEntry);
+            jarOutputStream.write((
+                    "Manifest-Version: 1.0\n" +
+                    "Nar-Group: org.example\n" +
+                    "Nar-Id: example-nar\n" +
+                    "Nar-Version: 1.0.0\n" +
+                    "Build-Timestamp: 2024-01-01T00:00:00Z\n\n"
+            ).getBytes(StandardCharsets.UTF_8));
+            jarOutputStream.closeEntry();
+
+            final JarEntry docsDir = new JarEntry("META-INF/docs/");
+            jarOutputStream.putNextEntry(docsDir);
+            jarOutputStream.closeEntry();
+
+            final JarEntry descriptorEntry = new JarEntry("META-INF/docs/extension-manifest.xml");
+            jarOutputStream.putNextEntry(descriptorEntry);
+            jarOutputStream.write("<extensionManifest><systemApiVersion>1.0.0</systemApiVersion></extensionManifest>".getBytes(StandardCharsets.UTF_8));
+            jarOutputStream.closeEntry();
+        }
+
+        try (final InputStream in = Files.newInputStream(narPath)) {
+            final BundleDetails bundleDetails = extractor.extract(in);
+            assertNotNull(bundleDetails);
+
+            final BundleIdentifier bundleIdentifier = bundleDetails.getBundleIdentifier();
+            assertEquals("org.example", bundleIdentifier.getGroupId());
+            assertEquals("example-nar", bundleIdentifier.getArtifactId());
+            assertEquals("1.0.0", bundleIdentifier.getVersion());
+            assertEquals("1.0.0", bundleDetails.getSystemApiVersion());
+        }
+    }
+
+    private Path writeNar(final Path tempDir, final String groupId, final String artifactId, final String version) throws IOException {
+        final Path narPath = tempDir.resolve("testing.nar");
+        try (final JarOutputStream jarOutputStream = new JarOutputStream(Files.newOutputStream(narPath))) {
+            final JarEntry manifestEntry = new JarEntry("META-INF/MANIFEST.MF");
+            jarOutputStream.putNextEntry(manifestEntry);
+            jarOutputStream.write((
+                    "Manifest-Version: 1.0\n" +
+                    "Nar-Group: " + groupId + "\n" +
+                    "Nar-Id: " + artifactId + "\n" +
+                    "Nar-Version: " + version + "\n" +
+                    "Build-Timestamp: 2024-01-01T00:00:00Z\n\n"
+            ).getBytes(StandardCharsets.UTF_8));
+            jarOutputStream.closeEntry();
+        }
+
+        return narPath;
+    }
+
+}

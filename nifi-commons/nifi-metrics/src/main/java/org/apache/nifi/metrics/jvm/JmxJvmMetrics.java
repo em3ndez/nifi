@@ -54,32 +54,34 @@ public class JmxJvmMetrics implements JvmMetrics {
     static final String MEMORY_HEAP_MAX = REGISTRY_METRICSET_MEMORY + ".heap.max";
     static final String MEMORY_HEAP_COMMITTED = REGISTRY_METRICSET_MEMORY + ".heap.committed";
     static final String MEMORY_HEAP_USAGE = REGISTRY_METRICSET_MEMORY + ".heap.usage";
+    static final String MEMORY_NON_HEAP_USED = REGISTRY_METRICSET_MEMORY + ".non-heap.used";
+    static final String MEMORY_NON_HEAP_COMMITTED = REGISTRY_METRICSET_MEMORY + ".non-heap.committed";
     static final String MEMORY_NON_HEAP_USAGE = REGISTRY_METRICSET_MEMORY + ".non-heap.usage";
     static final String THREADS_COUNT = REGISTRY_METRICSET_THREADS + ".count";
     static final String THREADS_DAEMON_COUNT = REGISTRY_METRICSET_THREADS + ".daemon.count";
     static final String THREADS_DEADLOCKS = REGISTRY_METRICSET_THREADS + ".deadlocks";
     static final String OS_FILEDESCRIPTOR_USAGE = "os.filedescriptor.usage";
 
-    private static AtomicReference<MetricRegistry> metricRegistry = new AtomicReference<>(null);
+    private static final AtomicReference<MetricRegistry> METRIC_REGISTRY = new AtomicReference<>(null);
 
     private JmxJvmMetrics() {
     }
 
     public static JmxJvmMetrics getInstance() {
-        if (metricRegistry.get() == null) {
-            metricRegistry.set(new MetricRegistry());
-            metricRegistry.get().register(REGISTRY_METRICSET_JVM_ATTRIBUTES, new JvmAttributeGaugeSet());
-            metricRegistry.get().register(REGISTRY_METRICSET_MEMORY, new MemoryUsageGaugeSet());
-            metricRegistry.get().register(REGISTRY_METRICSET_THREADS, new ThreadStatesGaugeSet());
-            metricRegistry.get().register(REGISTRY_METRICSET_GARBAGE_COLLECTORS, new GarbageCollectorMetricSet());
-            metricRegistry.get().register(OS_FILEDESCRIPTOR_USAGE, new FileDescriptorRatioGauge());
+        if (METRIC_REGISTRY.get() == null) {
+            METRIC_REGISTRY.set(new MetricRegistry());
+            METRIC_REGISTRY.get().register(REGISTRY_METRICSET_JVM_ATTRIBUTES, new JvmAttributeGaugeSet());
+            METRIC_REGISTRY.get().register(REGISTRY_METRICSET_MEMORY, new MemoryUsageGaugeSet());
+            METRIC_REGISTRY.get().register(REGISTRY_METRICSET_THREADS, new ThreadStatesGaugeSet());
+            METRIC_REGISTRY.get().register(REGISTRY_METRICSET_GARBAGE_COLLECTORS, new GarbageCollectorMetricSet());
+            METRIC_REGISTRY.get().register(OS_FILEDESCRIPTOR_USAGE, new FileDescriptorRatioGauge());
 
         }
         return new JmxJvmMetrics();
     }
 
     private Object getMetric(String metricName) {
-        final SortedMap<String, Gauge> gauges = metricRegistry.get().getGauges((name, metric) -> name.equals(metricName));
+        final SortedMap<String, Gauge> gauges = METRIC_REGISTRY.get().getGauges((name, metric) -> name.equals(metricName));
         if (gauges.isEmpty()) {
             throw new IllegalArgumentException(String.format("Unable to retrieve metric \"%s\"", metricName));
         }
@@ -87,11 +89,11 @@ public class JmxJvmMetrics implements JvmMetrics {
     }
 
     public Set<String> getMetricNames(String metricNamePrefix) {
-        if (metricNamePrefix == null || metricNamePrefix.length() == 0) {
+        if (metricNamePrefix == null || metricNamePrefix.isEmpty()) {
             throw new IllegalArgumentException("A metric name prefix must be supplied");
         }
         final String normalizedMetricNamePrefix = metricNamePrefix.endsWith(".") ? metricNamePrefix : metricNamePrefix + '.';
-        return metricRegistry.get().getNames().stream()
+        return METRIC_REGISTRY.get().getNames().stream()
                 .filter(name -> name.startsWith(normalizedMetricNamePrefix))
                 .map(name -> name.substring(normalizedMetricNamePrefix.length(), name.indexOf(".", normalizedMetricNamePrefix.length())))
                 .collect(Collectors.toSet());
@@ -147,6 +149,16 @@ public class JmxJvmMetrics implements JvmMetrics {
     public double nonHeapUsage() {
         double usage = (Double) getMetric(MEMORY_NON_HEAP_USAGE);
         return usage < 0 ? -1.0 : usage;
+    }
+
+    @Override
+    public double nonHeapUsed(DataUnit dataUnit) {
+        return (dataUnit == null ? DataUnit.B : dataUnit).convert((Long) getMetric(MEMORY_NON_HEAP_USED), DataUnit.B);
+    }
+
+    @Override
+    public double nonHeapCommitted(DataUnit dataUnit) {
+        return (dataUnit == null ? DataUnit.B : dataUnit).convert((Long) getMetric(MEMORY_NON_HEAP_COMMITTED), DataUnit.B);
     }
 
     @Override
@@ -210,7 +222,7 @@ public class JmxJvmMetrics implements JvmMetrics {
     @Override
     public Map<Thread.State, Double> threadStatePercentages() {
         int totalThreadCount = (Integer) getMetric(THREADS_COUNT);
-        final Map<Thread.State, Double> threadStatePercentages = new HashMap<Thread.State, Double>();
+        final Map<Thread.State, Double> threadStatePercentages = new HashMap<>();
         for (Thread.State state : Thread.State.values()) {
             threadStatePercentages.put(state, (Integer) getMetric(REGISTRY_METRICSET_THREADS + "." + state.name().toLowerCase() + ".count") / (double) totalThreadCount);
         }

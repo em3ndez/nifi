@@ -22,8 +22,8 @@ import java.io.Serializable;
  * A model object representing a revision. Equality is defined as matching
  * component ID and either a matching version number or matching non-empty client IDs.
  *
- * @Immutable
- * @Threadsafe
+ * Immutable
+ * Threadsafe
  */
 public class Revision implements Serializable {
     private static final long serialVersionUID = 988658790374170022L;
@@ -89,11 +89,10 @@ public class Revision implements Serializable {
             return true;
         }
 
-        if ((obj instanceof Revision) == false) {
+        if (!(obj instanceof final Revision thatRevision)) {
             return false;
         }
 
-        Revision thatRevision = (Revision) obj;
         // ensure that component ID's are the same (including null)
         if (thatRevision.getComponentId() == null && getComponentId() != null) {
             return false;
@@ -105,10 +104,10 @@ public class Revision implements Serializable {
             return false;
         }
 
-        if (this.version != null && this.version.equals(thatRevision.version)) {
+        if (this.version.equals(thatRevision.version)) {
             return true;
         } else {
-            return clientId != null && !clientId.trim().isEmpty() && clientId.equals(thatRevision.getClientId());
+            return clientId != null && !clientId.isBlank() && clientId.equals(thatRevision.getClientId());
         }
 
     }
@@ -116,8 +115,8 @@ public class Revision implements Serializable {
     @Override
     public int hashCode() {
         int hash = 5;
-        hash = 59 * hash + (this.componentId != null ? this.componentId.hashCode() : 0);
-        hash = 59 * hash + (this.version != null ? this.version.hashCode() : 0);
+        hash = 59 * hash + this.componentId.hashCode();
+        hash = 59 * hash + this.version.hashCode();
         hash = 59 * hash + (this.clientId != null ? this.clientId.hashCode() : 0);
         return hash;
     }

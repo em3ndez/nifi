@@ -446,6 +446,18 @@ and the replacement value. The replacement value may optionally use back-referen
 
 
 
+=== replaceNull
+
+Returns the value of the first argument when it is non-null. If the first argument evaluates to `null`, the function returns the replacement value.
+
+|==========================================================
+| RecordPath | Return value
+| `replaceNull( /details/vehicle, 'no vehicle' )` | no vehicle
+| `replaceNull( /name, 'default' )` | John Doe
+| `replaceNull( /details/vehicle, /name )` | John Doe
+|==========================================================
+
+
 === concat
 
 Concatenates all the arguments together.
@@ -453,6 +465,48 @@ Concatenates all the arguments together.
 |==========================================================
 | RecordPath | Return value
 | `concat( /name, ' lives in ',  /homeAddress/city )` | John Doe lives in Jersey City
+|==========================================================
+
+
+=== join
+
+Joins together multiple values with a separator.
+
+|==========================================================
+| RecordPath | Return value
+| `join(', ', /workAddress/* )` | 123, 5th Avenue, New York, NY, 10020
+|==========================================================
+
+
+=== anchored
+
+Allows evaluating a RecordPath while anchoring the root context to a child record.
+
+|==========================================================
+| RecordPath | Return value
+| `anchored(/homeAddress, /city)` | Jersey City
+|==========================================================
+
+Additionally, this can be used in conjunction with arrays. For example, if we have the following record:
+----
+{
+    "id": "1234",
+    "elements": [{
+        "name": "book",
+        "color": "red"
+    }, {
+        "name": "computer",
+        "color": "black"
+    }]
+}
+----
+
+We can evaluate the following Record paths:
+
+|==========================================================
+| RecordPath | Return value
+| `anchored(/elements, /name)` | The array containing `book` and `computer`
+| `anchored(/elements, concat(/name, ': ', /color))` | The array containing `book: red` and `computer: black`
 |==========================================================
 
 
@@ -636,10 +690,11 @@ not the first value that is encountered in the Record itself.
 
 === format
 
-Converts a Date to a String in the given format with the given time zone(optional, default time zone is GMT).
+Converts a Date to a String in the given format with an optional time zone. The function defaults to the system local
+time zone when the second argument is not provided.
 
 The first argument to this function must be a Date or a Number, and the second argument must be a format String that
-follows the Java SimpleDateFormat, and the third argument, optional, must be a format String that
+follows the Java DateTimeFormatter, and the third argument, optional, must be a format String that
 either an abbreviation such as "PST", a full name such as "America/Los_Angeles", or a custom ID such as "GMT-8:00"
 
 For example, given a schema such as:
@@ -757,7 +812,7 @@ and a record such as:
 }
 ----
 
-The following record path expression would remove extraneous whitespace:
+The following record path expression change lower case letters to upper case:
 
 |==========================================================
 | RecordPath | Return value
@@ -786,11 +841,11 @@ and a record such as:
 }
 ----
 
-The following record path expression would remove extraneous whitespace:
+The following record path expression change upper case letters to lower case:
 
 |==========================================================
 | RecordPath | Return value
-| `trim(/message)` | hello world
+| `toLowerCase(/message)` | hello world
 |==========================================================
 
 === base64Encode
@@ -850,6 +905,142 @@ The following record path expression would decode the String using Base64:
 | RecordPath | Return value
 | `base64Decode(/name)` | John
 |==========================================================
+
+=== escapeJson
+
+JSON Stringifies a Record, Array or simple field (e.g. String), using the UTF-8 character set. For example, given a schema such as:
+
+----
+{
+  "type": "record",
+  "name": "events",
+  "fields": [{
+    "name": "person",
+    "type": "record",
+    "fields": [
+      { "name": "name", "type": "string" },
+      { "name": "age", "type": "int" }
+    ]
+  }]
+}
+----
+
+and a record such as:
+
+----
+{
+  "person": {
+    "name" : "John",
+    "age" : 30
+  }
+}
+----
+
+The following record path expression would convert the record into an escaped JSON String:
+
+|==========================================================
+| RecordPath | Return value
+| `escapeJson(/person)` | "{\"person\":{\"name\":\"John\",\"age\":30}}"
+| `escapeJson(/person/firstName)` | "\"John\""
+| `escapeJson(/person/age)` | "30"
+|==========================================================
+
+=== unescapeJson
+
+Converts a stringified JSON element to a Record, Array or simple field (e.g. String), using the UTF-8 character set.
+
+This function takes up to three arguments:
+
+1. The Record Path of the stringified JSON element to be parsed
+2. (optional) whether to convert parsed JSON Objects from Maps to Records, default = `false`
+3. (optional) whether to recursively convert nested JSON Objects from Maps to Records, default = `false`
+
+*Note*: RecordSetWriters will not be able to serialise Maps, so fields may be omitted if not converted to Records.
+For example, using `unescapeJson` to replace the root ("/") of a Record in `UpdateRecord` without using the Record conversion,
+would result in an empty output because the RecordSetWriter is unable to match the resultant Map content to a RecordSchema.
+
+For example, given a schema such as:
+
+----
+{
+  "type": "record",
+  "name": "events",
+  "fields": [{
+    "name": "person",
+    "type": "record",
+    "fields": [
+      { "name": "name", "type": "string" },
+      { "name": "age", "type": "int" }
+    ]
+  }]
+}
+----
+
+and a record such as:
+
+----
+{
+  "json_str": "{\"person\":{\"name\":\"John\",\"age\":30}}"
+}
+----
+
+The following record path expression would populate the record with unescaped JSON fields:
+
+|==========================================================
+| RecordPath | Return value
+| `unescapeJson(/json_str)` | {"person": {"name": "John", "age": 30}}"
+|==========================================================
+
+Given a record such as:
+
+----
+{
+  "json_str": "{\"name\":\"John\",\"age\":30}"
+}
+----
+
+The following record path expression would return:
+
+|==========================================================
+| RecordPath | Return value
+| `unescapeJson(/json_str, 'true')` | {"name": "John", "age": 30} (as a Record)
+| `unescapeJson(/json_str, 'false')` | {"name"="John", "age"=30} (as a Map)
+| `unescapeJson(/json_str)` | {"name"="John", "age"=30} (as a Map)
+|==========================================================
+
+Given a record such as:
+
+----
+{
+  "json_str": "{\"name\":\"John\",\"age\":30,\"addresses\"[{\"address_1\": \"123 Fake Street\"}]}"
+}
+----
+
+The following record path expression would return:
+
+|==========================================================
+| RecordPath | Return value
+| `unescapeJson(/json_str, 'false')` | {"name"="John", "age"=30, "addresses"=[{"address_1"="123 Fake Street"}]} (as a Map, with each entry in "addresses" as a Map)
+| `unescapeJson(/json_str, 'true', 'false')` | {"name": "John", "age": 30, "addresses"=[{"address_1"="123 Fake Street"}]} (as a Record, with each entry in "addresses" as a Map)
+| `unescapeJson(/json_str, 'true', 'true')` | {"name": "John", "age": 30, "addresses": [{"address_1": "123 Fake Street"}]} (as a Record, with each entry in "addresses" as a Record)
+|==========================================================
+
+Given a record such as:
+
+----
+{
+  "json_str": "\"John\""
+}
+----
+
+The following record path expression would return:
+
+|==========================================================
+| RecordPath | Return value
+| `unescapeJson(/json_str)` | "John"
+|==========================================================
+
+*Note* that the target schema must be pre-defined if the `unescaped` JSON is to be set in a Record's fields - Infer Schema will not currently do this automatically.
 
 === hash
 
@@ -980,6 +1171,162 @@ take the value of the supplied record path and use it as the namespace.
 Please note that the namespace must always be a valid UUID string. An empty string, another data type, etc. will result
 in an error. This is by design because the most common use case for UUID v5 is to uniquely identify records across data sets.
 
+
+=== count
+
+Returns the count of the number of elements. This is commonly used in conjunction with arrays. For example, if we have the following record:
+
+----
+{
+    "id": "1234",
+    "elements": [{
+        "name": "book",
+        "color": "red"
+    }, {
+        "name": "computer",
+        "color": "black"
+    }]
+}
+----
+
+We could determine the number of `elements` by using the `count` function. Using:
+
+----
+count(/elements[*])
+----
+
+Would yield a value of `2`. We could also use this as a filter, such as:
+----
+/id[ count(/elements[*]) = 2 ]
+----
+Which will return the `id` element with a value of `1234`.
+
+
+=== mapOf
+
+Creates a map of Strings with the given parameters. For example, if we have the following record:
+
+----
+{
+    "firstName": "John",
+    "lastName": "Snow"
+}
+----
+
+We could use the `UpdateRecord` processor with
+
+----
+/fullName => mapOf("firstName", /firstName, "lastName", /lastName)
+----
+
+And that would give us something like:
+
+----
+{
+    "firstName": "John",
+    "lastName": "Snow",
+    "fullName": {"firstName": "John", "lastName": "Snow"}
+}
+----
+
+This function requires an even number of arguments and the record paths must represent simple field values.
+
+=== recordOf
+
+Creates a nested record with the given parameters. For example, if we have the following record:
+
+----
+{
+  "firstName": "Alice",
+  "lastName": "Koopa",
+  "age": 30,
+  "hobbies": ["reading", "hiking", "coding"],
+  "address": {
+    "street": "123 Main St",
+    "city": "Anytown",
+    "state": "CA"
+  }
+}
+----
+
+We could use the `UpdateRecord` processor with
+
+----
+/profile => recordOf("name", /firstName, "location", /address/city, "hobbies", /hobbies, /age, "years old")
+----
+
+And that would give us something like:
+
+----
+{
+  "name": "Alice",
+  "hobbies": ["reading", "hiking", "coding"],
+  "location": "Anytown",
+  "30": "years old"
+}
+----
+
+This function requires an even number of arguments.
+Each pair of arguments resembles a field in the new record.
+Every odd argument, the first one of each pair, is used as field name and coerced into a String value.
+Every even argument, the second one of each pair, is used as field value.
+
+
+=== arrayOf
+
+Creates an array from multiple values.
+
+```
+{
+    "id": "1234",
+    "elements": [{
+        "name": "book",
+        "color": "red"
+    }, {
+        "name": "computer",
+        "color": "black"
+    }]
+}
+```
+
+We could make use of the `arrayOf` function, in conjunction with the `unescapeJson` function to append a new element to the `elements` array.
+Given this example input, a RecordPath of `arrayOf(/elements[*], unescapeJson('{"name":"phone","color":"blue"}'))` would return the following array:
+
+```
+[{
+    "name": "book",
+    "color": "red"
+}, {
+    "name": "computer",
+    "color": "black"
+}, {
+    "name": "phone",
+    "color": "blue"
+}]
+```
+
+We may also use the `arrayOf` function for appending multiple elements to an array. Given the input record:
+
+```
+{
+  "name": "John Doe",
+  "friends": ["Jane", "Jack", "Jill"]
+}
+```
+
+A RecordPath of `arrayOf(/friends[*], 'Joe', 'Jim', 'Jeremy')` would return the following array:
+
+```
+["Jane", "Jack", "Jill", "Joe", "Jim", "Jeremy"]
+```
+
+We can also simply create an array from arbitrary values, such as `arrayOf('good-bye', 'adios', 'au revoir')` which would return the following array:
+
+```
+["good-bye", "adios", "au revoir"]
+```
+
+
 [[filter_functions]]
 == Filter Functions
 
@@ -992,6 +1339,21 @@ Returns `true` if a String value contains the provided substring, `false` otherw
 | `/name[contains(., 'o')]` | John Doe
 | `/name[contains(., 'x')]` | <returns no results>
 | `/name[contains( ../workAddress/state, /details/preferredState )]` | John Doe
+|==============================================================================
+
+
+
+=== containsRegex
+
+Evaluates a Regular Expression against the contents of a String value and returns `true` if the String value contains a substring
+that matches the Regular Expression, `false` otherwise.
+This function requires 2 arguments: the String to run the regular expression against, and the regular expression to run.
+
+|==============================================================================
+| RecordPath | Return value
+| `/name[containsRegex(., 'o[gh]n')]` | John Doe
+| `/name[containsRegex(., 'John')]` | John Doe
+| `/name[containsRegex(., 'o[xy]n')]` | <returns no results>
 |==============================================================================
 
 
@@ -1073,4 +1435,129 @@ only of white space (spaces, tabs, carriage returns, and new-line characters).
 | `/name[isBlank(/details/vehicle)]` | John Doe
 | `/name[isBlank(/details/phase)]` | John Doe
 | `/name[isBlank(.)]` | <returns no results>
+|==============================================================================
+
+[[math_functions]]
+== Math Functions
+
+Math functions accept the following number types:
+
+- Byte
+- Short
+- Integer
+- Long
+- Float
+- Double
+
+The following non-number types are also accepted if they can be coerced to a number:
+
+- String
+- Date
+
+Unless otherwise specified, the calculated result is either a Long or Double:
+
+- If any argument is a Float or Double, the result is a Double
+- Otherwise, the result is a Long
+
+Math functions do not handle overflow.
+
+Examples below use the schema:
+
+```
+{
+    "type": "record",
+    "name": "logs",
+    "fields": [
+        { "name": "flags", "type": "byte" },
+        { "name": "seq", "type" : "short"},
+        { "name": "txns", "type" : "int"},
+        { "name": "timestamp", "type" : "long"},
+        { "name": "temp", "type" : "float"},
+        { "name": "load", "type" : "double"},
+        { "name": "timestampMillis", "type" : "string"},
+        { "name": "date", "type" : "date"},
+    ]
+}
+```
+
+and the record:
+
+```
+{
+    "flags" : 7,
+    "seq": 1024,
+    "txns": 125000,
+    "timestamp": 1768967368,
+    "temp": 55.0,
+    "load": 5.67,
+    "timestampMillis": "1768967368000",
+    "date": "2026-01-21",
+}
+```
+
+
+=== toNumber
+
+Coerces a String or Date value to a number. If the argument is already a number it is returned unmodified, preserving the original type.
+
+|==============================================================================
+| RecordPath | Return value
+| `toNumber(456)` | 456
+| `toNumber(/flags)` | 7
+| `toNumber(/load)` | 5.67
+| `toNumber('7.89')` | 7.89
+| `toNumber(/timestampMillis)` | 1768967368000
+| `toNumber(/date)` | 1768953600000
+|==============================================================================
+
+=== add
+
+Calculates the sum of two numbers.
+
+|==============================================================================
+| RecordPath | Return value
+| `add(2, 2)` | 4
+| `add('2.0', 2)` | 4.0
+| `add(/flags, 2)` | 9
+| `add(2, /temp)` | 57.0
+| `add(/load, /temp)` | 60.67
+|==============================================================================
+
+=== subtract
+
+Calculates the difference between two numbers.
+
+|==============================================================================
+| RecordPath | Return value
+| `subtract(2, 2)` | 0
+| `subtract('2.0', 2)` | 0.0
+| `subtract(/flags, 2)` | 5
+| `subtract(2, /temp)` | -53.0
+| `subtract(/load, /temp)` | -49.33
+|==============================================================================
+
+=== multiply
+
+Calculates the product of two numbers.
+
+|==============================================================================
+| RecordPath | Return value
+| `multiply(2, 2)` | 4
+| `multiply('2.0', 2)` | 4.0
+| `multiply(/flags, 2)` | 14
+| `multiply(2, /temp)` | 110.0
+| `multiply(/load, /temp)` | 311.85
+|==============================================================================
+
+=== divide
+
+Calculates the quotient of two numbers.
+
+|==============================================================================
+| RecordPath | Return value
+| `divide(2, 2)` | 1
+| `divide(3, 2)` | 1
+| `divide(3, '2.0')` | 1.5
+| `divide(/txns, /temp)` | 2272.7272727272725
+| `divide(/timestampMillis, 300000)` | 5896557
 |==============================================================================

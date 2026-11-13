@@ -18,8 +18,11 @@
 package org.apache.nifi.serialization.record.type;
 
 import org.apache.nifi.serialization.record.DataType;
+import org.apache.nifi.serialization.record.RecordFieldRemovalPath;
 import org.apache.nifi.serialization.record.RecordFieldType;
+import org.apache.nifi.serialization.record.RecordSchema;
 
+import java.util.List;
 import java.util.Objects;
 
 public class ArrayDataType extends DataType {
@@ -53,11 +56,30 @@ public class ArrayDataType extends DataType {
     }
 
     @Override
+    public void removePath(final RecordFieldRemovalPath path) {
+        if (path.length() == 0) {
+            return;
+        }
+        getElementType().removePath(path.tail());
+    }
+
+    @Override
+    public boolean isRecursive(final List<RecordSchema> schemas) {
+        // allow for null elementType during schema inference
+        return getElementType() != null && getElementType().isRecursive(schemas);
+    }
+
+    @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof ArrayDataType)) return false;
-        if (!super.equals(o)) return false;
-        ArrayDataType that = (ArrayDataType) o;
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof final ArrayDataType that)) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
         return isElementsNullable() == that.isElementsNullable()
                 && Objects.equals(getElementType(), that.getElementType());
     }

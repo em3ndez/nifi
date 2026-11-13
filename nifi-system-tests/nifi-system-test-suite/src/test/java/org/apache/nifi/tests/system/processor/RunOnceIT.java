@@ -17,34 +17,53 @@
 package org.apache.nifi.tests.system.processor;
 
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.entity.ConnectionEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class RunOnceIT extends NiFiSystemIT {
 
     @Test
     public void testRunOnce() throws NiFiClientException, IOException, InterruptedException {
-        ProcessorEntity generate = getClientUtil().createProcessor("GenerateFlowFile");
-        getClientUtil().updateProcessorSchedulingPeriod(generate, "1 sec");
+        final ProcessorEntity generate = getClientUtil().createProcessor("GenerateFlowFile");
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+        final ConnectionEntity generateToTerminate = getClientUtil().createConnection(generate, terminate, "success");
 
-        ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
-
-        ConnectionEntity generateToTerminate = getClientUtil().createConnection(generate, terminate, "success");
-
-        getNifiClient().getProcessorClient().runProcessorOnce(generate);
-
+        getClientUtil().runProcessorOnce(generate);
         waitForQueueCount(generateToTerminate.getId(), 1);
 
-        ProcessorEntity actualGenerate = getNifiClient().getProcessorClient().getProcessor(generate.getId());
-        String actualRunStatus = actualGenerate.getStatus().getRunStatus();
-
-        assertEquals("Stopped", actualRunStatus);
+        getClientUtil().waitForStoppedProcessor(generate.getId());
         assertEquals(1, getConnectionQueueSize(generateToTerminate.getId()));
+
+        // Test CRON_DRIVEN Strategy
+        getClientUtil().updateProcessorSchedulingStrategy(generate, "CRON_DRIVEN");
+        getClientUtil().updateProcessorSchedulingPeriod(generate, "* * * * * ?");
+
+        getClientUtil().runProcessorOnce(generate);
+        waitForQueueCount(generateToTerminate.getId(), 2);
+
+        getClientUtil().waitForStoppedProcessor(generate.getId());
+        assertEquals(2, getConnectionQueueSize(generateToTerminate.getId()));
+    }
+
+    @Test
+    public void testRunOnceOnInvalidProcessorShouldReturnToStopped() throws NiFiClientException, IOException, InterruptedException {
+        final ProcessorEntity generate = getClientUtil().createProcessor("GenerateFlowFile");
+        final String processorId = generate.getId();
+
+        getClientUtil().waitForValidationCompleted(generate);
+
+        final ProcessorEntity currentEntity = getNifiClient().getProcessorClient().getProcessor(processorId);
+        assertEquals("INVALID", currentEntity.getComponent().getValidationStatus(),
+                "Processor should be INVALID because its success relationship is not connected");
+
+        getNifiClient().getProcessorClient().runProcessorOnce(currentEntity);
+
+        getClientUtil().waitForStoppedProcessor(processorId);
     }
 }

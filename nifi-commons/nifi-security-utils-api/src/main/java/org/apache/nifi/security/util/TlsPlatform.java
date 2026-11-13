@@ -16,12 +16,7 @@
  */
 package org.apache.nifi.security.util;
 
-import static java.util.Collections.unmodifiableSet;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLParameters;
 import java.security.NoSuchAlgorithmException;
-
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -31,6 +26,10 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+
+import static java.util.Collections.unmodifiableSet;
 
 /**
  * Transport Layer Security Platform provides runtime protocol configuration information
@@ -81,10 +80,10 @@ public class TlsPlatform {
 
     private static SortedMap<Float, String> getDefaultSslContextProtocols() {
         final SSLContext defaultContext = getDefaultSslContext();
-        final SSLParameters defaultParameters = defaultContext.getDefaultSSLParameters();
+        final SSLParameters sslParameters = defaultContext.getSupportedSSLParameters();
+        final String[] protocols = sslParameters.getProtocols();
 
         final SortedMap<Float, String> sslContextProtocols = new TreeMap<>();
-        final String[] protocols = defaultParameters.getProtocols();
         for (final String protocol : protocols) {
             final Matcher protocolVersionMatcher = PROTOCOL_VERSION.matcher(protocol);
             if (protocolVersionMatcher.matches()) {

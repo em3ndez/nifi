@@ -22,21 +22,20 @@ import java.util.List;
 
 public class Table {
 
-    public static String EMPTY_VALUE = "(empty)";
+    public static final String EMPTY_VALUE = "(empty)";
 
     private final List<TableColumn> columns;
     private final List<String[]> rows = new ArrayList<>();
 
     private Table(final Builder builder) {
-        this.columns = Collections.unmodifiableList(
-                builder.columns == null ? Collections.emptyList() : new ArrayList<>(builder.columns));
+        this.columns = Collections.unmodifiableList(new ArrayList<>(builder.columns));
 
         if (this.columns.isEmpty()) {
             throw new IllegalStateException("Cannot create a table with no columns");
         }
     }
 
-    public void addRow(String ... values) {
+    public void addRow(String... values) {
         if (values == null) {
             throw new IllegalArgumentException("Values cannot be null");
         }
@@ -47,7 +46,7 @@ public class Table {
         }
 
         // fill in any null values in the row with the empty value
-        for (int i=0; i < values.length; i++) {
+        for (int i = 0; i < values.length; i++) {
             if (values[i] == null) {
                 values[i] = EMPTY_VALUE;
             }

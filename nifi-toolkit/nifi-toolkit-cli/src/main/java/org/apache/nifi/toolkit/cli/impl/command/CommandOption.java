@@ -27,7 +27,7 @@ public enum CommandOption {
     CONNECTION_TIMEOUT("cto", "connectionTimeout", "Timeout parameter for creating a connection to NiFi/Registry, specified in milliseconds", true),
     READ_TIMEOUT("rto", "readTimeout", "Timeout parameter for reading from NiFi/Registry, specified in milliseconds", true),
     URL("u", "baseUrl", "The URL to execute the command against", true),
-    INPUT_SOURCE("i", "input", "A local file to read as input contents, or a public URL to fetch", true, true),
+    INPUT_SOURCE("i", "input", "A local file to read as input contents, a directory to read files from or a public URL to fetch", true, true),
     OUTPUT_FILE("o", "outputFile", "A file to write output to, must contain full path and filename", true, true),
     OUTPUT_DIR("od", "outputDirectory", "A directory to write output to", true, true),
     PROPERTIES("p", "properties", "A properties file to load arguments from, " +
@@ -47,11 +47,13 @@ public enum CommandOption {
     FLOW_NAME("fn", "flowName", "A flow name", true),
     FLOW_DESC("fd", "flowDesc", "A flow description", true),
     FLOW_VERSION("fv", "flowVersion", "A version of a flow", true),
+    FLOW_BRANCH("fb", "flowBranch", "A branch for the flow", true),
 
     FLOW_VERSION_1("fv1", "flowVersion1", "A version of a flow", true),
     FLOW_VERSION_2("fv2", "flowVersion2", "A version of a flow", true),
 
-    // Registry - Source options for when there are two registries involved and one is a source
+    // Registry - Source options for when there are two registries involved and one
+    // is a source
     SRC_PROPS("sp", "sourceProps", "A properties file to load for the source", true, true),
     SRC_FLOW_ID("sf", "sourceFlowIdentifier", "A flow identifier from the source registry", true),
     SRC_FLOW_VERSION("sfv", "sourceFlowVersion", "A version of a flow from the source registry", true),
@@ -60,6 +62,8 @@ public enum CommandOption {
     EXT_BUNDLE_GROUP("gr", "group", "The group id of a bundle", true),
     EXT_BUNDLE_ARTIFACT("ar", "artifact", "The artifact id of a bundle", true),
     EXT_BUNDLE_VERSION("ver", "version", "The version of the bundle", true),
+    EXT_BUNDLE_CURRENT_VERSION("cver", "current-version", "The current version of the bundle", true),
+    EXT_QUALIFIED_NAME("extname", "extension-name", "The qualified name of the extension", true),
 
     EXT_TYPE("et", "extensionType", "The type of extension, one of 'PROCESSOR', 'CONTROLLER_SERVICE', or 'REPORTING_TASK'.", true),
     EXT_BUNDLE_TYPE("ebt", "extensionBundleType", "The type of extension bundle, either nifi-nar or minifi-cpp", true),
@@ -77,21 +81,37 @@ public enum CommandOption {
     REGISTRY_CLIENT_NAME("rcn", "registryClientName", "The name of the registry client", true),
     REGISTRY_CLIENT_URL("rcu", "registryClientUrl", "The url of the registry client", true),
     REGISTRY_CLIENT_DESC("rcd", "registryClientDesc", "The description of the registry client", true),
+    REGISTRY_CLIENT_TYPE("rct", "registryClientType", "The type of the registry client", true),
 
     // NiFi - PGs
     PG_ID("pgid", "processGroupId", "The id of a process group", true),
     PG_NAME("pgn", "processGroupName", "The name of a process group", true),
     PG_VAR_NAME("var", "varName", "The name of a variable", true),
     PG_VAR_VALUE("val", "varValue", "The value of a variable", true),
+    KEEP_EXISTING_PARAMETER_CONTEXT("kepc", "keep-existing-parameter-context", "If false, only directly associated Parameter Contexts will be copied, "
+            + "inherited Contexts with no direct assignment to a Process Group are ignored", true),
+    INCLUDE_REFERENCED_SERVICES("irs", "include-referenced-services", "Indicates that " +
+            "referenced services from outside the target group will be included.", false),
 
     POS_X("px", "posX", "The x coordinate of a position", true),
     POS_Y("py", "posY", "The y coordinate of a position", true),
+
+    SOURCE_PG("sourcePg", "source-pg", "The ID of the source process group", true),
+    DESTINATION_PG("destPg", "destination-pg", "The ID of the destination process group", true),
+    SOURCE_OUTPUT_PORT("sourceOutput", "source-output-port", "The name of the output port in the source process group", true),
+    DESTINATION_INPUT_PORT("destInput", "destination-input-port", "The name of the input port in the destination process group", true),
+
+    // NiFi - Processors
+    PROC_ID("procid", "processorId", "The id of a processor", true),
 
     // NiFi - Controller Services
     CS_ID("cs", "controllerServiceId", "The id of a controller service", true),
 
     // NiFi - Reporting Tasks
     RT_ID("rt", "reportingTaskId", "The id of a reporting task", true),
+
+    // NiFi - Flow Analysis Rules
+    FAR_ID("far", "flowAnalysisRuleId", "The id of a flow analysis rule", true),
 
     // NiFi - User/Group
     USER_NAME("un", "userName", "The name of a user", true),
@@ -108,18 +128,40 @@ public enum CommandOption {
     POLICY_ACTION("poa", "accessPolicyAction", "The action of an access policy (read or write)", true),
     OVERWRITE_POLICY("owp", "overwritePolicy", "Overwrite the user list and group list for the access policy", false),
 
-    // NiFi - Templates
-    TEMPLATE_ID("tid", "templateId", "The id of a template", true),
-
     // NiFI - Parameter Contexts
     PARAM_CONTEXT_ID("pcid", "paramContextId", "The id of a parameter context", true),
     PARAM_CONTEXT_NAME("pcn", "paramContextName", "The name of a parameter context", true),
     PARAM_CONTEXT_DESC("pcd", "paramContextDescription", "The description of a parameter context", true),
+    PARAM_CONTEXT_INCLUDE_INHERITED("pcin", "paramContextIncludeInherited", "Indicates that all inherited parameters should be included", false),
+    PARAM_CONTEXT_INHERITED_IDS("pcii", "paramContextInheritedIds", "A comma-separated list of parameter context IDs to inherit", true),
+
+    // NiFI - Parameter Providers
+    PARAM_PROVIDER_ID("ppid", "paramProviderId", "The id of a parameter provider", true),
+    PARAM_PROVIDER_NAME("ppn", "paramProviderName", "The name of a parameter provider", true),
+    PARAM_PROVIDER_TYPE("ppt", "paramProviderType", "The type (fully qualified class name) of a parameter provider", true),
+    PARAM_PROVIDER_GROUP_ID("ppgid", "paramProviderGroupId", "The bundle group ID of a parameter provider", true),
+    PARAM_PROVIDER_ARTIFACT_ID("ppaid", "paramProviderArtifactId", "The bundle artifact ID of a parameter provider", true),
+    PARAM_PROVIDER_VERSION("ppv", "paramProviderVersion", "The bundle version of a parameter provider", true),
+    APPLY_PARAMETERS("ap", "applyParameters", "If specified, the fetched parameters will also be applied to all referencing parameter contexts", false),
+    SENSITIVE_PARAM_PATTERN("spp", "sensitiveParamPattern", "A Regular Expression indicating the names of parameters that should be fetched as Sensitive.  " +
+            "If not specified, and --inputSource (-i) is not specified, all fetched parameters will be Sensitive.", true),
+    PROPERTY_NAME("prna", "propertyName", "The name of a property", true),
+    PROPERTY_VALUE("prva", "propertyValue", "The value of a property", true),
 
     PARAM_NAME("pn", "paramName", "The name of the parameter", true),
     PARAM_DESC("pd", "paramDescription", "The description of the parameter", true),
     PARAM_VALUE("pv", "paramValue", "The value of a parameter", true),
-    PARAM_SENSITIVE("ps", "paramSensitive", "Whether or not the parameter is sensitive", true),
+    PARAM_SENSITIVE("ps", "paramSensitive", "Whether or not the parameter is sensitive (true/false)", true),
+    UPDATE_TIMEOUT("ut", "updateTimeout", "Number of seconds after which a parameter context update will timeout (default: 60, maximum: 600)", true),
+
+    // NiFi - NARs
+    NAR_ID("nid", "narId", "", true),
+    NAR_FILE("nar", "narFile", "A NAR file to upload, must contain full path and filename", true, true),
+    NAR_UPLOAD_TIMEOUT("npt", "narProcessing", "Number of seconds after which a parameter context update will timeout (default: 60, maximum: 600)", true),
+
+    // NiFi - Assets
+    ASSET_FILE("af", "assetFile", "A file containing the asset content, must contain full path and filename", true, true),
+    ASSET_ID("aid", "assetId", "The id of an asset which can be referenced from a parameter", true, false),
 
     // Security related
     KEYSTORE("ks", "keystore", "A keystore to use for TLS/SSL connections", true),
@@ -140,17 +182,22 @@ public enum CommandOption {
     USERNAME("usr", "username", "The username for authentication when obtaining an access token", true),
     PASSWORD("pwd", "password", "The password for authentication when obtaining an access token", true),
 
+    OIDC_TOKEN_URL("oidctokenurl", "oidcTokenUrl", "The OIDC URL to access the token endpoint for the OAuth Client Credentials Flow", true),
+    OIDC_CLIENT_ID("oidcid", "oidcClientId", "The Client ID for the OAuth Client Credentials Flow", true),
+    OIDC_CLIENT_SECRET("oidcsecret", "oidcClientSecret", "The Client Secret for the OAuth Client Credentials Flow", true),
+
     KERBEROS_PRINCIPAL("krbPr", "kerberosPrincipal", "The kerberos principal", true),
     KERBEROS_KEYTAB("krbKt", "kerberosKeytab", "The keytab for a kerberos principal", true, true),
     KERBEROS_PASSWORD("krbPw", "kerberosPassword", "The password for a kerberos principal", true),
 
     // Miscellaneous
-    FORCE("force", "force", "Indicates to force a delete operation", false),
+    FILTER("filter", "filter", "Indicates a filter that should be used to perform the action", true),
+    FORCE("force", "force", "Indicates to force the operation", false),
     OUTPUT_TYPE("ot", "outputType", "The type of output to produce (json or simple)", true),
     VERBOSE("verbose", "verbose", "Indicates that verbose output should be provided", false),
     RECURSIVE("r", "recursive", "Indicates the command should perform the action recursively", false),
-    HELP("h", "help", "Help", false)
-    ;
+    HELP("h", "help", "Help", false),
+    SKIP_EXISTING("se", "skipExisting", "Indicates to skip an operation if target object exists", false);
 
     private final String shortName;
     private final String longName;
@@ -170,7 +217,6 @@ public enum CommandOption {
         this.isFile = isFile;
     }
 
-
     public String getShortName() {
         return shortName;
     }
@@ -188,10 +234,10 @@ public enum CommandOption {
     }
 
     public Option createOption() {
-        return Option.builder(shortName).longOpt(longName).desc(description).hasArg(hasArg).build();
+        return Option.builder(shortName).longOpt(longName).desc(description).hasArg(hasArg).get();
     }
 
     public Option createOption(final String description) {
-        return Option.builder(shortName).longOpt(longName).desc(description).hasArg(hasArg).build();
+        return Option.builder(shortName).longOpt(longName).desc(description).hasArg(hasArg).get();
     }
 }

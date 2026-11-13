@@ -16,7 +16,6 @@
  */
 package org.apache.nifi.toolkit.cli;
 
-import org.apache.commons.lang3.SystemUtils;
 import org.apache.nifi.registry.client.NiFiRegistryClient;
 import org.apache.nifi.toolkit.cli.api.ClientFactory;
 import org.apache.nifi.toolkit.cli.api.Command;
@@ -25,37 +24,43 @@ import org.apache.nifi.toolkit.cli.api.Context;
 import org.apache.nifi.toolkit.cli.api.Session;
 import org.apache.nifi.toolkit.cli.impl.client.NiFiClientFactory;
 import org.apache.nifi.toolkit.cli.impl.client.NiFiRegistryClientFactory;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
 import org.apache.nifi.toolkit.cli.impl.command.CommandFactory;
 import org.apache.nifi.toolkit.cli.impl.command.registry.NiFiRegistryCommandGroup;
 import org.apache.nifi.toolkit.cli.impl.context.StandardContext;
 import org.apache.nifi.toolkit.cli.impl.session.InMemorySession;
 import org.apache.nifi.toolkit.cli.impl.session.SessionVariable;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.util.StringUtils;
 import org.jline.reader.Candidate;
 import org.jline.reader.LineReader;
-import org.jline.reader.impl.DefaultParser;
-import org.junit.Assume;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.jline.reader.ParsedLine;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.File;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestCLICompleter {
+
+    private static final String TEST_RESOURCES_DIRECTORY = "src/test/resources";
+    private static final String TEST_PROPERTIES = "test.properties";
 
     private static CLICompleter completer;
     private static LineReader lineReader;
 
-    @BeforeClass
+    @BeforeAll
     public static void setupCompleter() {
-        Assume.assumeTrue("Test only runs on *nix", !SystemUtils.IS_OS_WINDOWS);
         final Session session = new InMemorySession();
         final ClientFactory<NiFiClient> niFiClientFactory = new NiFiClientFactory();
         final ClientFactory<NiFiRegistryClient> nifiRegClientFactory = new NiFiRegistryClientFactory();
@@ -67,8 +72,8 @@ public class TestCLICompleter {
                 .nifiRegistryClientFactory(nifiRegClientFactory)
                 .build();
 
-        final Map<String,Command> commands = CommandFactory.createTopLevelCommands(context);
-        final Map<String,CommandGroup> commandGroups = CommandFactory.createCommandGroups(context);
+        final Map<String, Command> commands = CommandFactory.createTopLevelCommands(context);
+        final Map<String, CommandGroup> commandGroups = CommandFactory.createCommandGroups(context);
 
         completer = new CLICompleter(commands.values(), commandGroups.values());
         lineReader = Mockito.mock(LineReader.class);
@@ -76,8 +81,7 @@ public class TestCLICompleter {
 
     @Test
     public void testCompletionWithWordIndexNegative() {
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Collections.emptyList(), -1, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Collections.emptyList(), -1);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
@@ -86,8 +90,7 @@ public class TestCLICompleter {
 
     @Test
     public void testCompletionWithWordIndexZero() {
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Collections.emptyList(), 0, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Collections.emptyList(), 0);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
@@ -98,8 +101,7 @@ public class TestCLICompleter {
     public void testCompletionWithWordIndexOneAndMatching() {
         final String topCommand = NiFiRegistryCommandGroup.REGISTRY_COMMAND_GROUP;
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Collections.singletonList(topCommand), 1, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Collections.singletonList(topCommand), 1);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
@@ -110,8 +112,7 @@ public class TestCLICompleter {
     public void testCompletionWithWordIndexOneAndNotMatching() {
         final String topCommand = "NOT-A-TOP-LEVEL-COMMAND";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Collections.singletonList(topCommand), 1, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Collections.singletonList(topCommand), 1);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
@@ -123,12 +124,11 @@ public class TestCLICompleter {
         final String topCommand = NiFiRegistryCommandGroup.REGISTRY_COMMAND_GROUP;
         final String subCommand = "list-buckets";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Arrays.asList(topCommand, subCommand), 2, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Arrays.asList(topCommand, subCommand), 2);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
-        assertTrue(candidates.size() > 0);
+        assertFalse(candidates.isEmpty());
         assertEquals(completer.getOptions(subCommand).size(), candidates.size());
     }
 
@@ -137,8 +137,7 @@ public class TestCLICompleter {
         final String topCommand = NiFiRegistryCommandGroup.REGISTRY_COMMAND_GROUP;
         final String subCommand = "NOT-A-TOP-LEVEL-COMMAND";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Arrays.asList(topCommand, subCommand), 2, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Arrays.asList(topCommand, subCommand), 2);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
@@ -150,12 +149,11 @@ public class TestCLICompleter {
         final String topCommand = NiFiRegistryCommandGroup.REGISTRY_COMMAND_GROUP;
         final String subCommand = "list-buckets";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Arrays.asList(topCommand, subCommand, "-ks", "foo", "-kst", "JKS"), 6, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Arrays.asList(topCommand, subCommand, "-ks", "foo", "-kst", "JKS"), 5);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
-        assertTrue(candidates.size() > 0);
+        assertFalse(candidates.isEmpty());
         assertEquals(completer.getOptions(subCommand).size(), candidates.size());
     }
 
@@ -164,22 +162,13 @@ public class TestCLICompleter {
         final String topCommand = NiFiRegistryCommandGroup.REGISTRY_COMMAND_GROUP;
         final String subCommand = "list-buckets";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Arrays.asList(topCommand, subCommand, "-p", "src/test/resources/"), 3, -1, -1);
+        final String testResourcesDirectory = getTestResourcesDirectory();
+        final ParsedLine parsedLine = new TestParsedLine(Arrays.asList(topCommand, subCommand, "-p", testResourcesDirectory), 3);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
-        assertTrue(candidates.size() > 0);
 
-        boolean found = false;
-        for (Candidate candidate : candidates) {
-            if (candidate.value().equals("src/test/resources/test.properties")) {
-                found = true;
-                break;
-            }
-        }
-
-        assertTrue(found);
+        assertTestPropertiesFound(candidates);
     }
 
     @Test
@@ -187,12 +176,11 @@ public class TestCLICompleter {
         final String topCommand = "session";
         final String subCommand = "set";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList(
-                "", Arrays.asList(topCommand, subCommand), 2, -1, -1);
+        final ParsedLine parsedLine = new TestParsedLine(Arrays.asList(topCommand, subCommand), 2);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
-        assertTrue(candidates.size() > 0);
+        assertFalse(candidates.isEmpty());
         assertEquals(SessionVariable.values().length, candidates.size());
     }
 
@@ -201,27 +189,75 @@ public class TestCLICompleter {
         final String topCommand = "session";
         final String subCommand = "set";
 
-        final DefaultParser.ArgumentList parsedLine = new DefaultParser.ArgumentList("",
+        final String testResourcesDirectory = getTestResourcesDirectory();
+        final ParsedLine parsedLine = new TestParsedLine(
                 Arrays.asList(
                         topCommand,
                         subCommand,
                         SessionVariable.NIFI_CLIENT_PROPS.getVariableName(),
-                        "src/test/resources/"),
-                3, -1, -1);
+                        testResourcesDirectory),
+                3);
 
         final List<Candidate> candidates = new ArrayList<>();
         completer.complete(lineReader, parsedLine, candidates);
-        assertTrue(candidates.size() > 0);
 
-        boolean found = false;
-        for (Candidate candidate : candidates) {
-            if (candidate.value().equals("src/test/resources/test.properties")) {
-                found = true;
-                break;
-            }
-        }
-
-        assertTrue(found);
+        assertTestPropertiesFound(candidates);
     }
 
+    private String getTestResourcesDirectory() {
+        return Paths.get(TEST_RESOURCES_DIRECTORY).toAbsolutePath() + File.separator;
+    }
+
+    private void assertTestPropertiesFound(final List<Candidate> candidates) {
+        final Optional<Candidate> candidateFound = candidates.stream()
+                .filter(candidate -> candidate.value().endsWith(TEST_PROPERTIES))
+                .findFirst();
+        assertTrue(candidateFound.isPresent());
+    }
+
+    private static class TestParsedLine implements ParsedLine {
+        private final List<String> words;
+
+        private final int wordIndex;
+
+        private TestParsedLine(
+                final List<String> words,
+                final int wordIndex) {
+            this.words = words;
+            this.wordIndex = wordIndex;
+        }
+
+        @Override
+        public String word() {
+            if (wordIndex >= words.size()) {
+                return StringUtils.EMPTY;
+            }
+            return words.get(wordIndex);
+        }
+
+        @Override
+        public int wordCursor() {
+            return 0;
+        }
+
+        @Override
+        public int wordIndex() {
+            return wordIndex;
+        }
+
+        @Override
+        public List<String> words() {
+            return words;
+        }
+
+        @Override
+        public String line() {
+            return StringUtils.join(words, " ");
+        }
+
+        @Override
+        public int cursor() {
+            return 0;
+        }
+    }
 }

@@ -17,20 +17,20 @@
 package org.apache.nifi.toolkit.cli.impl.command.registry.tenant;
 
 import org.apache.nifi.registry.authorization.Tenant;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class TestTenantHelper {
     @Test
     public void testSelectExistingTenantsWithEmptyNamesAndIds() throws Exception {
-        // GIVEN
         String names = "";
         String ids = "";
 
@@ -41,14 +41,11 @@ public class TestTenantHelper {
 
         List<Tenant> expected = Collections.emptyList();
 
-        // WHEN
-        // THEN
         testSelectExistingTenants(names, ids, allTenants, expected);
     }
 
     @Test
     public void testSelectExistingTenantsWithNames() throws Exception {
-        // GIVEN
         String names = "name1,name3";
         String ids = "";
 
@@ -69,14 +66,11 @@ public class TestTenantHelper {
             tenantFoundByName3
         );
 
-        // WHEN
-        // THEN
         testSelectExistingTenants(names, ids, allTenants, expected);
     }
 
     @Test
     public void testSelectExistingTenantsWithIds() throws Exception {
-        // GIVEN
         String names = "";
         String ids = "id1,id2";
 
@@ -97,14 +91,11 @@ public class TestTenantHelper {
             tenantFoundById2
         );
 
-        // WHEN
-        // THEN
         testSelectExistingTenants(names, ids, allTenants, expected);
     }
 
     @Test
     public void testSelectExistingTenantsWithComplexScenario() throws Exception {
-        // GIVEN
         String names = "name1,name3";
         String ids = "id1,id2";
 
@@ -126,19 +117,37 @@ public class TestTenantHelper {
             tenantFoundByName
         );
 
-        // WHEN
-        // THEN
         testSelectExistingTenants(names, ids, allTenants, expected);
     }
 
-    private void testSelectExistingTenants(String names, String ids, List<Tenant> allTenants, List<Tenant> expectedTenants) {
-        // GIVEN
+    @Test
+    public void testSelectExistingTenantsWithComma() throws Exception {
+        String names = "\"OU=platform, CN=service\",name2";
+        String ids = "";
+
+        Tenant tenantFoundByNameWithComma = createTenant("id1", "OU=platform, CN=service");
+        Tenant tenantFoundByName = createTenant("id2", "name2");
+        Tenant tenantNotFound = createTenant("__3", "__3");
+
+        List<Tenant> allTenants = Arrays.asList(
+                tenantFoundByNameWithComma,
+                tenantFoundByName,
+                tenantNotFound
+        );
+
+        List<Tenant> expected = Arrays.asList(
+                tenantFoundByNameWithComma,
+                tenantFoundByName
+        );
+
+        testSelectExistingTenants(names, ids, allTenants, expected);
+    }
+
+    private void testSelectExistingTenants(String names, String ids, List<Tenant> allTenants, List<Tenant> expectedTenants) throws IOException {
         Set<Tenant> expected = new HashSet<>(expectedTenants);
 
-        // WHEN
         Set<Tenant> actual = TenantHelper.selectExistingTenants(names, ids, allTenants);
 
-        // THEN
         assertEquals(expected, actual);
     }
 

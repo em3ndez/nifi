@@ -48,6 +48,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
     private static final Logger logger = LoggerFactory.getLogger(LengthDelimitedJournal.class);
@@ -74,6 +75,8 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
     private int transactionCount;
     private boolean headerWritten = false;
 
+    private final AtomicLong bytesWritten = new AtomicLong(0L);
+
     private volatile Throwable poisonCause = null;
     private volatile boolean closed = false;
     private final ByteBuffer transactionPreamble = ByteBuffer.allocate(12); // guarded by synchronized block
@@ -95,28 +98,28 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
         this.maxInHeapSerializationBytes = maxInHeapSerializationBytes;
     }
 
+    @Override
     public void dispose() {
         logger.debug("Deleting Journal {} because it is now encapsulated in the latest Snapshot", journalFile.getName());
         if (!journalFile.delete() && journalFile.exists()) {
-            logger.warn("Unable to delete expired journal file " + journalFile + "; this file should be deleted manually.");
+            logger.warn("Unable to delete expired journal file {}; this file should be deleted manually.", journalFile);
         }
 
         if (overflowDirectory.exists()) {
             final File[] overflowFiles = overflowDirectory.listFiles();
             if (overflowFiles == null) {
-                logger.warn("Unable to obtain listing of files that exist in 'overflow directory' " + overflowDirectory
-                    + " - this directory and any files within it can now be safely removed manually");
+                logger.warn("Unable to obtain listing of files that exist in 'overflow directory' {} - this directory and any files within it can now be safely removed manually", overflowDirectory);
                 return;
             }
 
             for (final File overflowFile : overflowFiles) {
                 if (!overflowFile.delete() && overflowFile.exists()) {
-                    logger.warn("After expiring journal file " + journalFile + ", unable to remove 'overflow file' " + overflowFile + " - this file should be removed manually");
+                    logger.warn("After expiring journal file {}, unable to remove 'overflow file' {} - this file should be removed manually", journalFile, overflowFile);
                 }
             }
 
             if (!overflowDirectory.delete()) {
-                logger.warn("After expiring journal file " + journalFile + ", unable to remove 'overflow directory' " + overflowDirectory + " - this file should be removed manually");
+                logger.warn("After expiring journal file {}, unable to remove 'overflow directory' {} - this file should be removed manually", journalFile, overflowDirectory);
             }
         }
     }
@@ -172,11 +175,12 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
             }
 
             outStream.flush();
+            bytesWritten.addAndGet(outStream.size());
         } catch (final Throwable t) {
             poison(t);
 
-            final IOException ioe = (t instanceof IOException) ? (IOException) t : new IOException("Failed to create journal file " + journalFile, t);
-            logger.error("Failed to create new journal file {} due to {}", journalFile, ioe.toString(), ioe);
+            final IOException ioe = (t instanceof final IOException ioException) ? ioException : new IOException("Failed to create journal file " + journalFile, t);
+            logger.error("Failed to create new journal file {}", journalFile, ioe);
             throw ioe;
         }
 
@@ -193,7 +197,7 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
         final int encodingVersion = in.readInt();
         logger.debug("Encoding version for {} is {}", journalFile, encodingVersion);
         if (encodingVersion > JOURNAL_ENCODING_VERSION) {
-            throw new IOException("Cannot read journal file " + journalFile + " because it is encoded using veresion " + encodingVersion
+            throw new IOException("Cannot read journal file " + journalFile + " because it is encoded using version " + encodingVersion
                 + " but this version of the code only understands version " + JOURNAL_ENCODING_VERSION + " and below");
         }
 
@@ -210,7 +214,7 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
         final int serdeVersion = in.readInt();
         logger.debug("Serde version is {}", serdeVersion);
         if (serdeVersion > serde.getVersion()) {
-            throw new IOException("Cannot read journal file " + journalFile + " because it is encoded using veresion " + encodingVersion
+            throw new IOException("Cannot read journal file " + journalFile + " because it is encoded using version " + encodingVersion
                 + " of the serializer/deserializer but this version of the code only understands version " + serde.getVersion() + " and below");
         }
 
@@ -222,7 +226,6 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
         return new SerDeAndVersion(serde, serdeVersion);
     }
 
-
     // Visible/overrideable for testing.
     protected void createOverflowDirectory(final Path path) throws IOException {
         Files.createDirectories(path);
@@ -230,12 +233,12 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
 
     @Override
     public void update(final Collection<T> records, final RecordLookup<T> recordLookup) throws IOException {
-        if (!headerWritten) {
-            throw new IllegalStateException("Cannot update journal file " + journalFile + " because no header has been written yet.");
-        }
-
         if (records.isEmpty()) {
             return;
+        }
+
+        if (!headerWritten) {
+            throw new IllegalStateException("Cannot update journal file " + journalFile + " because no header has been written yet.");
         }
 
         checkState();
@@ -300,6 +303,9 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
                 }
             }
 
+            // The overflow file is fully written and synced at this point, so its length is stable.
+            final long overflowFileLength = (overflowFile == null) ? 0L : overflowFile.length();
+
             final ByteArrayOutputStream baos = bados.getByteArrayOutputStream();
             final OutputStream out = getOutputStream();
 
@@ -319,8 +325,13 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
                     out.write(transactionPreamble.array());
                     baos.writeTo(out);
                     out.flush();
+
+                    // A transaction consumes a single-byte marker, the fixed-length preamble, and the serialized records. Storage for an
+                    // overflow file is counted only now that the transaction referencing it has been written, so that a failed update,
+                    // whose overflow file is deleted, does not inflate the count.
+                    bytesWritten.addAndGet(1L + transactionPreamble.capacity() + baos.size() + overflowFileLength);
                 } catch (final Throwable t) {
-                    // While the outter Throwable that wraps this "catch" will call Poison, it is imperative that we call poison()
+                    // While the outer Throwable that wraps this "catch" will call Poison, it is imperative that we call poison()
                     // before the synchronized block is excited. Otherwise, another thread could potentially corrupt the journal before
                     // the poison method closes the file.
                     poison(t);
@@ -334,7 +345,7 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
 
             if (overflowFile != null) {
                 if (!overflowFile.delete() && overflowFile.exists()) {
-                    logger.warn("Failed to cleanup temporary overflow file " + overflowFile + " - this file should be cleaned up manually.");
+                    logger.warn("Failed to cleanup temporary overflow file {} - this file should be cleaned up manually.", overflowFile);
                 }
             }
 
@@ -343,7 +354,6 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
             streamPool.returnObject(bados);
         }
     }
-
 
     private void checkState() throws IOException {
         final Throwable cause = this.poisonCause;
@@ -477,8 +487,10 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
 
                         switch (updateType) {
                             case DELETE: {
-                                idsRemoved.add(recordId);
-                                transactionRecordMap.remove(recordId);
+                                if (recordId != null) {
+                                    idsRemoved.add(recordId);
+                                    transactionRecordMap.remove(recordId);
+                                }
                                 break;
                             }
                             case SWAP_IN: {
@@ -488,7 +500,9 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
                                 } else {
                                     swapLocationsRemoved.add(location);
                                     swapLocationsAdded.remove(location);
-                                    transactionRecordMap.put(recordId, record);
+                                    if (recordId != null) {
+                                        transactionRecordMap.put(recordId, record);
+                                    }
                                 }
                                 break;
                             }
@@ -499,15 +513,40 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
                                 } else {
                                     swapLocationsRemoved.remove(location);
                                     swapLocationsAdded.add(location);
-                                    idsRemoved.add(recordId);
-                                    transactionRecordMap.remove(recordId);
+                                    if (recordId != null) {
+                                        idsRemoved.add(recordId);
+                                        transactionRecordMap.remove(recordId);
+                                    }
                                 }
 
                                 break;
                             }
+                            case SWAP_FILE_DELETED: {
+                                final String location = serde.getLocation(record);
+                                if (location != null) {
+                                    swapLocationsRemoved.add(location);
+                                    swapLocationsAdded.remove(location);
+                                }
+                                break;
+                            }
+                            case SWAP_FILE_RENAMED: {
+                                final String originalLocation = serde.getOriginalLocation(record);
+                                final String newLocation = serde.getLocation(record);
+                                if (originalLocation != null) {
+                                    swapLocationsRemoved.add(originalLocation);
+                                    swapLocationsAdded.remove(originalLocation);
+                                }
+                                if (newLocation != null) {
+                                    swapLocationsAdded.add(newLocation);
+                                    swapLocationsRemoved.remove(newLocation);
+                                }
+                                break;
+                            }
                             default: {
-                                transactionRecordMap.put(recordId, record);
-                                idsRemoved.remove(recordId);
+                                if (recordId != null) {
+                                    transactionRecordMap.put(recordId, record);
+                                    idsRemoved.remove(recordId);
+                                }
                                 break;
                             }
                         }
@@ -585,6 +624,10 @@ public class LengthDelimitedJournal<T> implements WriteAheadJournal<T> {
         return true;
     }
 
+    @Override
+    public long getBytesWritten() {
+        return bytesWritten.get();
+    }
 
     @Override
     public synchronized JournalSummary getSummary() {

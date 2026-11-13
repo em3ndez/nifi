@@ -16,62 +16,26 @@
 */
 package org.apache.nifi.remote.io.socket;
 
-import java.io.IOException;
-import java.net.Socket;
-import java.net.ServerSocket;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 
 public class NetworkUtils {
 
     /**
-     * Will determine the available port
+     * Get Interface Address using interface name eg. en0, eth0
+     *
+     * @param interfaceName Network Interface Name
+     * @return Interface Address or null when matching network interface name not found
+     * @throws SocketException Thrown when failing to get interface addresses
      */
-    public final static int availablePort() {
-        ServerSocket s = null;
-        try {
-            s = new ServerSocket(0);
-            s.setReuseAddress(true);
-            return s.getLocalPort();
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to discover available port.", e);
-        } finally {
-            try {
-                s.close();
-            } catch (IOException e) {
-                // ignore
-            }
+    public static InetAddress getInterfaceAddress(final String interfaceName) throws SocketException {
+        InetAddress interfaceAddress = null;
+        if (interfaceName != null && !interfaceName.isEmpty()) {
+            NetworkInterface networkInterface = NetworkInterface.getByName(interfaceName);
+            interfaceAddress = networkInterface.getInetAddresses().nextElement();
         }
-    }
-
-    public final static boolean isListening(final String hostname, final int port) {
-        try (final Socket s = new Socket(hostname, port)) {
-            return s.isConnected();
-        } catch (final Exception ignore) {}
-        return false;
-    }
-
-    public final static boolean isListening(final String hostname, final int port, final int timeoutMillis) {
-        Boolean result = false;
-
-        final ExecutorService executor = Executors.newSingleThreadExecutor();
-        try {
-            result = executor.submit(() -> {
-                while(!isListening(hostname, port)) {
-                    try {
-                        Thread.sleep(100);
-                    } catch (final Exception ignore) {}
-                }
-                return true;
-            }).get(timeoutMillis, TimeUnit.MILLISECONDS);
-        } catch (final Exception ignore) {} finally {
-            try {
-                executor.shutdown();
-            } catch (final Exception ignore) {}
-        }
-
-        return (result != null && result);
+        return interfaceAddress;
     }
 
 }

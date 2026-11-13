@@ -1,0 +1,25 @@
+[
+  {
+    "securityName":"user1",
+    "authProtocol":"HMAC384SHA512",
+    "authPassphrase":"abc12345",
+    "privProtocol":"AES192",
+    "privPassphrase":"abc12345"
+  },
+  {
+    "securityName":"user2",
+    "authProtocol":"HMAC192SHA256",
+    "authPassphrase":"abc12345",
+    "privProtocol":"AES256",
+    "privPassphrase":"abc12345",
+    "localizationEngineID":"00:0A:95:9D:68:16"
+  },
+  {
+    "securityName":"user3",
+    "authProtocol":"HMAC384SHA512",
+    "authPassphrase":"abc12345",
+    "privProtocol":"AES256",
+    "privPassphrase":"abc12345",
+    "localizationEngineID":"08A69E"
+  }
+]

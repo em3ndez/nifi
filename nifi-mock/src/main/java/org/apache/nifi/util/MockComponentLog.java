@@ -16,11 +16,11 @@
  */
 package org.apache.nifi.util;
 
-import java.util.List;
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.logging.LogLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.List;
 
 public class MockComponentLog implements ComponentLog {
 
@@ -71,31 +71,19 @@ public class MockComponentLog implements ComponentLog {
         return prependToArgs(originalArgs, component);
     }
 
-    private Object[] addProcessorAndThrowable(final Object[] os, final Throwable t) {
-        final Object[] modifiedArgs = new Object[os.length + 2];
-        modifiedArgs[0] = component.toString();
-        for (int i = 0; i < os.length; i++) {
-            modifiedArgs[i + 1] = os[i];
+    private Object[] addProcessorAndFormattedThrowable(final Object[] originalArgs) {
+        if (originalArgs != null && originalArgs.length > 0 && (originalArgs[originalArgs.length - 1] instanceof Throwable)) {
+            final Object[] modifiedArgs = new Object[originalArgs.length + 2];
+
+            modifiedArgs[0] = component.toString();
+            System.arraycopy(originalArgs, 0, modifiedArgs, 1, originalArgs.length - 1);
+            modifiedArgs[modifiedArgs.length - 2] = originalArgs[originalArgs.length - 1].toString();
+            modifiedArgs[modifiedArgs.length - 1] = originalArgs[originalArgs.length - 1];
+
+            return modifiedArgs;
+        } else {
+            return addProcessor(originalArgs);
         }
-        modifiedArgs[modifiedArgs.length - 1] = t.toString();
-
-        return modifiedArgs;
-    }
-
-    private Object[] addProcessorAndThrowable(final Object[] os, final Throwable t, final boolean appendThrowable) {
-        if (!appendThrowable) {
-            return addProcessorAndThrowable(os, t);
-        }
-
-        final Object[] modifiedArgs = new Object[os.length + 3];
-        modifiedArgs[0] = component.toString();
-        for (int i = 0; i < os.length; i++) {
-            modifiedArgs[i + 1] = os[i];
-        }
-        modifiedArgs[modifiedArgs.length - 2] = t.toString();
-        modifiedArgs[modifiedArgs.length - 1] = t;
-
-        return modifiedArgs;
     }
 
     private Object[] prependToArgs(final Object[] originalArgs, final Object... toAdd) {
@@ -105,44 +93,26 @@ public class MockComponentLog implements ComponentLog {
         return newArgs;
     }
 
-    private Object[] translateException(final Object[] os) {
-        if (os != null && os.length > 0 && (os[os.length - 1] instanceof Throwable)) {
-            final Object[] osCopy = new Object[os.length];
-            osCopy[osCopy.length - 1] = os[os.length - 1].toString();
-            System.arraycopy(os, 0, osCopy, 0, os.length - 1);
-            return osCopy;
-        }
-        return os;
-    }
-
     private boolean lastArgIsException(final Object[] os) {
         return (os != null && os.length > 0 && (os[os.length - 1] instanceof Throwable));
     }
 
     @Override
     public void warn(final String msg, final Throwable t) {
-        warn("{} " + msg, new Object[]{component}, t);
+        warn("{} " + msg, component, t);
     }
 
     @Override
-    public void warn(String msg, Object[] os) {
+    public void warn(String msg, Object... os) {
         if (lastArgIsException(os)) {
-            warn(msg, translateException(os), (Throwable) os[os.length - 1]);
-        } else {
-            msg = "{} " + msg;
-            os = addProcessor(os);
+            os = addProcessorAndFormattedThrowable(os);
+            msg = "{} " + msg + ": {}";
+
             logger.warn(msg, os);
-        }
-    }
-
-    @Override
-    public void warn(String msg, Object[] os, final Throwable t) {
-        os = addProcessorAndThrowable(os, t);
-        msg = "{} " + msg + ": {}";
-
-        logger.warn(msg, os);
-        if (logger.isDebugEnabled()) {
-            logger.warn("", t);
+        } else {
+            os = addProcessor(os);
+            msg = "{} " + msg;
+            logger.warn(msg, os);
         }
     }
 
@@ -160,10 +130,17 @@ public class MockComponentLog implements ComponentLog {
     }
 
     @Override
-    public void trace(String msg, Object[] os) {
-        msg = "{} " + msg;
-        os = addProcessor(os);
-        logger.trace(msg, os);
+    public void trace(String msg, Object... os) {
+        if (lastArgIsException(os)) {
+            os = addProcessorAndFormattedThrowable(os);
+            msg = "{} " + msg + ": {}";
+
+            logger.trace(msg, os);
+        } else {
+            os = addProcessor(os);
+            msg = "{} " + msg;
+            logger.trace(msg, os);
+        }
     }
 
     @Override
@@ -171,15 +148,6 @@ public class MockComponentLog implements ComponentLog {
         msg = "{} " + msg;
         final Object[] os = {component};
         logger.trace(msg, os);
-    }
-
-    @Override
-    public void trace(String msg, Object[] os, Throwable t) {
-        os = addProcessorAndThrowable(os, t);
-        msg = "{} " + msg + ": {}";
-
-        logger.trace(msg, os);
-        logger.trace("", t);
     }
 
     @Override
@@ -219,11 +187,17 @@ public class MockComponentLog implements ComponentLog {
     }
 
     @Override
-    public void info(String msg, Object[] os) {
-        msg = "{} " + msg;
-        os = addProcessor(os);
+    public void info(String msg, Object... os) {
+        if (lastArgIsException(os)) {
+            os = addProcessorAndFormattedThrowable(os);
+            msg = "{} " + msg + ": {}";
 
-        logger.info(msg, os);
+            logger.info(msg, os);
+        } else {
+            os = addProcessor(os);
+            msg = "{} " + msg;
+            logger.info(msg, os);
+        }
     }
 
     @Override
@@ -232,17 +206,6 @@ public class MockComponentLog implements ComponentLog {
         final Object[] os = {component};
 
         logger.info(msg, os);
-    }
-
-    @Override
-    public void info(String msg, Object[] os, Throwable t) {
-        os = addProcessorAndThrowable(os, t);
-        msg = "{} " + msg + ": {}";
-
-        logger.info(msg, os);
-        if (logger.isDebugEnabled()) {
-            logger.info("", t);
-        }
     }
 
     @Override
@@ -262,9 +225,12 @@ public class MockComponentLog implements ComponentLog {
     }
 
     @Override
-    public void error(String msg, Object[] os) {
+    public void error(String msg, Object... os) {
         if (lastArgIsException(os)) {
-            error(msg, translateException(os), (Throwable) os[os.length - 1]);
+            os = addProcessorAndFormattedThrowable(os);
+            msg = "{} " + msg + ": {}";
+
+            logger.error(msg, os);
         } else {
             os = addProcessor(os);
             msg = "{} " + msg;
@@ -281,14 +247,6 @@ public class MockComponentLog implements ComponentLog {
     }
 
     @Override
-    public void error(String msg, Object[] os, Throwable t) {
-        os = addProcessorAndThrowable(os, t, true);
-        msg = "{} " + msg + ": {}";
-
-        logger.error(msg, os);
-    }
-
-    @Override
     public void debug(String msg, Throwable t) {
         msg = "{} " + msg;
         final Object[] os = {component};
@@ -297,21 +255,16 @@ public class MockComponentLog implements ComponentLog {
     }
 
     @Override
-    public void debug(String msg, Object[] os) {
-        os = addProcessor(os);
-        msg = "{} " + msg;
+    public void debug(String msg, Object... os) {
+        if (lastArgIsException(os)) {
+            os = addProcessorAndFormattedThrowable(os);
+            msg = "{} " + msg + ": {}";
 
-        logger.debug(msg, os);
-    }
-
-    @Override
-    public void debug(String msg, Object[] os, Throwable t) {
-        os = addProcessorAndThrowable(os, t);
-        msg = "{} " + msg + ": {}";
-
-        logger.debug(msg, os);
-        if (logger.isDebugEnabled()) {
-            logger.debug("", t);
+            logger.debug(msg, os);
+        } else {
+            os = addProcessor(os);
+            msg = "{} " + msg;
+            logger.debug(msg, os);
         }
     }
 
@@ -322,93 +275,4 @@ public class MockComponentLog implements ComponentLog {
 
         logger.debug(msg, os);
     }
-
-    @Override
-    public void log(LogLevel level, String msg, Throwable t) {
-        switch (level) {
-            case DEBUG:
-                debug(msg, t);
-                break;
-            case ERROR:
-            case FATAL:
-                error(msg, t);
-                break;
-            case INFO:
-                info(msg, t);
-                break;
-            case TRACE:
-                trace(msg, t);
-                break;
-            case WARN:
-                warn(msg, t);
-                break;
-        }
-    }
-
-    @Override
-    public void log(LogLevel level, String msg, Object[] os) {
-        switch (level) {
-            case DEBUG:
-                debug(msg, os);
-                break;
-            case ERROR:
-            case FATAL:
-                error(msg, os);
-                break;
-            case INFO:
-                info(msg, os);
-                break;
-            case TRACE:
-                trace(msg, os);
-                break;
-            case WARN:
-                warn(msg, os);
-                break;
-        }
-    }
-
-    @Override
-    public void log(LogLevel level, String msg) {
-        switch (level) {
-            case DEBUG:
-                debug(msg);
-                break;
-            case ERROR:
-            case FATAL:
-                error(msg);
-                break;
-            case INFO:
-                info(msg);
-                break;
-            case TRACE:
-                trace(msg);
-                break;
-            case WARN:
-                warn(msg);
-                break;
-        }
-    }
-
-    @Override
-    public void log(LogLevel level, String msg, Object[] os, Throwable t) {
-        switch (level) {
-            case DEBUG:
-                debug(msg, os, t);
-                break;
-            case ERROR:
-            case FATAL:
-                error(msg, os, t);
-                break;
-            case INFO:
-                info(msg, os, t);
-                break;
-            case TRACE:
-                trace(msg, os, t);
-                break;
-            case WARN:
-                warn(msg, os, t);
-                break;
-        }
-    }
-
 }

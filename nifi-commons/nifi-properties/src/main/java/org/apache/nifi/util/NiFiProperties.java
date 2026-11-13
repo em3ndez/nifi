@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.util;
 
+import org.apache.nifi.properties.ApplicationProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,8 +28,10 @@ import java.net.InetSocketAddress;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -36,7 +39,6 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * The NiFiProperties class holds all properties which are needed for various
@@ -46,7 +48,7 @@ import java.util.stream.Stream;
  * this class or passing it along. Its use should be refactored and minimized
  * over time.
  */
-public abstract class NiFiProperties {
+public class NiFiProperties extends ApplicationProperties {
     private static final Logger logger = LoggerFactory.getLogger(NiFiProperties.class);
 
     // core properties
@@ -68,50 +70,42 @@ public abstract class NiFiProperties {
     public static final String NAR_LIBRARY_DIRECTORY_PREFIX = "nifi.nar.library.directory.";
     public static final String NAR_LIBRARY_AUTOLOAD_DIRECTORY = "nifi.nar.library.autoload.directory";
     public static final String NAR_WORKING_DIRECTORY = "nifi.nar.working.directory";
-    public static final String COMPONENT_DOCS_DIRECTORY = "nifi.documentation.working.directory";
+    public static final String UNPACK_NARS_TO_UBER_JAR = "nifi.nar.unpack.uber.jar";
     public static final String SENSITIVE_PROPS_KEY = "nifi.sensitive.props.key";
     public static final String SENSITIVE_PROPS_ALGORITHM = "nifi.sensitive.props.algorithm";
-    public static final String SENSITIVE_PROPS_PROVIDER = "nifi.sensitive.props.provider";
-    public static final String H2_URL_APPEND = "nifi.h2.url.append";
+    public static final String PROPERTY_ENCRYPTION_PROVIDER_IMPLEMENTATION = "nifi.security.property.encryption.provider.implementation";
+    public static final String PROPERTY_ENCRYPTION_PROVIDER_PREFIX = "nifi.security.property.encryption.provider.properties.";
     public static final String REMOTE_INPUT_HOST = "nifi.remote.input.host";
     public static final String REMOTE_INPUT_PORT = "nifi.remote.input.socket.port";
     public static final String SITE_TO_SITE_SECURE = "nifi.remote.input.secure";
     public static final String SITE_TO_SITE_HTTP_ENABLED = "nifi.remote.input.http.enabled";
     public static final String SITE_TO_SITE_HTTP_TRANSACTION_TTL = "nifi.remote.input.http.transaction.ttl";
     public static final String REMOTE_CONTENTS_CACHE_EXPIRATION = "nifi.remote.contents.cache.expiration";
-    public static final String TEMPLATE_DIRECTORY = "nifi.templates.directory";
     public static final String ADMINISTRATIVE_YIELD_DURATION = "nifi.administrative.yield.duration";
     public static final String BORED_YIELD_DURATION = "nifi.bored.yield.duration";
+    public static final String SCHEDULING_STRATEGY = "nifi.scheduling.strategy";
     public static final String PROCESSOR_SCHEDULING_TIMEOUT = "nifi.processor.scheduling.timeout";
     public static final String BACKPRESSURE_COUNT = "nifi.queue.backpressure.count";
     public static final String BACKPRESSURE_SIZE = "nifi.queue.backpressure.size";
+    public static final String UPLOAD_WORKING_DIRECTORY = "nifi.upload.working.directory";
 
     // content repository properties
     public static final String REPOSITORY_CONTENT_PREFIX = "nifi.content.repository.directory.";
     public static final String CONTENT_REPOSITORY_IMPLEMENTATION = "nifi.content.repository.implementation";
     public static final String MAX_APPENDABLE_CLAIM_SIZE = "nifi.content.claim.max.appendable.size";
-    public static final String MAX_FLOWFILES_PER_CLAIM = "nifi.content.claim.max.flow.files";
+    public static final String CONTENT_CLAIM_TRUNCATION_ENABLED = "nifi.content.claim.truncation.enabled";
     public static final String CONTENT_ARCHIVE_MAX_RETENTION_PERIOD = "nifi.content.repository.archive.max.retention.period";
     public static final String CONTENT_ARCHIVE_MAX_USAGE_PERCENTAGE = "nifi.content.repository.archive.max.usage.percentage";
     public static final String CONTENT_ARCHIVE_BACK_PRESSURE_PERCENTAGE = "nifi.content.repository.archive.backpressure.percentage";
     public static final String CONTENT_ARCHIVE_ENABLED = "nifi.content.repository.archive.enabled";
     public static final String CONTENT_ARCHIVE_CLEANUP_FREQUENCY = "nifi.content.repository.archive.cleanup.frequency";
-    public static final String CONTENT_VIEWER_URL = "nifi.content.viewer.url";
-    public static final String CONTENT_REPOSITORY_ENCRYPTION_KEY = "nifi.content.repository.encryption.key";
-    public static final String CONTENT_REPOSITORY_ENCRYPTION_KEY_ID = "nifi.content.repository.encryption.key.id";
-    public static final String CONTENT_REPOSITORY_ENCRYPTION_KEY_PROVIDER_IMPLEMENTATION_CLASS = "nifi.content.repository.encryption.key.provider.implementation";
-    public static final String CONTENT_REPOSITORY_ENCRYPTION_KEY_PROVIDER_LOCATION = "nifi.content.repository.encryption.key.provider.location";
 
     // flowfile repository properties
     public static final String FLOWFILE_REPOSITORY_IMPLEMENTATION = "nifi.flowfile.repository.implementation";
-    public static final String FLOWFILE_REPOSITORY_WAL_IMPLEMENTATION = "nifi.flowfile.repository.wal.implementation";
     public static final String FLOWFILE_REPOSITORY_ALWAYS_SYNC = "nifi.flowfile.repository.always.sync";
     public static final String FLOWFILE_REPOSITORY_DIRECTORY = "nifi.flowfile.repository.directory";
     public static final String FLOWFILE_REPOSITORY_CHECKPOINT_INTERVAL = "nifi.flowfile.repository.checkpoint.interval";
-    public static final String FLOWFILE_REPOSITORY_ENCRYPTION_KEY = "nifi.flowfile.repository.encryption.key";
-    public static final String FLOWFILE_REPOSITORY_ENCRYPTION_KEY_ID = "nifi.flowfile.repository.encryption.key.id";
-    public static final String FLOWFILE_REPOSITORY_ENCRYPTION_KEY_PROVIDER_IMPLEMENTATION_CLASS = "nifi.flowfile.repository.encryption.key.provider.implementation";
-    public static final String FLOWFILE_REPOSITORY_ENCRYPTION_KEY_PROVIDER_LOCATION = "nifi.flowfile.repository.encryption.key.provider.location";
+    public static final String FLOWFILE_REPOSITORY_CHECKPOINT_MAX_JOURNAL_SIZE = "nifi.flowfile.repository.checkpoint.max.journal.size";
     public static final String FLOWFILE_SWAP_MANAGER_IMPLEMENTATION = "nifi.swap.manager.implementation";
     public static final String QUEUE_SWAP_THRESHOLD = "nifi.queue.swap.threshold";
 
@@ -130,11 +124,13 @@ public abstract class NiFiProperties {
     public static final String PROVENANCE_INDEXED_ATTRIBUTES = "nifi.provenance.repository.indexed.attributes";
     public static final String PROVENANCE_INDEX_SHARD_SIZE = "nifi.provenance.repository.index.shard.size";
     public static final String PROVENANCE_JOURNAL_COUNT = "nifi.provenance.repository.journal.count";
-    public static final String PROVENANCE_REPO_ENCRYPTION_KEY = "nifi.provenance.repository.encryption.key";
-    public static final String PROVENANCE_REPO_ENCRYPTION_KEY_ID = "nifi.provenance.repository.encryption.key.id";
-    public static final String PROVENANCE_REPO_ENCRYPTION_KEY_PROVIDER_IMPLEMENTATION_CLASS = "nifi.provenance.repository.encryption.key.provider.implementation";
-    public static final String PROVENANCE_REPO_ENCRYPTION_KEY_PROVIDER_LOCATION = "nifi.provenance.repository.encryption.key.provider.location";
     public static final String PROVENANCE_REPO_DEBUG_FREQUENCY = "nifi.provenance.repository.debug.frequency";
+
+    public static final String ASSET_MANAGER_IMPLEMENTATION = "nifi.asset.manager.implementation";
+    public static final String ASSET_MANAGER_PREFIX = "nifi.asset.manager.properties.";
+
+    public static final String CONNECTOR_ASSET_MANAGER_IMPLEMENTATION = "nifi.connector.asset.manager.implementation";
+    public static final String CONNECTOR_ASSET_MANAGER_PREFIX = "nifi.connector.asset.manager.properties.";
 
     // status repository properties
     public static final String COMPONENT_STATUS_REPOSITORY_IMPLEMENTATION = "nifi.components.status.repository.implementation";
@@ -144,26 +140,46 @@ public abstract class NiFiProperties {
     public static final String STATUS_REPOSITORY_QUESTDB_PERSIST_NODE_DAYS = "nifi.status.repository.questdb.persist.node.days";
     public static final String STATUS_REPOSITORY_QUESTDB_PERSIST_COMPONENT_DAYS = "nifi.status.repository.questdb.persist.component.days";
     public static final String STATUS_REPOSITORY_QUESTDB_PERSIST_LOCATION = "nifi.status.repository.questdb.persist.location";
+    public static final String STATUS_REPOSITORY_QUESTDB_PERSIST_LOCATION_BACKUP = "nifi.status.repository.questdb.persist.location.backup";
+    public static final String STATUS_REPOSITORY_QUESTDB_PERSIST_BATCH_SIZE = "nifi.status.repository.questdb.persist.batchsize";
+    public static final String STATUS_REPOSITORY_QUESTDB_PERSIST_FREQUENCY = "nifi.status.repository.questdb.persist.frequency";
+
+    // Connector Repository properties
+    public static final String CONNECTOR_REPOSITORY_IMPLEMENTATION = "nifi.connector.repository.implementation";
+    public static final String CONNECTOR_SYNC_TIMEOUT = "nifi.connector.sync.timeout";
+    public static final String DEFAULT_CONNECTOR_SYNC_TIMEOUT = "5 mins";
+
+    // Connector Configuration Provider properties
+    public static final String CONNECTOR_CONFIGURATION_PROVIDER_IMPLEMENTATION = "nifi.connector.configuration.provider.implementation";
+    public static final String CONNECTOR_CONFIGURATION_PROVIDER_PROPERTIES_PREFIX = "nifi.connector.configuration.provider.properties.";
+
+    // Secrets Manager properties
+    public static final String SECRETS_MANAGER_IMPLEMENTATION = "nifi.secrets.manager.implementation";
+    public static final String SECRETS_MANAGER_CACHE_DURATION = "nifi.secrets.manager.cache.duration";
 
     // security properties
     public static final String SECURITY_KEYSTORE = "nifi.security.keystore";
     public static final String SECURITY_KEYSTORE_TYPE = "nifi.security.keystoreType";
     public static final String SECURITY_KEYSTORE_PASSWD = "nifi.security.keystorePasswd";
+    public static final String SECURITY_KEYSTORE_PRIVATE_KEY = "nifi.security.keystore.privateKey";
+    public static final String SECURITY_KEYSTORE_CERTIFICATE = "nifi.security.keystore.certificate";
     public static final String SECURITY_KEY_PASSWD = "nifi.security.keyPasswd";
     public static final String SECURITY_TRUSTSTORE = "nifi.security.truststore";
+    public static final String SECURITY_TRUSTSTORE_CERTIFICATE = "nifi.security.truststore.certificate";
     public static final String SECURITY_TRUSTSTORE_TYPE = "nifi.security.truststoreType";
     public static final String SECURITY_TRUSTSTORE_PASSWD = "nifi.security.truststorePasswd";
+    public static final String SECURITY_AUTO_RELOAD_ENABLED = "nifi.security.autoreload.enabled";
+    public static final String SECURITY_AUTO_RELOAD_INTERVAL = "nifi.security.autoreload.interval";
     public static final String SECURITY_USER_AUTHORIZER = "nifi.security.user.authorizer";
     public static final String SECURITY_ANONYMOUS_AUTHENTICATION = "nifi.security.allow.anonymous.authentication";
     public static final String SECURITY_USER_LOGIN_IDENTITY_PROVIDER = "nifi.security.user.login.identity.provider";
-    public static final String SECURITY_OCSP_RESPONDER_URL = "nifi.security.ocsp.responder.url";
-    public static final String SECURITY_OCSP_RESPONDER_CERTIFICATE = "nifi.security.ocsp.responder.certificate";
     public static final String SECURITY_IDENTITY_MAPPING_PATTERN_PREFIX = "nifi.security.identity.mapping.pattern.";
     public static final String SECURITY_IDENTITY_MAPPING_VALUE_PREFIX = "nifi.security.identity.mapping.value.";
     public static final String SECURITY_IDENTITY_MAPPING_TRANSFORM_PREFIX = "nifi.security.identity.mapping.transform.";
     public static final String SECURITY_GROUP_MAPPING_PATTERN_PREFIX = "nifi.security.group.mapping.pattern.";
     public static final String SECURITY_GROUP_MAPPING_VALUE_PREFIX = "nifi.security.group.mapping.value.";
     public static final String SECURITY_GROUP_MAPPING_TRANSFORM_PREFIX = "nifi.security.group.mapping.transform.";
+    public static final String SECURITY_USER_JWS_KEY_ROTATION_PERIOD = "nifi.security.user.jws.key.rotation.period";
 
     // oidc
     public static final String SECURITY_USER_OIDC_DISCOVERY_URL = "nifi.security.user.oidc.discovery.url";
@@ -171,16 +187,13 @@ public abstract class NiFiProperties {
     public static final String SECURITY_USER_OIDC_READ_TIMEOUT = "nifi.security.user.oidc.read.timeout";
     public static final String SECURITY_USER_OIDC_CLIENT_ID = "nifi.security.user.oidc.client.id";
     public static final String SECURITY_USER_OIDC_CLIENT_SECRET = "nifi.security.user.oidc.client.secret";
+    public static final String SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY = "nifi.security.user.oidc.truststore.strategy";
     public static final String SECURITY_USER_OIDC_PREFERRED_JWSALGORITHM = "nifi.security.user.oidc.preferred.jwsalgorithm";
     public static final String SECURITY_USER_OIDC_ADDITIONAL_SCOPES = "nifi.security.user.oidc.additional.scopes";
     public static final String SECURITY_USER_OIDC_CLAIM_IDENTIFYING_USER = "nifi.security.user.oidc.claim.identifying.user";
+    public static final String NIFI_SECURITY_USER_OIDC_CLAIM_GROUPS = "nifi.security.user.oidc.claim.groups";
     public static final String SECURITY_USER_OIDC_FALLBACK_CLAIMS_IDENTIFYING_USER = "nifi.security.user.oidc.fallback.claims.identifying.user";
-
-    // apache knox
-    public static final String SECURITY_USER_KNOX_URL = "nifi.security.user.knox.url";
-    public static final String SECURITY_USER_KNOX_PUBLIC_KEY = "nifi.security.user.knox.publicKey";
-    public static final String SECURITY_USER_KNOX_COOKIE_NAME = "nifi.security.user.knox.cookieName";
-    public static final String SECURITY_USER_KNOX_AUDIENCES = "nifi.security.user.knox.audiences";
+    public static final String SECURITY_USER_OIDC_TOKEN_REFRESH_WINDOW = "nifi.security.user.oidc.token.refresh.window";
 
     // saml
     public static final String SECURITY_USER_SAML_IDP_METADATA_URL = "nifi.security.user.saml.idp.metadata.url";
@@ -207,6 +220,9 @@ public abstract class NiFiProperties {
     public static final String WEB_HTTPS_PORT = "nifi.web.https.port";
     public static final String WEB_HTTPS_PORT_FORWARDING = "nifi.web.https.port.forwarding";
     public static final String WEB_HTTPS_HOST = "nifi.web.https.host";
+    public static final String WEB_HTTPS_APPLICATION_PROTOCOLS = "nifi.web.https.application.protocols";
+    public static final String WEB_HTTPS_CIPHERSUITES_INCLUDE = "nifi.web.https.ciphersuites.include";
+    public static final String WEB_HTTPS_CIPHERSUITES_EXCLUDE = "nifi.web.https.ciphersuites.exclude";
     public static final String WEB_HTTPS_NETWORK_INTERFACE_PREFIX = "nifi.web.https.network.interface.";
     public static final String WEB_WORKING_DIR = "nifi.web.jetty.working.directory";
     public static final String WEB_THREADS = "nifi.web.jetty.threads";
@@ -215,24 +231,25 @@ public abstract class NiFiProperties {
     public static final String WEB_PROXY_HOST = "nifi.web.proxy.host";
     public static final String WEB_MAX_CONTENT_SIZE = "nifi.web.max.content.size";
     public static final String WEB_MAX_REQUESTS_PER_SECOND = "nifi.web.max.requests.per.second";
+    public static final String WEB_MAX_ACCESS_TOKEN_REQUESTS_PER_SECOND = "nifi.web.max.access.token.requests.per.second";
     public static final String WEB_REQUEST_TIMEOUT = "nifi.web.request.timeout";
     public static final String WEB_REQUEST_IP_WHITELIST = "nifi.web.request.ip.whitelist";
     public static final String WEB_SHOULD_SEND_SERVER_VERSION = "nifi.web.should.send.server.version";
+    public static final String WEB_REQUEST_LOG_FORMAT = "nifi.web.request.log.format";
+    public static final String WEB_JMX_METRICS_ALLOWED_FILTER_PATTERN = "nifi.web.jmx.metrics.allowed.filter.pattern";
 
     // ui properties
     public static final String UI_BANNER_TEXT = "nifi.ui.banner.text";
-    public static final String UI_AUTO_REFRESH_INTERVAL = "nifi.ui.autorefresh.interval";
 
     // cluster common properties
     public static final String CLUSTER_PROTOCOL_HEARTBEAT_INTERVAL = "nifi.cluster.protocol.heartbeat.interval";
     public static final String CLUSTER_PROTOCOL_HEARTBEAT_MISSABLE_MAX = "nifi.cluster.protocol.heartbeat.missable.max";
-    public static final String CLUSTER_PROTOCOL_IS_SECURE = "nifi.cluster.protocol.is.secure";
+    public static final String CLUSTER_LEADER_ELECTION_IMPLEMENTATION = "nifi.cluster.leader.election.implementation";
 
     // cluster node properties
     public static final String CLUSTER_IS_NODE = "nifi.cluster.is.node";
     public static final String CLUSTER_NODE_ADDRESS = "nifi.cluster.node.address";
     public static final String CLUSTER_NODE_PROTOCOL_PORT = "nifi.cluster.node.protocol.port";
-    public static final String CLUSTER_NODE_PROTOCOL_THREADS = "nifi.cluster.node.protocol.threads";
     public static final String CLUSTER_NODE_PROTOCOL_MAX_THREADS = "nifi.cluster.node.protocol.max.threads";
     public static final String CLUSTER_NODE_CONNECTION_TIMEOUT = "nifi.cluster.node.connection.timeout";
     public static final String CLUSTER_NODE_READ_TIMEOUT = "nifi.cluster.node.read.timeout";
@@ -242,7 +259,7 @@ public abstract class NiFiProperties {
     public static final String FLOW_ELECTION_MAX_CANDIDATES = "nifi.cluster.flow.election.max.candidates";
 
     // cluster load balance properties
-    public static final String LOAD_BALANCE_ADDRESS = "nifi.cluster.load.balance.address";
+    public static final String LOAD_BALANCE_HOST = "nifi.cluster.load.balance.host";
     public static final String LOAD_BALANCE_PORT = "nifi.cluster.load.balance.port";
     public static final String LOAD_BALANCE_CONNECTIONS_PER_NODE = "nifi.cluster.load.balance.connections.per.node";
     public static final String LOAD_BALANCE_MAX_THREAD_COUNT = "nifi.cluster.load.balance.max.thread.count";
@@ -253,6 +270,7 @@ public abstract class NiFiProperties {
     public static final String ZOOKEEPER_CONNECT_TIMEOUT = "nifi.zookeeper.connect.timeout";
     public static final String ZOOKEEPER_SESSION_TIMEOUT = "nifi.zookeeper.session.timeout";
     public static final String ZOOKEEPER_ROOT_NODE = "nifi.zookeeper.root.node";
+    public static final String ZOOKEEPER_CLIENT_ENSEMBLE_TRACKER = "nifi.zookeeper.client.ensembleTracker";
     public static final String ZOOKEEPER_CLIENT_SECURE = "nifi.zookeeper.client.secure";
     public static final String ZOOKEEPER_SECURITY_KEYSTORE = "nifi.zookeeper.security.keystore";
     public static final String ZOOKEEPER_SECURITY_KEYSTORE_TYPE = "nifi.zookeeper.security.keystoreType";
@@ -263,24 +281,20 @@ public abstract class NiFiProperties {
     public static final String ZOOKEEPER_AUTH_TYPE = "nifi.zookeeper.auth.type";
     public static final String ZOOKEEPER_KERBEROS_REMOVE_HOST_FROM_PRINCIPAL = "nifi.zookeeper.kerberos.removeHostFromPrincipal";
     public static final String ZOOKEEPER_KERBEROS_REMOVE_REALM_FROM_PRINCIPAL = "nifi.zookeeper.kerberos.removeRealmFromPrincipal";
+    public static final String ZOOKEEPER_JUTE_MAXBUFFER = "nifi.zookeeper.jute.maxbuffer";
 
     // kerberos properties
     public static final String KERBEROS_KRB5_FILE = "nifi.kerberos.krb5.file";
     public static final String KERBEROS_SERVICE_PRINCIPAL = "nifi.kerberos.service.principal";
     public static final String KERBEROS_SERVICE_KEYTAB_LOCATION = "nifi.kerberos.service.keytab.location";
-    public static final String KERBEROS_SPNEGO_PRINCIPAL = "nifi.kerberos.spnego.principal";
-    public static final String KERBEROS_SPNEGO_KEYTAB_LOCATION = "nifi.kerberos.spnego.keytab.location";
-    public static final String KERBEROS_AUTHENTICATION_EXPIRATION = "nifi.kerberos.spnego.authentication.expiration";
 
     // state management
     public static final String STATE_MANAGEMENT_CONFIG_FILE = "nifi.state.management.configuration.file";
     public static final String STATE_MANAGEMENT_LOCAL_PROVIDER_ID = "nifi.state.management.provider.local";
     public static final String STATE_MANAGEMENT_CLUSTER_PROVIDER_ID = "nifi.state.management.provider.cluster";
+    public static final String STATE_MANAGEMENT_CLUSTER_PROVIDER_PREVIOUS_ID = "nifi.state.management.provider.cluster.previous";
     public static final String STATE_MANAGEMENT_START_EMBEDDED_ZOOKEEPER = "nifi.state.management.embedded.zookeeper.start";
     public static final String STATE_MANAGEMENT_ZOOKEEPER_PROPERTIES = "nifi.state.management.embedded.zookeeper.properties";
-
-    // expression language properties
-    public static final String VARIABLE_REGISTRY_PROPERTIES = "nifi.variable.registry.properties";
 
     // analytics properties
     public static final String ANALYTICS_PREDICTION_ENABLED = "nifi.analytics.predict.enabled";
@@ -290,48 +304,102 @@ public abstract class NiFiProperties {
     public static final String ANALYTICS_CONNECTION_MODEL_SCORE_NAME = "nifi.analytics.connection.model.score.name";
     public static final String ANALYTICS_CONNECTION_MODEL_SCORE_THRESHOLD = "nifi.analytics.connection.model.score.threshold";
 
+    // registry client properties
+    public static final String FLOW_REGISTRY_CHECK_FOR_RULE_VIOLATIONS_BEFORE_COMMIT = "nifi.registry.check.for.rule.violations.before.commit";
+
     // runtime monitoring properties
     public static final String MONITOR_LONG_RUNNING_TASK_SCHEDULE = "nifi.monitor.long.running.task.schedule";
     public static final String MONITOR_LONG_RUNNING_TASK_THRESHOLD = "nifi.monitor.long.running.task.threshold";
+
+    // automatic diagnostic properties
+    public static final String DIAGNOSTICS_ON_SHUTDOWN_ENABLED = "nifi.diagnostics.on.shutdown.enabled";
+    public static final String DIAGNOSTICS_ON_SHUTDOWN_VERBOSE = "nifi.diagnostics.on.shutdown.verbose";
+    public static final String DIAGNOSTICS_ON_SHUTDOWN_DIRECTORY = "nifi.diagnostics.on.shutdown.directory";
+    public static final String DIAGNOSTICS_ON_SHUTDOWN_MAX_FILE_COUNT = "nifi.diagnostics.on.shutdown.max.filecount";
+    public static final String DIAGNOSTICS_ON_SHUTDOWN_MAX_DIRECTORY_SIZE = "nifi.diagnostics.on.shutdown.max.directory.size";
+
+    // python properties
+    public static final String PYTHON_COMMAND = "nifi.python.command";
+    public static final String PYTHON_FRAMEWORK_SOURCE_DIRECTORY = "nifi.python.framework.source.directory";
+    public static final String PYTHON_EXTENSION_DIRECTORY_PREFIX = "nifi.python.extensions.source.directory.";
+    public static final String PYTHON_WORKING_DIRECTORY = "nifi.python.working.directory";
+    public static final String PYTHON_MAX_PROCESSES = "nifi.python.max.processes";
+    public static final String PYTHON_MAX_PROCESSES_PER_TYPE = "nifi.python.max.processes.per.extension.type";
+    public static final String PYTHON_COMMS_TIMEOUT = "nifi.python.comms.timeout";
+
+    public static final String PYTHON_CONTROLLER_DEBUGPY_ENABLED = "nifi.python.controller.debugpy.enabled";
+    public static final String PYTHON_CONTROLLER_DEBUGPY_PORT = "nifi.python.controller.debugpy.port";
+    public static final String PYTHON_CONTROLLER_DEBUGPY_HOST = "nifi.python.controller.debugpy.host";
+
+    // kubernetes properties
+    public static final String CLUSTER_LEADER_ELECTION_KUBERNETES_LEASE_PREFIX = "nifi.cluster.leader.election.kubernetes.lease.prefix";
+
+    // nar manager properties
+    public static final String NAR_PERSISTENCE_PROVIDER_IMPLEMENTATION_CLASS = "nifi.nar.persistence.provider.implementation";
+    public static final String NAR_PERSISTENCE_PROVIDER_PROPERTIES_PREFIX = "nifi.nar.persistence.provider.properties.";
+
+    public static final String DEFAULT_PYTHON_WORKING_DIRECTORY = "./work/python";
+
+    // automatic diagnostic defaults
+    public static final String DEFAULT_DIAGNOSTICS_ON_SHUTDOWN_DIRECTORY = "./diagnostics";
+    public static final int DEFAULT_DIAGNOSTICS_ON_SHUTDOWN_MAX_FILE_COUNT = 10;
+    public static final String DEFAULT_DIAGNOSTICS_ON_SHUTDOWN_MAX_DIRECTORY_SIZE = "10 MB";
+
+    // performance tracking
+    public static final String TRACK_PERFORMANCE_PERCENTAGE = "nifi.performance.tracking.percentage";
+
+    // performance tracking defaults
+    public static final int DEFAULT_TRACK_PERFORMANCE_PERCENTAGE = 0;
 
     // defaults
     public static final Boolean DEFAULT_AUTO_RESUME_STATE = true;
     public static final String DEFAULT_AUTHORIZER_CONFIGURATION_FILE = "conf/authorizers.xml";
     public static final String DEFAULT_LOGIN_IDENTITY_PROVIDER_CONFIGURATION_FILE = "conf/login-identity-providers.xml";
     public static final Integer DEFAULT_REMOTE_INPUT_PORT = null;
-    public static final Path DEFAULT_TEMPLATE_DIRECTORY = Paths.get("conf", "templates");
+    private static final String DEFAULT_WEB_HTTPS_APPLICATION_PROTOCOLS = "h2 http/1.1";
     public static final int DEFAULT_WEB_THREADS = 200;
     public static final String DEFAULT_WEB_MAX_HEADER_SIZE = "16 KB";
     public static final String DEFAULT_WEB_WORKING_DIR = "./work/jetty";
     public static final String DEFAULT_WEB_MAX_CONTENT_SIZE = "20 MB";
-    public static final String DEFAULT_WEB_MAX_REQUESTS_PER_SECOND = "30000";
+    public static final int DEFAULT_WEB_MAX_REQUESTS_PER_SECOND = 30000;
+    public static final int DEFAULT_WEB_MAX_ACCESS_TOKEN_REQUESTS_PER_SECOND = 25;
     public static final String DEFAULT_WEB_REQUEST_TIMEOUT = "60 secs";
     public static final String DEFAULT_NAR_WORKING_DIR = "./work/nar";
-    public static final String DEFAULT_COMPONENT_DOCS_DIRECTORY = "./work/docs/components";
+    public static final boolean DEFAULT_UNPACK_NARS_TO_UBER_JAR = false;
     public static final String DEFAULT_NAR_LIBRARY_DIR = "./lib";
     public static final String DEFAULT_NAR_LIBRARY_AUTOLOAD_DIR = "./extensions";
     public static final String DEFAULT_FLOWFILE_CHECKPOINT_INTERVAL = "20 secs";
-    public static final int DEFAULT_MAX_FLOWFILES_PER_CLAIM = 100;
-    public static final String DEFAULT_MAX_APPENDABLE_CLAIM_SIZE = "1 MB";
+    public static final String DEFAULT_MAX_APPENDABLE_CLAIM_SIZE = "50 KB";
+    public static final String DEFAULT_CONTENT_CLAIM_TRUNCATION_ENABLED = "true";
     public static final int DEFAULT_QUEUE_SWAP_THRESHOLD = 20000;
     public static final long DEFAULT_BACKPRESSURE_COUNT = 10_000L;
     public static final String DEFAULT_BACKPRESSURE_SIZE = "1 GB";
     public static final String DEFAULT_ADMINISTRATIVE_YIELD_DURATION = "30 sec";
     public static final String DEFAULT_COMPONENT_STATUS_SNAPSHOT_FREQUENCY = "5 mins";
     public static final String DEFAULT_BORED_YIELD_DURATION = "10 millis";
+    public static final String AUTO_SCHEDULING_STRATEGY = "AUTO";
+    public static final String STANDARD_SCHEDULING_STRATEGY = "STANDARD";
+    public static final String VIRTUAL_SCHEDULING_STRATEGY = "VIRTUAL";
+    public static final String DEFAULT_SCHEDULING_STRATEGY = AUTO_SCHEDULING_STRATEGY;
     public static final String DEFAULT_ZOOKEEPER_CONNECT_TIMEOUT = "3 secs";
     public static final String DEFAULT_ZOOKEEPER_SESSION_TIMEOUT = "3 secs";
     public static final String DEFAULT_ZOOKEEPER_ROOT_NODE = "/nifi";
     public static final boolean DEFAULT_ZOOKEEPER_CLIENT_SECURE = false;
+    public static final boolean DEFAULT_ZOOKEEPER_CLIENT_ENSEMBLE_TRACKER = true;
     public static final String DEFAULT_ZOOKEEPER_AUTH_TYPE = "default";
     public static final String DEFAULT_ZOOKEEPER_KERBEROS_REMOVE_HOST_FROM_PRINCIPAL = "true";
     public static final String DEFAULT_ZOOKEEPER_KERBEROS_REMOVE_REALM_FROM_PRINCIPAL = "true";
+    // Based on org.apache.jute.BinaryInputArchive.maxBuffer hexadecimal 0xfffff from ZooKeeper NIOServerCnxn
+    public static final int DEFAULT_ZOOKEEPER_JUTE_MAXBUFFER = 1048575;
+    public static final String DEFAULT_SECURITY_AUTO_RELOAD_INTERVAL = "10 secs";
     public static final String DEFAULT_SITE_TO_SITE_HTTP_TRANSACTION_TTL = "30 secs";
     public static final String DEFAULT_FLOW_CONFIGURATION_ARCHIVE_ENABLED = "true";
     public static final String DEFAULT_FLOW_CONFIGURATION_ARCHIVE_MAX_TIME = "30 days";
     public static final String DEFAULT_FLOW_CONFIGURATION_ARCHIVE_MAX_STORAGE = "500 MB";
     public static final String DEFAULT_SECURITY_USER_OIDC_CONNECT_TIMEOUT = "5 secs";
     public static final String DEFAULT_SECURITY_USER_OIDC_READ_TIMEOUT = "5 secs";
+    public static final String DEFAULT_SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY = "JDK";
+    private static final String DEFAULT_SECURITY_USER_OIDC_TOKEN_REFRESH_WINDOW = "60 secs";
     public static final String DEFAULT_SECURITY_USER_SAML_METADATA_SIGNING_ENABLED = "false";
     public static final String DEFAULT_SECURITY_USER_SAML_REQUEST_SIGNING_ENABLED = "false";
     public static final String DEFAULT_SECURITY_USER_SAML_WANT_ASSERTIONS_SIGNED = "true";
@@ -343,7 +411,10 @@ public abstract class NiFiProperties {
     public static final String DEFAULT_SECURITY_USER_SAML_HTTP_CLIENT_TRUSTSTORE_STRATEGY = "JDK";
     public static final String DEFAULT_SECURITY_USER_SAML_HTTP_CLIENT_CONNECT_TIMEOUT = "30 secs";
     public static final String DEFAULT_SECURITY_USER_SAML_HTTP_CLIENT_READ_TIMEOUT = "30 secs";
+    private static final String DEFAULT_SECURITY_USER_JWS_KEY_ROTATION_PERIOD = "PT1H";
     public static final String DEFAULT_WEB_SHOULD_SEND_SERVER_VERSION = "true";
+    public static final Boolean DEFAULT_FLOW_REGISTRY_CHECK_FOR_RULE_VIOLATIONS_BEFORE_COMMIT = false;
+    public static final String DEFAULT_UPLOAD_WORKING_DIR = "./work/uploads";
 
     // cluster common defaults
     public static final String DEFAULT_CLUSTER_PROTOCOL_HEARTBEAT_INTERVAL = "5 sec";
@@ -351,6 +422,7 @@ public abstract class NiFiProperties {
     public static final String DEFAULT_CLUSTER_NODE_READ_TIMEOUT = "5 sec";
     public static final String DEFAULT_CLUSTER_NODE_CONNECTION_TIMEOUT = "5 sec";
     public static final int DEFAULT_CLUSTER_NODE_MAX_CONCURRENT_REQUESTS = 100;
+    public static final String DEFAULT_CLUSTER_LEADER_ELECTION_IMPLEMENTATION = "CuratorLeaderElectionManager";
 
     // cluster node defaults
     public static final int DEFAULT_CLUSTER_NODE_PROTOCOL_THREADS = 10;
@@ -363,7 +435,6 @@ public abstract class NiFiProperties {
     public static final int DEFAULT_LOAD_BALANCE_MAX_THREAD_COUNT = 8;
     public static final String DEFAULT_LOAD_BALANCE_COMMS_TIMEOUT = "30 sec";
 
-
     // state management defaults
     public static final String DEFAULT_STATE_MANAGEMENT_CONFIG_FILE = "conf/state-management.xml";
 
@@ -374,35 +445,30 @@ public abstract class NiFiProperties {
     public static final String DEFAULT_ANALYTICS_PREDICTION_ENABLED = "false";
     public static final String DEFAULT_ANALYTICS_PREDICTION_INTERVAL = "3 mins";
     public static final String DEFAULT_ANALYTICS_QUERY_INTERVAL = "3 mins";
-    public final static String DEFAULT_ANALYTICS_CONNECTION_MODEL_IMPLEMENTATION = "org.apache.nifi.controller.status.analytics.models.OrdinaryLeastSquares";
+    public static final String DEFAULT_ANALYTICS_CONNECTION_MODEL_IMPLEMENTATION = "org.apache.nifi.controller.status.analytics.models.OrdinaryLeastSquares";
     public static final String DEFAULT_ANALYTICS_CONNECTION_SCORE_NAME = "rSquared";
     public static final double DEFAULT_ANALYTICS_CONNECTION_SCORE_THRESHOLD = .90;
-
-    // runtime monitoring defaults
-    public static final String DEFAULT_MONITOR_LONG_RUNNING_TASK_SCHEDULE = "1 min";
-    public static final String DEFAULT_MONITOR_LONG_RUNNING_TASK_THRESHOLD = "5 mins";
 
     // Status repository defaults
     public static final int DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_NODE_DAYS = 14;
     public static final int DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_COMPONENT_DAYS = 3;
     public static final String DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_LOCATION = "./status_repository";
+    public static final String DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_LOCATION_BACKUP = "./status_repository_backup";
+    public static final String DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_BATCH_SIZE = "1000";
+    public static final String DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_FREQUENCY = "5 secs";
 
-    /**
-     * Retrieves the property value for the given property key.
-     *
-     * @param key the key of property value to lookup
-     * @return value of property at given key or null if not found
-     */
-    public abstract String getProperty(String key);
+    public NiFiProperties() {
+        this(Collections.emptyMap());
+    }
 
-    /**
-     * Retrieves all known property keys.
-     *
-     * @return all known property keys
-     */
-    public abstract Set<String> getPropertyKeys();
+    public NiFiProperties(final Map<String, String> props) {
+        super(props);
+    }
 
-    // getters for core properties //
+    public NiFiProperties(final Properties props) {
+        super(props);
+    }
+
     public File getFlowConfigurationFile() {
         try {
             return new File(getProperty(FLOW_CONFIGURATION_FILE));
@@ -450,17 +516,17 @@ public abstract class NiFiProperties {
 
     public Integer getIntegerProperty(final String propertyName, final Integer defaultValue) {
         final String value = getProperty(propertyName);
-        if (value == null || value.trim().isEmpty()) {
+        if (value == null || value.isBlank()) {
             return defaultValue;
         }
 
         try {
             return Integer.parseInt(value.trim());
         } catch (final Exception e) {
+            logger.warn("Configured value for property {} in nifi.properties is invalid, falling back to default value", propertyName, e);
             return defaultValue;
         }
     }
-
 
     public String getAdministrativeYieldDuration() {
         return getProperty(ADMINISTRATIVE_YIELD_DURATION, DEFAULT_ADMINISTRATIVE_YIELD_DURATION);
@@ -519,13 +585,13 @@ public abstract class NiFiProperties {
 
         final String propertyKey;
         if (isSiteToSiteSecure()) {
-            if (StringUtils.isBlank(getProperty(NiFiProperties.WEB_HTTPS_PORT_FORWARDING))) {
+            if (StringUtils.isBlank(getProperty(WEB_HTTPS_PORT_FORWARDING))) {
                 propertyKey = WEB_HTTPS_PORT;
             } else {
                 propertyKey = WEB_HTTPS_PORT_FORWARDING;
             }
         } else {
-            if (StringUtils.isBlank(getProperty(NiFiProperties.WEB_HTTP_PORT_FORWARDING))) {
+            if (StringUtils.isBlank(getProperty(WEB_HTTP_PORT_FORWARDING))) {
                 propertyKey = WEB_HTTP_PORT;
             } else {
                 propertyKey = WEB_HTTP_PORT_FORWARDING;
@@ -538,16 +604,6 @@ public abstract class NiFiProperties {
                     + " is enabled but " + propertyKey + " is not specified.");
         }
         return port;
-    }
-
-    /**
-     * Returns the directory to which Templates are to be persisted
-     *
-     * @return the template directory
-     */
-    public Path getTemplateDirectory() {
-        final String strVal = getProperty(TEMPLATE_DIRECTORY);
-        return (strVal == null) ? DEFAULT_TEMPLATE_DIRECTORY : Paths.get(strVal);
     }
 
     /**
@@ -571,7 +627,6 @@ public abstract class NiFiProperties {
         return Boolean.parseBoolean(rawAutoResumeState);
     }
 
-
     /**
      * Returns the number of milliseconds between FlowFileRepository
      * checkpointing
@@ -580,6 +635,21 @@ public abstract class NiFiProperties {
      */
     public String getFlowFileRepositoryCheckpointInterval() {
         return getProperty(FLOWFILE_REPOSITORY_CHECKPOINT_INTERVAL, DEFAULT_FLOWFILE_CHECKPOINT_INTERVAL);
+    }
+
+    /**
+     * Returns the amount of storage that the FlowFile Repository's journal is allowed to consume before the repository is checkpointed,
+     * expressed as a data size such as <code>100 MB</code>.
+     *
+     * @return the configured maximum journal size, or <code>null</code> if the repository is to be checkpointed only on the configured interval
+     */
+    public String getFlowFileRepositoryMaxJournalSize() {
+        final String maxJournalSize = getProperty(FLOWFILE_REPOSITORY_CHECKPOINT_MAX_JOURNAL_SIZE);
+        if (maxJournalSize == null || maxJournalSize.isBlank()) {
+            return null;
+        }
+
+        return maxJournalSize.trim();
     }
 
     /**
@@ -623,7 +693,7 @@ public abstract class NiFiProperties {
         Integer port = null;
         try {
             port = Integer.parseInt(getProperty(WEB_HTTP_PORT));
-        } catch (NumberFormatException nfe) {
+        } catch (NumberFormatException ignored) {
         }
         return port;
     }
@@ -632,9 +702,18 @@ public abstract class NiFiProperties {
         Integer sslPort = null;
         try {
             sslPort = Integer.parseInt(getProperty(WEB_HTTPS_PORT));
-        } catch (NumberFormatException nfe) {
+        } catch (NumberFormatException ignored) {
         }
         return sslPort;
+    }
+
+    /**
+     * Is HTTP without TLS enabled based on configuring nifi.web.http.port property
+     *
+     * @return HTTP enabled status
+     */
+    public boolean isHttpEnabled() {
+        return getPort() != null;
     }
 
     public boolean isHTTPSConfigured() {
@@ -656,6 +735,16 @@ public abstract class NiFiProperties {
         }
     }
 
+    /**
+     * Get Web HTTPS Application Protocols defaults to HTTP/2 and HTTP/1.1
+     *
+     * @return Set of configured HTTPS Application Protocols
+     */
+    public Set<String> getWebHttpsApplicationProtocols() {
+        final String protocols = getProperty(WEB_HTTPS_APPLICATION_PROTOCOLS, DEFAULT_WEB_HTTPS_APPLICATION_PROTOCOLS);
+        return Arrays.stream(protocols.split("\\s+")).collect(Collectors.toSet());
+    }
+
     public String getWebMaxHeaderSize() {
         return getProperty(WEB_MAX_HEADER_SIZE, DEFAULT_WEB_MAX_HEADER_SIZE);
     }
@@ -671,8 +760,12 @@ public abstract class NiFiProperties {
         return getProperty(WEB_MAX_CONTENT_SIZE);
     }
 
-    public String getMaxWebRequestsPerSecond() {
-        return getProperty(WEB_MAX_REQUESTS_PER_SECOND, DEFAULT_WEB_MAX_REQUESTS_PER_SECOND);
+    public Integer getMaxWebRequestsPerSecond() {
+        return getIntegerProperty(WEB_MAX_REQUESTS_PER_SECOND, DEFAULT_WEB_MAX_REQUESTS_PER_SECOND);
+    }
+
+    public Integer getMaxWebAccessTokenRequestsPerSecond() {
+        return getIntegerProperty(WEB_MAX_ACCESS_TOKEN_REQUESTS_PER_SECOND, DEFAULT_WEB_MAX_ACCESS_TOKEN_REQUESTS_PER_SECOND);
     }
 
     public String getWebRequestTimeout() {
@@ -695,12 +788,16 @@ public abstract class NiFiProperties {
         return new File(getProperty(WEB_WORKING_DIR, DEFAULT_WEB_WORKING_DIR));
     }
 
-    public File getComponentDocumentationWorkingDirectory() {
-        return new File(getProperty(COMPONENT_DOCS_DIRECTORY, DEFAULT_COMPONENT_DOCS_DIRECTORY));
-    }
-
     public File getNarWorkingDirectory() {
         return new File(getProperty(NAR_WORKING_DIRECTORY, DEFAULT_NAR_WORKING_DIR));
+    }
+
+    public boolean isUnpackNarsToUberJar() {
+        final String propertyValue = getProperty(UNPACK_NARS_TO_UBER_JAR);
+        if (propertyValue == null) {
+            return DEFAULT_UNPACK_NARS_TO_UBER_JAR;
+        }
+        return Boolean.parseBoolean(propertyValue);
     }
 
     public File getFrameworkWorkingDirectory() {
@@ -740,6 +837,10 @@ public abstract class NiFiProperties {
         return new File(getProperty(NAR_LIBRARY_AUTOLOAD_DIRECTORY, DEFAULT_NAR_LIBRARY_AUTOLOAD_DIR));
     }
 
+    public File getUploadWorkingDirectory() {
+        return new File(getProperty(UPLOAD_WORKING_DIRECTORY, DEFAULT_UPLOAD_WORKING_DIR));
+    }
+
     // getters for ui properties //
 
     /**
@@ -752,12 +853,25 @@ public abstract class NiFiProperties {
     }
 
     /**
-     * Returns the auto refresh interval in seconds.
+     * Returns true if auto reload of the keystore and truststore is enabled.
      *
-     * @return the interval over which the properties should auto refresh
+     * @return true if auto reload of the keystore and truststore is enabled.
      */
-    public String getAutoRefreshInterval() {
-        return getProperty(UI_AUTO_REFRESH_INTERVAL);
+    public boolean isSecurityAutoReloadEnabled() {
+        return this.getProperty(SECURITY_AUTO_RELOAD_ENABLED, Boolean.FALSE.toString()).equals(Boolean.TRUE.toString());
+    }
+
+    /**
+     * Returns the auto reload interval of the keystore and truststore.
+     *
+     * @return The interval over which the keystore and truststore should auto-reload.
+     */
+    public String getSecurityAutoReloadInterval() {
+        return getProperty(SECURITY_AUTO_RELOAD_INTERVAL, DEFAULT_SECURITY_AUTO_RELOAD_INTERVAL);
+    }
+
+    public Duration getSecurityUserJwsKeyRotationPeriod() {
+        return Duration.parse(getProperty(SECURITY_USER_JWS_KEY_ROTATION_PERIOD, DEFAULT_SECURITY_USER_JWS_KEY_ROTATION_PERIOD));
     }
 
     // getters for cluster protocol properties //
@@ -802,16 +916,16 @@ public abstract class NiFiProperties {
 
     public InetSocketAddress getClusterLoadBalanceAddress() {
         try {
-            String address = getProperty(LOAD_BALANCE_ADDRESS);
-            if (StringUtils.isBlank(address)) {
-                address = getProperty(CLUSTER_NODE_ADDRESS);
+            String host = getProperty(LOAD_BALANCE_HOST);
+            if (StringUtils.isBlank(host)) {
+                host = getProperty(CLUSTER_NODE_ADDRESS);
             }
-            if (StringUtils.isBlank(address)) {
-                address = "localhost";
+            if (StringUtils.isBlank(host)) {
+                host = "localhost";
             }
 
             final int port = getIntegerProperty(LOAD_BALANCE_PORT, DEFAULT_LOAD_BALANCE_PORT);
-            return InetSocketAddress.createUnresolved(address, port);
+            return InetSocketAddress.createUnresolved(host, port);
         } catch (final Exception e) {
             throw new RuntimeException("Invalid load balance address/port due to: " + e, e);
         }
@@ -822,22 +936,6 @@ public abstract class NiFiProperties {
             return Integer.parseInt(getProperty(CLUSTER_NODE_PROTOCOL_PORT));
         } catch (NumberFormatException nfe) {
             return null;
-        }
-    }
-
-    /**
-     * @deprecated Use getClusterNodeProtocolCorePoolSize() and getClusterNodeProtocolMaxPoolSize() instead
-     */
-    @Deprecated()
-    public int getClusterNodeProtocolThreads() {
-        return getClusterNodeProtocolCorePoolSize();
-    }
-
-    public int getClusterNodeProtocolCorePoolSize() {
-        try {
-            return Integer.parseInt(getProperty(CLUSTER_NODE_PROTOCOL_THREADS));
-        } catch (NumberFormatException nfe) {
-            return DEFAULT_CLUSTER_NODE_PROTOCOL_THREADS;
         }
     }
 
@@ -863,17 +961,18 @@ public abstract class NiFiProperties {
     }
 
     public String getClusterProtocolManagerToNodeApiScheme() {
-        final String isSecureProperty = getProperty(CLUSTER_PROTOCOL_IS_SECURE);
-        if (Boolean.valueOf(isSecureProperty)) {
-            return "https";
-        } else {
+        final String httpsPort = getProperty(WEB_HTTPS_PORT);
+
+        if (httpsPort == null || httpsPort.isBlank()) {
             return "http";
+        } else {
+            return "https";
         }
     }
 
     public File getKerberosConfigurationFile() {
         final String krb5File = getProperty(KERBEROS_KRB5_FILE);
-        if (krb5File != null && krb5File.trim().length() > 0) {
+        if (krb5File != null && !krb5File.isBlank()) {
             return new File(krb5File.trim());
         } else {
             return null;
@@ -898,50 +997,13 @@ public abstract class NiFiProperties {
         }
     }
 
-    public String getKerberosSpnegoPrincipal() {
-        final String spengoPrincipal = getProperty(KERBEROS_SPNEGO_PRINCIPAL);
-        if (!StringUtils.isBlank(spengoPrincipal)) {
-            return spengoPrincipal.trim();
-        } else {
-            return null;
-        }
-    }
-
-    public String getKerberosSpnegoKeytabLocation() {
-        final String keytabLocation = getProperty(KERBEROS_SPNEGO_KEYTAB_LOCATION);
-        if (!StringUtils.isBlank(keytabLocation)) {
-            return keytabLocation.trim();
-        } else {
-            return null;
-        }
-    }
-
-    public String getKerberosAuthenticationExpiration() {
-        final String authenticationExpirationString = getProperty(KERBEROS_AUTHENTICATION_EXPIRATION, DEFAULT_KERBEROS_AUTHENTICATION_EXPIRATION);
-        if (!StringUtils.isBlank(authenticationExpirationString)) {
-            return authenticationExpirationString.trim();
-        } else {
-            return null;
-        }
-    }
-
-    /**
-     * Returns true if the Kerberos service principal and keytab location
-     * properties are populated.
-     *
-     * @return true if Kerberos service support is enabled
-     */
-    public boolean isKerberosSpnegoSupportEnabled() {
-        return !StringUtils.isBlank(getKerberosSpnegoPrincipal()) && !StringUtils.isBlank(getKerberosSpnegoKeytabLocation());
-    }
-
     /**
      * Returns true if the login identity provider has been configured.
      *
      * @return true if the login identity provider has been configured
      */
     public boolean isLoginIdentityProviderEnabled() {
-        return !StringUtils.isBlank(getProperty(NiFiProperties.SECURITY_USER_LOGIN_IDENTITY_PROVIDER));
+        return !StringUtils.isBlank(getProperty(SECURITY_USER_LOGIN_IDENTITY_PROVIDER));
     }
 
     /**
@@ -1042,6 +1104,17 @@ public abstract class NiFiProperties {
     }
 
     /**
+     * Returns the claim to be used to extract user groups from the OIDC payload.
+     * Claim must be requested by adding the scope for it.
+     * Default is 'groups'.
+     *
+     * @return The claim to be used to extract user groups.
+     */
+    public String getOidcClaimGroups() {
+        return getProperty(NIFI_SECURITY_USER_OIDC_CLAIM_GROUPS, "groups").trim();
+    }
+
+    /**
      * Returns the list of fallback claims to be used to identify a user when the configured claim is empty for a user
      *
      * @return The list of fallback claims to be used to identify the user
@@ -1052,63 +1125,46 @@ public abstract class NiFiProperties {
             return Collections.emptyList();
         } else {
             List<String> fallbackClaims = Arrays.asList(rawProperty.split(","));
-            return fallbackClaims.stream().map(String::trim).filter(s->!s.isEmpty()).collect(Collectors.toList());
+            return fallbackClaims.stream().map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
         }
+    }
+
+    public String getOidcClientTruststoreStrategy() {
+        return getProperty(SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY, DEFAULT_SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY);
+    }
+
+    public String getOidcTokenRefreshWindow() {
+        return getProperty(SECURITY_USER_OIDC_TOKEN_REFRESH_WINDOW, DEFAULT_SECURITY_USER_OIDC_TOKEN_REFRESH_WINDOW);
     }
 
     public boolean shouldSendServerVersion() {
         return Boolean.parseBoolean(getProperty(WEB_SHOULD_SEND_SERVER_VERSION, DEFAULT_WEB_SHOULD_SEND_SERVER_VERSION));
     }
 
-    /**
-     * Returns whether Knox SSO is enabled.
-     *
-     * @return whether Knox SSO is enabled
-     */
-    public boolean isKnoxSsoEnabled() {
-        return !StringUtils.isBlank(getKnoxUrl());
+    // Automatic diagnostic getters
+
+    public boolean isDiagnosticsOnShutdownEnabled() {
+        return Boolean.parseBoolean(getProperty(DIAGNOSTICS_ON_SHUTDOWN_ENABLED));
     }
 
-    /**
-     * Returns the Knox URL.
-     *
-     * @return Knox URL
-     */
-    public String getKnoxUrl() {
-        return getProperty(SECURITY_USER_KNOX_URL);
+    public boolean isDiagnosticsOnShutdownVerbose() {
+        return Boolean.parseBoolean(getProperty(DIAGNOSTICS_ON_SHUTDOWN_VERBOSE));
     }
 
-    /**
-     * Gets the configured Knox Audiences.
-     *
-     * @return Knox audiences
-     */
-    public Set<String> getKnoxAudiences() {
-        final String rawAudiences = getProperty(SECURITY_USER_KNOX_AUDIENCES);
-        if (StringUtils.isBlank(rawAudiences)) {
-            return null;
-        } else {
-            final String[] audienceTokens = rawAudiences.split(",");
-            return Stream.of(audienceTokens).map(String::trim).filter(aud -> !StringUtils.isEmpty(aud)).collect(Collectors.toSet());
+    public String getDiagnosticsOnShutdownDirectory() {
+        return getProperty(DIAGNOSTICS_ON_SHUTDOWN_DIRECTORY, DEFAULT_DIAGNOSTICS_ON_SHUTDOWN_DIRECTORY);
+    }
+
+    public int getDiagnosticsOnShutdownMaxFileCount() {
+        try {
+            return Integer.parseInt(getProperty(DIAGNOSTICS_ON_SHUTDOWN_MAX_FILE_COUNT));
+        } catch (NumberFormatException e) {
+            return DEFAULT_DIAGNOSTICS_ON_SHUTDOWN_MAX_FILE_COUNT;
         }
     }
 
-    /**
-     * Returns the path to the Knox public key.
-     *
-     * @return path to the Knox public key
-     */
-    public Path getKnoxPublicKeyPath() {
-        return Paths.get(getProperty(SECURITY_USER_KNOX_PUBLIC_KEY));
-    }
-
-    /**
-     * Returns the name of the Knox cookie.
-     *
-     * @return name of the Knox cookie
-     */
-    public String getKnoxCookieName() {
-        return getProperty(SECURITY_USER_KNOX_COOKIE_NAME);
+    public String getDiagnosticsOnShutdownDirectoryMaxSize() {
+        return getProperty(DIAGNOSTICS_ON_SHUTDOWN_MAX_DIRECTORY_SIZE, DEFAULT_DIAGNOSTICS_ON_SHUTDOWN_MAX_DIRECTORY_SIZE);
     }
 
     /**
@@ -1141,7 +1197,7 @@ public abstract class NiFiProperties {
 
     /**
      * The name of an attribute in the SAML assertions that contains the user identity.
-     *
+     * <p>
      * If not specified, or missing, the NameID of the Subject will be used.
      *
      * @return the attribute name containing the user identity
@@ -1265,7 +1321,6 @@ public abstract class NiFiProperties {
      * - login identity provider is not populated
      * - Kerberos service support is not enabled
      * - openid connect is not enabled
-     * - knox sso is not enabled
      * - anonymous authentication is not enabled
      * </p>
      *
@@ -1273,9 +1328,7 @@ public abstract class NiFiProperties {
      */
     public boolean isClientAuthRequiredForRestApi() {
         return !isLoginIdentityProviderEnabled()
-                && !isKerberosSpnegoSupportEnabled()
                 && !isOidcEnabled()
-                && !isKnoxSsoEnabled()
                 && !isSamlEnabled()
                 && !isAnonymousAuthenticationAllowed();
     }
@@ -1298,7 +1351,7 @@ public abstract class NiFiProperties {
             port = getPort();
 
             if (port == null) {
-                throw new RuntimeException(String.format("The %s must be specified if running in a cluster with %s set to false.", WEB_HTTP_PORT, CLUSTER_PROTOCOL_IS_SECURE));
+                throw new IllegalStateException("Application property [%s] must be specified".formatted(WEB_HTTP_PORT));
             }
         } else {
             // get host
@@ -1311,7 +1364,7 @@ public abstract class NiFiProperties {
             port = getSslPort();
 
             if (port == null) {
-                throw new RuntimeException(String.format("The %s must be specified if running in a cluster with %s set to true.", WEB_HTTPS_PORT, CLUSTER_PROTOCOL_IS_SECURE));
+                throw new IllegalStateException("Application property [%s] must be specified".formatted(WEB_HTTPS_PORT));
             }
         }
 
@@ -1395,23 +1448,6 @@ public abstract class NiFiProperties {
     }
 
     /**
-     * Returns the number of claims to keep open for writing. Ideally, this will be at
-     * least as large as the number of threads that will be updating the repository simultaneously but we don't want
-     * to get too large because it will hold open up to this many FileOutputStreams.
-     * <p>
-     * Default is {@link #DEFAULT_MAX_FLOWFILES_PER_CLAIM}
-     *
-     * @return the maximum number of flow files per claim
-     */
-    public int getMaxFlowFilesPerClaim() {
-        try {
-            return Integer.parseInt(getProperty(MAX_FLOWFILES_PER_CLAIM));
-        } catch (NumberFormatException nfe) {
-            return DEFAULT_MAX_FLOWFILES_PER_CLAIM;
-        }
-    }
-
-    /**
      * Returns the maximum size, in bytes, that claims should grow before writing a new file. This means that we won't continually write to one
      * file that keeps growing but gives us a chance to bunch together many small files.
      * <p>
@@ -1423,13 +1459,22 @@ public abstract class NiFiProperties {
         return getProperty(MAX_APPENDABLE_CLAIM_SIZE, DEFAULT_MAX_APPENDABLE_CLAIM_SIZE);
     }
 
+    public boolean isContentClaimTruncationEnabled() {
+        return Boolean.parseBoolean(getProperty(CONTENT_CLAIM_TRUNCATION_ENABLED, DEFAULT_CONTENT_CLAIM_TRUNCATION_ENABLED));
+    }
+
+    @Override
     public String getProperty(final String key, final String defaultValue) {
         final String value = getProperty(key);
-        return (value == null || value.trim().isEmpty()) ? defaultValue : value;
+        return (value == null || value.isBlank()) ? defaultValue : value;
     }
 
     public String getBoredYieldDuration() {
         return getProperty(BORED_YIELD_DURATION, DEFAULT_BORED_YIELD_DURATION);
+    }
+
+    public String getSchedulingStrategy() {
+        return getProperty(SCHEDULING_STRATEGY, DEFAULT_SCHEDULING_STRATEGY);
     }
 
     public File getStateManagementConfigFile() {
@@ -1442,6 +1487,18 @@ public abstract class NiFiProperties {
 
     public String getClusterStateProviderId() {
         return getProperty(STATE_MANAGEMENT_CLUSTER_PROVIDER_ID);
+    }
+
+    public int getPerformanceMetricTrackingPercentage() {
+        final int percentage = getIntegerProperty(TRACK_PERFORMANCE_PERCENTAGE, DEFAULT_TRACK_PERFORMANCE_PERCENTAGE);
+        if (percentage < 0) {
+            return 0;
+        }
+        if (percentage > 100) {
+            return 100;
+        }
+
+        return percentage;
     }
 
     public File getEmbeddedZooKeeperPropertiesFile() {
@@ -1479,28 +1536,6 @@ public abstract class NiFiProperties {
 
     public Integer getFlowConfigurationArchiveMaxCount() {
         return getIntegerProperty(FLOW_CONFIGURATION_ARCHIVE_MAX_COUNT, null);
-    }
-
-    public String getVariableRegistryProperties() {
-        return getProperty(VARIABLE_REGISTRY_PROPERTIES);
-    }
-
-    public Path[] getVariableRegistryPropertiesPaths() {
-        final List<Path> vrPropertiesPaths = new ArrayList<>();
-
-        final String vrPropertiesFiles = getVariableRegistryProperties();
-        if (!StringUtils.isEmpty(vrPropertiesFiles)) {
-
-            final String[] vrPropertiesFileList = vrPropertiesFiles.split(",");
-
-            for (String propertiesFile : vrPropertiesFileList) {
-                vrPropertiesPaths.add(Paths.get(propertiesFile));
-            }
-
-            return vrPropertiesPaths.toArray(new Path[vrPropertiesPaths.size()]);
-        } else {
-            return new Path[]{};
-        }
     }
 
     /**
@@ -1555,237 +1590,36 @@ public abstract class NiFiProperties {
         final String clientSecure = getProperty(ZOOKEEPER_CLIENT_SECURE, defaultValue).trim();
 
         if (!"true".equalsIgnoreCase(clientSecure) && !"false".equalsIgnoreCase(clientSecure)) {
-            throw new RuntimeException(String.format("%s was '%s', expected true or false", NiFiProperties.ZOOKEEPER_CLIENT_SECURE, clientSecure));
+            throw new RuntimeException(String.format("%s was '%s', expected true or false", ZOOKEEPER_CLIENT_SECURE, clientSecure));
         }
 
         return Boolean.parseBoolean(clientSecure);
     }
 
+    public boolean isZookeeperClientWithEnsembleTracker() {
+        final String defaultValue = String.valueOf(DEFAULT_ZOOKEEPER_CLIENT_ENSEMBLE_TRACKER);
+        final String withEnsembleTracker = getProperty(ZOOKEEPER_CLIENT_ENSEMBLE_TRACKER, defaultValue).trim();
+
+        if (!"true".equalsIgnoreCase(withEnsembleTracker) && !"false".equalsIgnoreCase(withEnsembleTracker)) {
+            throw new RuntimeException(String.format("%s was '%s', expected true or false", ZOOKEEPER_CLIENT_ENSEMBLE_TRACKER, withEnsembleTracker));
+        }
+
+        return Boolean.parseBoolean(withEnsembleTracker);
+    }
+
     public boolean isZooKeeperTlsConfigurationPresent() {
-        return StringUtils.isNotBlank(getProperty(NiFiProperties.ZOOKEEPER_CLIENT_SECURE))
-            && StringUtils.isNotBlank(getProperty(NiFiProperties.ZOOKEEPER_SECURITY_KEYSTORE))
-            && getProperty(NiFiProperties.ZOOKEEPER_SECURITY_KEYSTORE_PASSWD) != null
-            && StringUtils.isNotBlank(getProperty(NiFiProperties.ZOOKEEPER_SECURITY_TRUSTSTORE))
-            && getProperty(NiFiProperties.ZOOKEEPER_SECURITY_TRUSTSTORE_PASSWD) != null;
+        return StringUtils.isNotBlank(getProperty(ZOOKEEPER_CLIENT_SECURE))
+                && StringUtils.isNotBlank(getProperty(ZOOKEEPER_SECURITY_KEYSTORE))
+                && getProperty(ZOOKEEPER_SECURITY_KEYSTORE_PASSWD) != null
+                && StringUtils.isNotBlank(getProperty(ZOOKEEPER_SECURITY_TRUSTSTORE))
+                && getProperty(ZOOKEEPER_SECURITY_TRUSTSTORE_PASSWD) != null;
     }
 
     public boolean isTlsConfigurationPresent() {
-        return StringUtils.isNotBlank(getProperty(NiFiProperties.SECURITY_KEYSTORE))
-            && getProperty(NiFiProperties.SECURITY_KEYSTORE_PASSWD) != null
-            && StringUtils.isNotBlank(getProperty(NiFiProperties.SECURITY_TRUSTSTORE))
-            && getProperty(NiFiProperties.SECURITY_TRUSTSTORE_PASSWD) != null;
-    }
-
-    public int size() {
-        return getPropertyKeys().size();
-    }
-
-    public String getFlowFileRepoEncryptionKeyId() {
-        return getProperty(FLOWFILE_REPOSITORY_ENCRYPTION_KEY_ID);
-    }
-
-    /**
-     * Returns the active flowfile repository encryption key if a {@code StaticKeyProvider} is in use.
-     * If no key ID is specified in the properties file, the default
-     * {@code nifi.flowfile.repository.encryption.key} value is returned. If a key ID is specified in
-     * {@code nifi.flowfile.repository.encryption.key.id}, it will attempt to read from
-     * {@code nifi.flowfile.repository.encryption.key.id.XYZ} where {@code XYZ} is the provided key
-     * ID. If that value is empty, it will use the default property
-     * {@code nifi.flowfile.repository.encryption.key}.
-     *
-     * @return the flowfile repository encryption key in hex form
-     */
-    public String getFlowFileRepoEncryptionKey() {
-        String keyId = getFlowFileRepoEncryptionKeyId();
-        String keyKey = StringUtils.isBlank(keyId) ? FLOWFILE_REPOSITORY_ENCRYPTION_KEY : FLOWFILE_REPOSITORY_ENCRYPTION_KEY + ".id." + keyId;
-        return getProperty(keyKey, getProperty(FLOWFILE_REPOSITORY_ENCRYPTION_KEY));
-    }
-
-    /**
-     * Returns a map of keyId -> key in hex loaded from the {@code nifi.properties} file if a
-     * {@code StaticKeyProvider} is defined. If {@code FileBasedKeyProvider} is defined, use
-     * {@code CryptoUtils#readKeys()} instead -- this method will return an empty map.
-     *
-     * @return a Map of the keys identified by key ID
-     */
-    public Map<String, String> getFlowFileRepoEncryptionKeys() {
-        return getRepositoryEncryptionKeys("flowfile");
-    }
-
-    /**
-     * Returns the map of key IDs to keys retrieved from the properties for the given repository type.
-     *
-     * @param repositoryType "provenance", "content", or "flowfile"
-     * @return the key map
-     */
-    private Map<String, String> getRepositoryEncryptionKeys(String repositoryType) {
-        Map<String, String> keys = new HashMap<>();
-        List<String> keyProperties = getRepositoryEncryptionKeyProperties(repositoryType);
-        if (keyProperties.size() == 0) {
-            logger.warn("No " + repositoryType + " repository encryption key properties were available. Check the "
-                    + "exact format specified in the Admin Guide - Encrypted " + StringUtils.toTitleCase(repositoryType)
-                    + " Repository Properties");
-            return keys;
-        }
-        final String REPOSITORY_ENCRYPTION_KEY = getRepositoryEncryptionKey(repositoryType);
-        final String REPOSITORY_ENCRYPTION_KEY_ID = getRepositoryEncryptionKeyId(repositoryType);
-
-        // Retrieve the actual key values and store non-empty values in the map
-        for (String prop : keyProperties) {
-            logger.debug("Parsing " + prop);
-            final String value = getProperty(prop);
-            if (!StringUtils.isBlank(value)) {
-                // If this property is .key (the actual hex key), put it in the map under the value of .key.id (i.e. key1)
-                if (prop.equalsIgnoreCase(REPOSITORY_ENCRYPTION_KEY)) {
-                    keys.put(getProperty(REPOSITORY_ENCRYPTION_KEY_ID), value);
-                } else {
-                    // Extract nifi.*.repository.encryption.key.id.key1 -> key1
-                    String extractedKeyId = prop.substring(prop.lastIndexOf(".") + 1);
-                    if (keys.containsKey(extractedKeyId)) {
-                        logger.warn("The {} repository encryption key map already contains an entry for {}. Ignoring new value from {}", repositoryType, extractedKeyId, prop);
-                    } else {
-                        keys.put(extractedKeyId, value);
-                    }
-                }
-            }
-        }
-        return keys;
-    }
-
-    /**
-     * Returns the list of encryption key properties for the specified repository type. If an unknown repository type
-     * is provided, returns an empty list.
-     *
-     * @param repositoryType "provenance", "content", or "flowfile"
-     * @return the list of encryption key properties
-     */
-    private List<String> getRepositoryEncryptionKeyProperties(String repositoryType) {
-        switch (repositoryType.toLowerCase()) {
-            case "flowfile":
-                return getFlowFileRepositoryEncryptionKeyProperties();
-            case "content":
-                return getContentRepositoryEncryptionKeyProperties();
-            case "provenance":
-                return getProvenanceRepositoryEncryptionKeyProperties();
-            default:
-                return Collections.emptyList();
-        }
-    }
-
-    /**
-     * Returns the encryption key property key for the specified repository type. If an unknown repository type
-     * is provided, returns an empty string.
-     *
-     * @param repositoryType "provenance", "content", or "flowfile"
-     * @return the encryption key property (i.e. {@code FLOWFILE_REPOSITORY_ENCRYPTION_KEY})
-     */
-    private String getRepositoryEncryptionKey(String repositoryType) {
-        switch (repositoryType.toLowerCase()) {
-            case "flowfile":
-                return FLOWFILE_REPOSITORY_ENCRYPTION_KEY;
-            case "content":
-                return CONTENT_REPOSITORY_ENCRYPTION_KEY;
-            case "provenance":
-                return PROVENANCE_REPO_ENCRYPTION_KEY;
-            default:
-                return "";
-        }
-    }
-
-    /**
-     * Returns the encryption key ID property key for the specified repository type. If an unknown repository type
-     * is provided, returns an empty string.
-     *
-     * @param repositoryType "provenance", "content", or "flowfile"
-     * @return the encryption key ID property (i.e. {@code FLOWFILE_REPOSITORY_ENCRYPTION_KEY_ID})
-     */
-    private String getRepositoryEncryptionKeyId(String repositoryType) {
-        switch (repositoryType.toLowerCase()) {
-            case "flowfile":
-                return FLOWFILE_REPOSITORY_ENCRYPTION_KEY_ID;
-            case "content":
-                return CONTENT_REPOSITORY_ENCRYPTION_KEY_ID;
-            case "provenance":
-                return PROVENANCE_REPO_ENCRYPTION_KEY_ID;
-            default:
-                return "";
-        }
-    }
-
-    public String getProvenanceRepoEncryptionKeyId() {
-        return getProperty(PROVENANCE_REPO_ENCRYPTION_KEY_ID);
-    }
-
-    /**
-     * Returns the active provenance repository encryption key if a {@code StaticKeyProvider} is in use.
-     * If no key ID is specified in the properties file, the default
-     * {@code nifi.provenance.repository.encryption.key} value is returned. If a key ID is specified in
-     * {@code nifi.provenance.repository.encryption.key.id}, it will attempt to read from
-     * {@code nifi.provenance.repository.encryption.key.id.XYZ} where {@code XYZ} is the provided key
-     * ID. If that value is empty, it will use the default property
-     * {@code nifi.provenance.repository.encryption.key}.
-     *
-     * @return the provenance repository encryption key in hex form
-     */
-    public String getProvenanceRepoEncryptionKey() {
-        String keyId = getProvenanceRepoEncryptionKeyId();
-        String keyKey = StringUtils.isBlank(keyId) ? PROVENANCE_REPO_ENCRYPTION_KEY : PROVENANCE_REPO_ENCRYPTION_KEY + ".id." + keyId;
-        return getProperty(keyKey, getProperty(PROVENANCE_REPO_ENCRYPTION_KEY));
-    }
-
-    /**
-     * Returns a map of keyId -> key in hex loaded from the {@code nifi.properties} file if a
-     * {@code StaticKeyProvider} is defined. If {@code FileBasedKeyProvider} is defined, use
-     * {@code CryptoUtils#readKeys()} instead -- this method will return an empty map.
-     *
-     * @return a Map of the keys identified by key ID
-     */
-    public Map<String, String> getProvenanceRepoEncryptionKeys() {
-        return getRepositoryEncryptionKeys("provenance");
-    }
-
-    public String getContentRepositoryEncryptionKeyId() {
-        return getProperty(CONTENT_REPOSITORY_ENCRYPTION_KEY_ID);
-    }
-
-    /**
-     * Returns the active content repository encryption key if a {@code StaticKeyProvider} is in use.
-     * If no key ID is specified in the properties file, the default
-     * {@code nifi.content.repository.encryption.key} value is returned. If a key ID is specified in
-     * {@code nifi.content.repository.encryption.key.id}, it will attempt to read from
-     * {@code nifi.content.repository.encryption.key.id.XYZ} where {@code XYZ} is the provided key
-     * ID. If that value is empty, it will use the default property
-     * {@code nifi.content.repository.encryption.key}.
-     *
-     * @return the content repository encryption key in hex form
-     */
-    public String getContentRepositoryEncryptionKey() {
-        String keyId = getContentRepositoryEncryptionKeyId();
-        String keyKey = StringUtils.isBlank(keyId) ? CONTENT_REPOSITORY_ENCRYPTION_KEY : CONTENT_REPOSITORY_ENCRYPTION_KEY + ".id." + keyId;
-        return getProperty(keyKey, getProperty(CONTENT_REPOSITORY_ENCRYPTION_KEY));
-    }
-
-    /**
-     * Returns a map of keyId -> key in hex loaded from the {@code nifi.properties} file if a
-     * {@code StaticKeyProvider} is defined. If {@code FileBasedKeyProvider} is defined, use
-     * {@code CryptoUtils#readKeys()} instead -- this method will return an empty map.
-     *
-     * @return a Map of the keys identified by key ID
-     */
-    public Map<String, String> getContentRepositoryEncryptionKeys() {
-        return getRepositoryEncryptionKeys("content");
-    }
-
-    /**
-     * Returns the allowed proxy hostnames (and IP addresses) as a comma-delimited string.
-     * The hosts have been normalized to the form {@code somehost.com}, {@code somehost.com:port}, or {@code 127.0.0.1}.
-     * <p>
-     * Note: Calling {@code NiFiProperties.getProperty(NiFiProperties.WEB_PROXY_HOST)} will not normalize the hosts.
-     *
-     * @return the hostname(s)
-     */
-    public String getAllowedHosts() {
-        return StringUtils.join(getAllowedHostsAsList(), ",");
+        return StringUtils.isNotBlank(getProperty(SECURITY_KEYSTORE))
+                && getProperty(SECURITY_KEYSTORE_PASSWD) != null
+                && StringUtils.isNotBlank(getProperty(SECURITY_TRUSTSTORE))
+                && getProperty(SECURITY_TRUSTSTORE_PASSWD) != null;
     }
 
     /**
@@ -1844,32 +1678,11 @@ public abstract class NiFiProperties {
         }
     }
 
-    private List<String> getFlowFileRepositoryEncryptionKeyProperties() {
-        // Filter all the property keys that define a key
-        return getPropertyKeys().stream().filter(k ->
-                k.startsWith(FLOWFILE_REPOSITORY_ENCRYPTION_KEY_ID + ".") || k.equalsIgnoreCase(FLOWFILE_REPOSITORY_ENCRYPTION_KEY)
-        ).collect(Collectors.toList());
-    }
-
-    private List<String> getProvenanceRepositoryEncryptionKeyProperties() {
-        // Filter all the property keys that define a key
-        return getPropertyKeys().stream().filter(k ->
-                k.startsWith(PROVENANCE_REPO_ENCRYPTION_KEY_ID + ".") || k.equalsIgnoreCase(PROVENANCE_REPO_ENCRYPTION_KEY)
-        ).collect(Collectors.toList());
-    }
-
-    private List<String> getContentRepositoryEncryptionKeyProperties() {
-        // Filter all the property keys that define a key
-        return getPropertyKeys().stream().filter(k ->
-                k.startsWith(CONTENT_REPOSITORY_ENCRYPTION_KEY_ID + ".") || k.equalsIgnoreCase(CONTENT_REPOSITORY_ENCRYPTION_KEY)
-        ).collect(Collectors.toList());
-    }
-
     public Long getDefaultBackPressureObjectThreshold() {
         long backPressureCount;
         try {
             String backPressureCountStr = getProperty(BACKPRESSURE_COUNT);
-            if (backPressureCountStr == null || backPressureCountStr.trim().isEmpty()) {
+            if (backPressureCountStr == null || backPressureCountStr.isBlank()) {
                 backPressureCount = DEFAULT_BACKPRESSURE_COUNT;
             } else {
                 backPressureCount = Long.parseLong(backPressureCountStr);
@@ -1887,10 +1700,93 @@ public abstract class NiFiProperties {
     /**
      * Returns the directory where the QuestDB based status repository is expected to work within.
      *
-     * @return Path object pointing to the database's folder.
+     * @return String pointing to the database's folder.
      */
-    public Path getQuestDbStatusRepositoryPath() {
-        return Paths.get(getProperty(STATUS_REPOSITORY_QUESTDB_PERSIST_LOCATION, DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_LOCATION));
+    public String getQuestDbStatusRepositoryPath() {
+        return getProperty(STATUS_REPOSITORY_QUESTDB_PERSIST_LOCATION, DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_LOCATION);
+    }
+
+    /**
+     * Returns the directory where the backup of the QuestDB based status repository is placed when the database is corrupted.
+     *
+     * @return String pointing to the backup folder.
+     */
+    public String getQuestDbStatusRepositoryBackupPath() {
+        return getProperty(STATUS_REPOSITORY_QUESTDB_PERSIST_LOCATION_BACKUP, DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_LOCATION_BACKUP);
+    }
+
+    public int getQuestDbStatusRepositoryPersistBatchSize() {
+        return Integer.parseInt(getProperty(STATUS_REPOSITORY_QUESTDB_PERSIST_BATCH_SIZE, DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_BATCH_SIZE));
+    }
+
+    public String getQuestDbStatusRepositoryPersistFrequency() {
+        return getProperty(STATUS_REPOSITORY_QUESTDB_PERSIST_FREQUENCY, DEFAULT_COMPONENT_STATUS_REPOSITORY_PERSIST_FREQUENCY);
+    }
+
+    /**
+     * @return the directory in which the Python framework source code is located
+     */
+    public File getPythonFrameworkSourceDirectory() {
+        final String directory = getProperty(PYTHON_FRAMEWORK_SOURCE_DIRECTORY);
+        return directory == null ? null : new File(directory);
+    }
+
+    /**
+     * @return a List of directories containing Python extensions
+     */
+    public List<File> getPythonExtensionsDirectories() {
+        final Collection<String> directories = getPropertiesWithPrefix(PYTHON_EXTENSION_DIRECTORY_PREFIX).values();
+        return directories.stream()
+            .distinct()
+            .map(File::new)
+            .collect(Collectors.toList());
+    }
+
+    /**
+     * Returns all properties where the property key starts with the prefix.
+     *
+     * @param prefix The exact string the returned properties should start with. Dots are considered, thus prefix "item" will return both
+     *               properties starting with "item." and "items". Properties with empty value will be included as well.
+     * @return A map of properties starting with the prefix.
+     */
+    public Map<String, String> getPropertiesWithPrefix(final String prefix) {
+        return getPropertyKeys().stream().filter(key -> key.startsWith(prefix)).collect(Collectors.toMap(key -> key, key -> getProperty(key)));
+    }
+
+    /**
+     * Returns with all the possible next "tokens" after the given prefix. An alphanumeric string between dots is considered as a "token".
+     * <p>
+     * For example if there are "parent.sub1" and a "parent.sub2" properties are set, and the prefix is "parent", the method will return
+     * with a set, consisting of "sub1" and "sub2. Only directly subsequent tokens are considered, so in case of "parent.sub1.subsub1", the
+     * result will contain "sub1" as well.
+     *
+     * @param prefix The prefix of the request.
+     * @return A set of direct subsequent tokens.
+     */
+    public Set<String> getDirectSubsequentTokens(final String prefix) {
+        final String fixedPrefix = prefix.endsWith(".") ? prefix : prefix + ".";
+
+        return getPropertyKeys().stream()
+                .filter(key -> key.startsWith(fixedPrefix))
+                .map(key -> key.substring(fixedPrefix.length()))
+                .map(key -> key.indexOf('.') == -1 ? key : key.substring(0, key.indexOf('.')))
+                .collect(Collectors.toSet());
+    }
+
+    /**
+     * @return Returns true if NiFi should execute flow analysis on the process group before committing it to a registry. Returns
+     * false otherwise.
+     */
+    public boolean flowRegistryCheckForRuleViolationsBeforeCommit() {
+        final String flowRegistryCheckForRuleViolationsBeforeCommit = getProperty(
+                FLOW_REGISTRY_CHECK_FOR_RULE_VIOLATIONS_BEFORE_COMMIT,
+                DEFAULT_FLOW_REGISTRY_CHECK_FOR_RULE_VIOLATIONS_BEFORE_COMMIT.toString());
+
+        if (!"true".equalsIgnoreCase(flowRegistryCheckForRuleViolationsBeforeCommit) && !"false".equalsIgnoreCase(flowRegistryCheckForRuleViolationsBeforeCommit)) {
+            throw new RuntimeException(String.format("%s was '%s', expected true or false", FLOW_REGISTRY_CHECK_FOR_RULE_VIOLATIONS_BEFORE_COMMIT, flowRegistryCheckForRuleViolationsBeforeCommit));
+        }
+
+        return Boolean.parseBoolean(flowRegistryCheckForRuleViolationsBeforeCommit);
     }
 
     /**
@@ -1901,9 +1797,9 @@ public abstract class NiFiProperties {
      * file specified cannot be found/read a runtime exception will be thrown.
      * If one is not specified an empty object will be returned.
      *
-     * @param propertiesFilePath   if provided properties will be loaded from
-     *                             given file; else will be loaded from System property.
-     *                             Can be null. Passing {@code ""} skips any attempt to load from the file system.
+     * @param propertiesFilePath if provided properties will be loaded from
+     *                           given file; else will be loaded from System property.
+     *                           Can be null. Passing {@code ""} skips any attempt to load from the file system.
      * @return NiFiProperties
      */
     public static NiFiProperties createBasicNiFiProperties(final String propertiesFilePath) {
@@ -1927,7 +1823,7 @@ public abstract class NiFiProperties {
      * @return NiFiProperties
      */
     public static NiFiProperties createBasicNiFiProperties(final String propertiesFilePath, final Map<String, String> additionalProperties) {
-        final Map<String, String> addProps = (additionalProperties == null) ? Collections.EMPTY_MAP : additionalProperties;
+        final Map<String, String> addProps = (additionalProperties == null) ? Collections.emptyMap() : additionalProperties;
         final Properties properties = new Properties();
         addProps.forEach(properties::put);
 
@@ -1960,8 +1856,28 @@ public abstract class NiFiProperties {
 
         // The Properties(Properties) constructor does NOT inherit the provided values, just uses them as default values
         if (additionalProperties != null) {
-            additionalProperties.forEach(properties::put);
+            properties.putAll(additionalProperties);
         }
+
+        return createNiFiProperties(properties);
+    }
+
+    public static NiFiProperties createBasicNiFiProperties(final InputStream inputStream) {
+        return createBasicNiFiProperties(inputStream, null);
+    }
+
+    public static NiFiProperties createBasicNiFiProperties(final InputStream inputStream, final Properties additionalProperties) {
+        final Properties properties = new Properties();
+        readFromInputStream(inputStream, properties);
+
+        if (additionalProperties != null) {
+            properties.putAll(additionalProperties);
+        }
+
+        return createNiFiProperties(properties);
+    }
+
+    private static NiFiProperties createNiFiProperties(final Properties properties) {
         return new NiFiProperties() {
             @Override
             public String getProperty(String key) {
@@ -1972,13 +1888,16 @@ public abstract class NiFiProperties {
             public Set<String> getPropertyKeys() {
                 return properties.stringPropertyNames();
             }
+
+            @Override
+            public int size() {
+                return getPropertyKeys().size();
+            }
         };
     }
 
     private static void readFromPropertiesFile(String propertiesFilePath, Properties properties) {
-        final String nfPropertiesFilePath = (propertiesFilePath == null)
-                ? System.getProperty(NiFiProperties.PROPERTIES_FILE_PATH)
-                : propertiesFilePath;
+        final String nfPropertiesFilePath = (propertiesFilePath == null) ? System.getProperty(PROPERTIES_FILE_PATH) : propertiesFilePath;
         if (nfPropertiesFilePath != null) {
             final File propertiesFile = new File(nfPropertiesFilePath.trim());
             if (!propertiesFile.exists()) {
@@ -1989,24 +1908,22 @@ public abstract class NiFiProperties {
                 throw new RuntimeException("Properties file exists but cannot be read '"
                         + propertiesFile.getAbsolutePath() + "'");
             }
-            InputStream inStream = null;
-            try {
-                inStream = new BufferedInputStream(new FileInputStream(propertiesFile));
+
+            try (final InputStream fileIn = new FileInputStream(propertiesFile);
+                 final InputStream inStream = new BufferedInputStream(fileIn)) {
+
                 properties.load(inStream);
             } catch (final Exception ex) {
-                throw new RuntimeException("Cannot load properties file due to "
-                        + ex.getLocalizedMessage(), ex);
-            } finally {
-                if (null != inStream) {
-                    try {
-                        inStream.close();
-                    } catch (final Exception ex) {
-                        /**
-                         * do nothing *
-                         */
-                    }
-                }
+                throw new RuntimeException("Cannot load properties file due to " + ex.getLocalizedMessage(), ex);
             }
+        }
+    }
+
+    private static void readFromInputStream(final InputStream inputStream, final Properties properties) {
+        try {
+            properties.load(inputStream);
+        } catch (final Exception ex) {
+            throw new RuntimeException("Cannot load properties file due to " + ex.getLocalizedMessage(), ex);
         }
     }
 
@@ -2022,5 +1939,10 @@ public abstract class NiFiProperties {
             throw new IllegalArgumentException(remoteInputHost + " is not a correct value for " + REMOTE_INPUT_HOST + ". It should be a valid hostname without protocol or port.");
         }
         // Other properties to validate...
+    }
+
+    @Override
+    public String toString() {
+        return "NiFiProperties instance with " + size() + " properties";
     }
 }

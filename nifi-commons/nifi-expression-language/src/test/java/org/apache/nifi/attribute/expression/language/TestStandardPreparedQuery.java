@@ -19,22 +19,29 @@ package org.apache.nifi.attribute.expression.language;
 import org.apache.nifi.parameter.Parameter;
 import org.apache.nifi.parameter.ParameterDescriptor;
 import org.apache.nifi.parameter.ParameterLookup;
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class TestStandardPreparedQuery {
+
+    private static final Logger logger = LoggerFactory.getLogger(TestStandardPreparedQuery.class);
 
     @Test
     public void testSimpleReference() {
@@ -55,7 +62,8 @@ public class TestStandardPreparedQuery {
     }
 
     @Test
-    @Ignore("Intended for manual performance testing; should not be run in an automated environment")
+    @EnabledIfSystemProperty(named = "nifi.test.performance", matches = "true",
+            disabledReason = "Intended for manual performance testing; should not be run in an automated environment")
     public void test10MIterations() {
         final Map<String, String> attrs = new HashMap<>();
         attrs.put("xx", "world");
@@ -66,22 +74,7 @@ public class TestStandardPreparedQuery {
             assertEquals("world", prepared.evaluateExpressions(new StandardEvaluationContext(attrs), null));
         }
         final long nanos = System.nanoTime() - start;
-        System.out.println(TimeUnit.NANOSECONDS.toMillis(nanos));
-    }
-
-    @Test
-    @Ignore("Takes too long")
-    public void test10MIterationsWithQuery() {
-        final Map<String, String> attrs = new HashMap<>();
-        attrs.put("xx", "world");
-
-        final long start = System.nanoTime();
-        for (int i = 0; i < 10000000; i++) {
-            assertEquals("world", Query.evaluateExpressions("${xx}", attrs, ParameterLookup.EMPTY));
-        }
-        final long nanos = System.nanoTime() - start;
-        System.out.println(TimeUnit.NANOSECONDS.toMillis(nanos));
-
+        logger.info("{}", TimeUnit.NANOSECONDS.toMillis(nanos));
     }
 
     @Test
@@ -243,8 +236,8 @@ public class TestStandardPreparedQuery {
     @Test
     public void testSensitiveParameter() {
         final Map<String, Parameter> parameters = new HashMap<>();
-        parameters.put("param", new Parameter(new ParameterDescriptor.Builder().name("param").build(), "value"));
-        parameters.put("sensi", new Parameter(new ParameterDescriptor.Builder().name("sensi").sensitive(true).build(), "secret"));
+        parameters.put("param", new Parameter.Builder().name("param").value("value").build());
+        parameters.put("sensi", new Parameter.Builder().name("sensi").sensitive(true).value("secret").build());
 
         final ParameterLookup parameterLookup = new ParameterLookup() {
             @Override
@@ -274,19 +267,31 @@ public class TestStandardPreparedQuery {
     }
 
     @Test
+    public void testEvaluateExpressionLanguageVariableValueSensitiveParameterReference() {
+        final String parameterName = "protected";
+        final String parameterValue = "secret";
+
+        final ParameterLookup parameterLookup = mock(ParameterLookup.class);
+        final ParameterDescriptor parameterDescriptor = new ParameterDescriptor.Builder().name(parameterName).sensitive(true).build();
+        final Parameter parameter = new Parameter.Builder().descriptor(parameterDescriptor).value(parameterValue).build();
+        when(parameterLookup.getParameter(eq(parameterName))).thenReturn(Optional.of(parameter));
+        when(parameterLookup.isEmpty()).thenReturn(false);
+
+        final Map<String, String> variables = new LinkedHashMap<>();
+        final String variableName = "variable";
+        final String variableValue = String.format("#{%s}", parameterName);
+        variables.put(variableName, variableValue);
+
+        final StandardEvaluationContext context = new StandardEvaluationContext(variables, Collections.emptyMap(), parameterLookup);
+
+        final String queryExpression = String.format("${%s:evaluateELString()}", variableName);
+        final String value = Query.prepare(queryExpression).evaluateExpressions(context, null);
+
+        assertNotEquals(parameterValue, value);
+    }
+
+    @Test
     public void testVariableImpacted() {
-        final Set<String> attr = new HashSet<>();
-        attr.add("attr");
-
-        final Set<String> attr2 = new HashSet<>();
-        attr2.add("attr");
-        attr2.add("attr2");
-
-        final Set<String> abc = new HashSet<>();
-        abc.add("a");
-        abc.add("b");
-        abc.add("c");
-
         assertTrue(Query.prepare("${attr}").getVariableImpact().isImpacted("attr"));
         assertFalse(Query.prepare("${attr}").getVariableImpact().isImpacted("attr2"));
         assertTrue(Query.prepare("${attr:trim():toUpper():equals('abc')}").getVariableImpact().isImpacted("attr"));
@@ -328,8 +333,7 @@ public class TestStandardPreparedQuery {
     }
 
     private String evaluate(final String query, final Map<String, String> attrs) {
-        final String evaluated = ((StandardPreparedQuery) Query.prepare(query)).evaluateExpressions(new StandardEvaluationContext(attrs), null);
-        return evaluated;
+        return Query.prepare(query).evaluateExpressions(new StandardEvaluationContext(attrs), null);
     }
 
 }

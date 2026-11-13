@@ -18,13 +18,11 @@ package org.apache.nifi.controller.repository;
 
 import org.apache.nifi.controller.repository.claim.ContentClaim;
 import org.apache.nifi.controller.repository.claim.ResourceClaim;
-import org.apache.nifi.controller.repository.claim.ResourceClaimManager;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Path;
-import java.util.Collection;
 import java.util.Set;
 
 /**
@@ -36,14 +34,18 @@ import java.util.Set;
 public interface ContentRepository {
 
     /**
-     * Initializes the Content Repository, providing to it the
-     * ContentClaimManager that is to be used for interacting with Content
-     * Claims
-     *
-     * @param claimManager to handle claims
-     * @throws java.io.IOException if unable to init
+     * Default for {@link #getMaxAppendableClaimBytes()}, matching {@code nifi.content.claim.max.appendable.size}.
      */
-    void initialize(ResourceClaimManager claimManager) throws IOException;
+    long DEFAULT_MAX_APPENDABLE_CLAIM_BYTES = 51_200L;
+
+    /**
+     * Initializes the Content Repository, providing to it the
+     * ContentRepositoryContext.
+     *
+     * @param context to initialize repository
+     * @throws IOException if unable to init
+     */
+    void initialize(ContentRepositoryContext context) throws IOException;
 
     /**
      * Shuts down the Content Repository, freeing any resources that may be
@@ -61,7 +63,7 @@ public interface ContentRepository {
      * @param containerName name of container to check capacity on
      * @return the maximum number of bytes that can be stored in the storage
      * mechanism that backs the container with the given name
-     * @throws java.io.IOException if unable to check capacity
+     * @throws IOException if unable to check capacity
      * @throws IllegalArgumentException if no container exists with the given
      * name
      */
@@ -71,7 +73,7 @@ public interface ContentRepository {
      * @param containerName to check space on
      * @return the number of bytes available to be used used by the storage
      * mechanism that backs the container with the given name
-     * @throws java.io.IOException if unable to check space
+     * @throws IOException if unable to check space
      * @throws IllegalArgumentException if no container exists with the given
      * name
      */
@@ -93,9 +95,24 @@ public interface ContentRepository {
      * loss tolerant. If true the repository might choose more volatile storage
      * options which could increase performance for a tradeoff with reliability
      * @return newly created claim
-     * @throws java.io.IOException if unable to create claim
+     * @throws IOException if unable to create claim
      */
     ContentClaim create(boolean lossTolerant) throws IOException;
+
+    /**
+     * Creates a new content claim for the given context. The default implementation delegates to {@link #create(boolean)}.
+     */
+    default ContentClaim create(final ContentClaimCreationContext context) throws IOException {
+        return create(context.getLossTolerance().isLossTolerant());
+    }
+
+    /**
+     * Returns how many bytes may be written to one Content Claim before the framework creates a new one.
+     * Implementations must return an in-memory value; I/O is not allowed. The value may change at runtime.
+     */
+    default long getMaxAppendableClaimBytes() {
+        return DEFAULT_MAX_APPENDABLE_CLAIM_BYTES;
+    }
 
     /**
      * Increments the number of claimants for the given claim
@@ -144,24 +161,6 @@ public interface ContentRepository {
      * destination prior to the error will be destroyed
      */
     ContentClaim clone(ContentClaim original, boolean lossTolerant) throws IOException;
-
-    /**
-     * Creates a new content item that is the merger in iteration order of all
-     * content for the given claims
-     *
-     * @return the size of the destination
-     * @param claims the claims to merge which will be combined in order of
-     * collection iteration
-     * @param destination the claim to write the merged content to
-     * @param header if supplied will be prepended to the output
-     * @param footer if supplied will be appended to the output
-     * @param demarcator if supplied will be placed in between each merged
-     * object
-     * @throws IOException if unable to merge
-     * @throws IllegalArgumentException if the given destination is included in
-     * the given claims
-     */
-    long merge(Collection<ContentClaim> claims, ContentClaim destination, byte[] header, byte[] footer, byte[] demarcator) throws IOException;
 
     /**
      * Imports content from the given path creating a new content object and
@@ -242,6 +241,13 @@ public interface ContentRepository {
      * @throws IOException if size check failed
      */
     long size(ContentClaim claim) throws IOException;
+
+    /**
+     * @param claim to get size of
+     * @return size in bytes of the file/object backing the given resource claim, or 0 if this operation is not supported by the implementation
+     * @throws IOException if size check failed
+     */
+    long size(ResourceClaim claim) throws IOException;
 
     /**
      * Provides access to the input stream for the given claim

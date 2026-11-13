@@ -16,10 +16,13 @@
  */
 package org.apache.nifi.attribute.expression.language;
 
-
 import org.apache.nifi.attribute.expression.language.exception.AttributeExpressionLanguageException;
 import org.apache.nifi.expression.AttributeValueDecorator;
 import org.apache.nifi.processor.exception.ProcessException;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 
 /**
  * An implementation of PreparedQuery that throws an
@@ -50,5 +53,15 @@ public class InvalidPreparedQuery implements PreparedQuery {
     @Override
     public VariableImpact getVariableImpact() {
         return VariableImpact.NEVER_IMPACTED;
+    }
+
+    @Override
+    public Set<String> getExplicitlyReferencedAttributes() {
+        return Collections.emptySet();
+    }
+
+    @Override
+    public List<Expression> getExpressions() {
+        return List.of();
     }
 }

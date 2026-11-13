@@ -1,0 +1,69 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.shared.azure.eventhubs;
+
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.expression.ExpressionLanguageScope;
+import org.apache.nifi.oauth2.OAuth2AccessTokenProvider;
+import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.proxy.ProxyConfiguration;
+import org.apache.nifi.proxy.ProxySpec;
+import org.apache.nifi.services.azure.AzureIdentityFederationTokenProvider;
+
+/**
+ * Azure Event Hub Component interface with shared properties
+ */
+public interface AzureEventHubComponent {
+    PropertyDescriptor TRANSPORT_TYPE = new PropertyDescriptor.Builder()
+            .name("Transport Type")
+            .description("Advanced Message Queuing Protocol Transport Type for communication with Azure Event Hubs")
+            .allowableValues(AzureEventHubTransportType.class)
+            .defaultValue(AzureEventHubTransportType.AMQP)
+            .required(true)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .expressionLanguageSupported(ExpressionLanguageScope.NONE)
+            .build();
+    PropertyDescriptor AUTHENTICATION_STRATEGY = new PropertyDescriptor.Builder()
+            .name("Authentication Strategy")
+            .description("Specifies the strategy used for authenticating to Azure Event Hubs")
+            .allowableValues(AzureEventHubAuthenticationStrategy.class)
+            .defaultValue(AzureEventHubAuthenticationStrategy.MANAGED_IDENTITY.getValue())
+            .required(true)
+            .expressionLanguageSupported(ExpressionLanguageScope.NONE)
+            .build();
+    PropertyDescriptor OAUTH2_ACCESS_TOKEN_PROVIDER = new PropertyDescriptor.Builder()
+            .name("Event Hubs Access Token Provider")
+            .description("Controller Service providing OAuth2 Access Tokens for authenticating to Azure Event Hubs")
+            .identifiesControllerService(OAuth2AccessTokenProvider.class)
+            .required(true)
+            .expressionLanguageSupported(ExpressionLanguageScope.NONE)
+            .dependsOn(AUTHENTICATION_STRATEGY, AzureEventHubAuthenticationStrategy.OAUTH2)
+            .build();
+    PropertyDescriptor IDENTITY_FEDERATION_TOKEN_PROVIDER = new PropertyDescriptor.Builder()
+            .name("Event Hubs Identity Federation Token Provider")
+            .description("Controller Service exchanging workload identity tokens for Azure AD access tokens when authenticating to Azure Event Hubs.")
+            .identifiesControllerService(AzureIdentityFederationTokenProvider.class)
+            .required(true)
+            .expressionLanguageSupported(ExpressionLanguageScope.NONE)
+            .dependsOn(AUTHENTICATION_STRATEGY, AzureEventHubAuthenticationStrategy.IDENTITY_FEDERATION)
+            .build();
+    ProxySpec[] PROXY_SPECS = {ProxySpec.HTTP, ProxySpec.HTTP_AUTH};
+    PropertyDescriptor PROXY_CONFIGURATION_SERVICE = new PropertyDescriptor.Builder()
+            .fromPropertyDescriptor(ProxyConfiguration.createProxyConfigPropertyDescriptor(PROXY_SPECS))
+            .dependsOn(TRANSPORT_TYPE, AzureEventHubTransportType.AMQP_WEB_SOCKETS)
+            .build();
+}

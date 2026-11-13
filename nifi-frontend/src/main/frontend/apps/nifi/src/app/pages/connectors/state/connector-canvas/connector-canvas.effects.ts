@@ -1,0 +1,2490 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { DestroyRef, Injectable, inject } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Actions, createEffect, ofType } from '@ngrx/effects';
+import { concatLatestFrom } from '@ngrx/operators';
+import { Action, Store } from '@ngrx/store';
+import { Router } from '@angular/router';
+import { asyncScheduler, EMPTY, forkJoin, from, interval, NEVER, Observable, of } from 'rxjs';
+import {
+    catchError,
+    distinctUntilChanged,
+    exhaustMap,
+    filter,
+    map,
+    mergeMap,
+    startWith,
+    switchMap,
+    take,
+    takeUntil,
+    tap,
+    throttleTime
+} from 'rxjs/operators';
+import {
+    ComponentType,
+    ComponentTypeNamePipe,
+    ConnectionDTO,
+    ConnectionEntity,
+    FlowDTO,
+    LARGE_DIALOG,
+    LabelEntity,
+    MEDIUM_DIALOG,
+    NiFiCommon,
+    SMALL_DIALOG,
+    Permissions,
+    PortEntity,
+    Position,
+    ProcessorEntity,
+    RemoteProcessGroupEntity,
+    sanitizePosition,
+    XL_DIALOG
+} from '@nifi/shared';
+import { selectCurrentUser } from '../../../../state/current-user/current-user.selectors';
+import {
+    selectExtensionTypesLoadingStatus,
+    selectPrioritizerTypes,
+    selectProcessorTypes
+} from '../../../../state/extension-types/extension-types.selectors';
+import {
+    selectPropertyVerificationResults,
+    selectPropertyVerificationStatus
+} from '../../../../state/property-verification/property-verification.selectors';
+import { MatDialog } from '@angular/material/dialog';
+import { ConnectorService } from '../../service/connector.service';
+import { ErrorHelper } from '../../../../service/error-helper.service';
+import { ErrorContextKey } from '../../../../state/error';
+import * as ErrorActions from '../../../../state/error/error.actions';
+import { BackNavigation } from '../../../../state/navigation';
+import {
+    EditComponentDialogRequest,
+    EditConnectionDialogRequest,
+    UpdateConnectionRequest
+} from '../../../../state/shared';
+import { EditProcessor } from '../../../../ui/common/component-dialogs/edit-processor/edit-processor.component';
+import { EditConnectionComponent } from '../../../../ui/common/component-dialogs/edit-connection/edit-connection.component';
+import { EditPort } from '../../../../ui/common/component-dialogs/edit-port/edit-port.component';
+import { EditLabel } from '../../../../ui/common/component-dialogs/edit-label/edit-label.component';
+import { EditProcessGroup } from '../../../../ui/common/component-dialogs/edit-process-group/edit-process-group.component';
+import { EditRemoteProcessGroup } from '../../../../ui/common/component-dialogs/edit-remote-process-group/edit-remote-process-group.component';
+import { CreateConnection as CreateConnectionDialog } from '../../../../ui/common/component-dialogs/create-connection/create-connection.component';
+import { CreatePort } from '../../../../ui/common/component-dialogs/create-port/create-port.component';
+import { CreateProcessGroup } from '../../../../ui/common/component-dialogs/create-process-group/create-process-group.component';
+import { CreateProcessor } from '../../../../ui/common/component-dialogs/create-processor/create-processor.component';
+import { CreateRemoteProcessGroup } from '../../../../ui/common/component-dialogs/create-remote-process-group/create-remote-process-group.component';
+import * as ConnectorCanvasActions from './connector-canvas.actions';
+import * as ConnectorControllerServicesActions from '../connector-controller-services/connector-controller-services.actions';
+import { bindConnectorParameterContext } from './bind-connector-parameter-context';
+import { bindGoToService } from './bind-go-to-service';
+import { SelectedComponent } from './connector-canvas.actions';
+import * as EmptyQueueActions from '../../../../state/empty-queue/empty-queue.actions';
+import {
+    selectBreadcrumbs,
+    selectConnections,
+    selectConnectorId,
+    selectConnectorIdFromRoute,
+    selectHasLoadedFlow,
+    selectInputPort,
+    selectLoadingStatus,
+    selectMaxConnectionZIndex,
+    selectMaxLabelZIndex,
+    selectOptimisticCacheSnapshot,
+    selectOutputPort,
+    selectParentProcessGroupId,
+    selectPendingAuthoritativeSnapshot,
+    selectProcessGroup,
+    selectProcessGroupId,
+    selectProcessGroupIdFromRoute,
+    selectProcessor,
+    selectRemoteProcessGroup,
+    selectSaving
+} from './connector-canvas.selectors';
+import { selectDocumentVisibilityState } from '../../../../state/document-visibility/document-visibility.selectors';
+import { DocumentVisibility } from '../../../../state/document-visibility';
+import type { ConnectorCanvasComponentEntity, ConnectorCanvasCreatedComponent } from './index';
+import { ClusterConnectionService } from '../../../../service/cluster-connection.service';
+import { ConnectorEditService } from '../../service/connector-edit.service';
+import { HttpErrorResponse } from '@angular/common/http';
+import { resetConnectedStateChanged } from '../../../../state/cluster-summary/cluster-summary.actions';
+import { selectConnectedStateChanged } from '../../../../state/cluster-summary/cluster-summary.selectors';
+import { FlowService } from '../../../flow-designer/service/flow.service';
+import {
+    getComponentTypeForDestination,
+    getComponentTypeForSource
+} from '../../../../ui/common/utils/component-state.utils';
+
+/**
+ * Shallow-copies `entity` with `permissions.canWrite` forced to false.
+ * `operatePermissions.canWrite` is rewritten only when that field is already
+ * present. Connection, label, funnel, and process group entities do not
+ * declare it, and a read-only dialog must not invent the field.
+ */
+function withReadonlyPermissions<E extends { permissions: Permissions; operatePermissions?: Permissions }>(
+    entity: E
+): E {
+    return {
+        ...entity,
+        permissions: { ...entity.permissions, canWrite: false },
+        ...(entity.operatePermissions ? { operatePermissions: { ...entity.operatePermissions, canWrite: false } } : {})
+    };
+}
+
+interface ConnectionEndpoint {
+    componentId: string;
+    componentType: ComponentType;
+}
+
+@Injectable()
+export class ConnectorCanvasEffects {
+    private actions$ = inject(Actions);
+    private store = inject(Store);
+    private router = inject(Router);
+    private connectorService = inject(ConnectorService);
+    private errorHelper = inject(ErrorHelper);
+    private componentTypeNamePipe = inject(ComponentTypeNamePipe);
+    private dialog = inject(MatDialog);
+    private destroyRef = inject(DestroyRef);
+    private clusterConnectionService = inject(ClusterConnectionService);
+    private connectorEditService = inject(ConnectorEditService);
+    private flowService = inject(FlowService);
+
+    /**
+     * Timestamp of the most recent reload (epoch millis). Used by the document
+     * visibility subscription to debounce "tab refocus" reloads so that
+     * switching tabs in quick succession does not produce a thrash of loads.
+     */
+    private lastReload = 0;
+
+    /**
+     * Warn-once dedupe state for position sanitization: emits at most one
+     * console.warn per component id for the lifetime of this effects instance.
+     */
+    private readonly warnedPositionIds = new Set<string>();
+
+    constructor() {
+        // When the document becomes visible after having been hidden long enough
+        // for the polling interval to be skipped, trigger a reload so the canvas
+        // does not display stale bulletins / status while the next interval tick
+        // is pending. The 30 second floor matches the polling cadence and keeps
+        // rapid tab switches from forcing a fresh load every time.
+        this.store
+            .select(selectDocumentVisibilityState)
+            .pipe(
+                takeUntilDestroyed(this.destroyRef),
+                filter((documentVisibility) => documentVisibility.documentVisibility === DocumentVisibility.Visible),
+                filter(
+                    (documentVisibility) =>
+                        documentVisibility.changedTimestamp - this.lastReload > 30 * NiFiCommon.MILLIS_PER_SECOND
+                )
+            )
+            .subscribe(() => {
+                this.store.dispatch(ConnectorCanvasActions.reloadConnectorFlow());
+            });
+    }
+
+    loadConnectorFlow$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadConnectorFlow),
+            concatLatestFrom(() => [
+                this.store.select(selectHasLoadedFlow),
+                this.store.select(selectConnectedStateChanged),
+                this.store.select(selectPendingAuthoritativeSnapshot),
+                this.store.select(selectOptimisticCacheSnapshot)
+            ]),
+            tap(([, , clusterConnectedStateChanged]) => {
+                if (clusterConnectedStateChanged) {
+                    this.store.dispatch(ConnectorCanvasActions.markAuthoritativeSnapshotPending());
+                }
+                this.store.dispatch(resetConnectedStateChanged());
+            }),
+            switchMap(
+                ([
+                    action,
+                    hasLoadedFlow,
+                    clusterConnectedStateChanged,
+                    pendingAuthoritativeSnapshot,
+                    reconciliationSnapshot
+                ]) => {
+                    const connectedStateChanged = clusterConnectedStateChanged || pendingAuthoritativeSnapshot;
+                    return this.connectorService.getConnectorFlow(action.connectorId, action.processGroupId).pipe(
+                        map((flowResponse) => {
+                            const processGroupFlow = flowResponse.processGroupFlow;
+                            const flow = processGroupFlow?.flow;
+                            const {
+                                labels,
+                                funnels,
+                                inputPorts,
+                                outputPorts,
+                                remoteProcessGroups,
+                                processGroups,
+                                processors,
+                                connections
+                            } = this.sanitizeConnectorFlowPositions(flow);
+
+                            // Extract process group IDs for navigation
+                            const processGroupId = processGroupFlow?.id ?? null;
+                            const processGroupRevision = flowResponse.revision ?? null;
+                            const permissions = flowResponse.permissions ?? null;
+                            const parentProcessGroupId = processGroupFlow?.parentGroupId ?? null;
+
+                            // Extract breadcrumb for navigation trail
+                            const breadcrumb = processGroupFlow?.breadcrumb ?? null;
+
+                            return ConnectorCanvasActions.loadConnectorFlowSuccess({
+                                connectorId: action.connectorId,
+                                processGroupId,
+                                processGroupRevision,
+                                parentProcessGroupId,
+                                breadcrumb,
+                                permissions,
+                                labels,
+                                funnels,
+                                inputPorts,
+                                outputPorts,
+                                remoteProcessGroups,
+                                processGroups,
+                                processors,
+                                connections,
+                                reconciliationSnapshot,
+                                connectedStateChanged
+                            });
+                        }),
+                        catchError((error) => {
+                            const message = this.errorHelper.getErrorString(error);
+                            const errorContext = {
+                                errors: [message],
+                                context: ErrorContextKey.CONNECTORS
+                            };
+                            const failure = ConnectorCanvasActions.loadConnectorFlowFailure({
+                                errorContext,
+                                isRefresh: hasLoadedFlow,
+                                connectedStateChanged
+                            });
+                            return hasLoadedFlow
+                                ? from([
+                                      failure,
+                                      ErrorActions.addBannerError({
+                                          errorContext: {
+                                              errors: [message],
+                                              context: ErrorContextKey.CONNECTOR_CANVAS
+                                          }
+                                      })
+                                  ])
+                                : of(failure);
+                        })
+                    );
+                }
+            )
+        )
+    );
+
+    downloadFlow$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.downloadFlow),
+                tap(({ request }) => this.connectorService.downloadFlow(request))
+            ),
+        { dispatch: false }
+    );
+
+    loadConnectorFlowComplete$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadConnectorFlowSuccess),
+            map(() => ConnectorCanvasActions.loadConnectorFlowComplete())
+        )
+    );
+
+    /**
+     * Request the parameter context bound to the loaded process group whenever the
+     * connector canvas or controller-services page reports a successful load. The
+     * backend returns 204 No Content when no bound context exists, which surfaces as
+     * a null parameter context on the canvas state.
+     *
+     * The controller-services route is a sibling of the canvas route, not a child, so
+     * deep-linking directly to `/connectors/:id/canvas/:pgId/controller-services`
+     * never activates the canvas component and thus never emits
+     * {@link loadConnectorFlowSuccess}. Listening to both trigger actions in a single
+     * pipeline keeps that deep-link case covered. {@link distinctUntilChanged} keyed
+     * on connectorId + processGroupId dedupes the polling refire on the canvas page
+     * and the canvas → controller-services transition within the same process group;
+     * navigating to a different process group (or to a different connector with the
+     * same process group id) changes the key and triggers a fresh fetch.
+     *
+     * NgRx effects are application-level singletons, so the inner `distinctUntilChanged`
+     * would otherwise accumulate the last (connectorId, processGroupId) pair across the
+     * entire app lifetime — silently suppressing the re-fetch when a user navigates
+     * away from a connector and back into the same one. Wrapping the inner pipeline in
+     * `switchMap` over `resetConnectorCanvasState` (which fires on canvas ngOnDestroy)
+     * tears down and rebuilds the inner subscription, clearing the stale "previous"
+     * reference so the next load-success emission is always treated as a first
+     * emission. `startWith(null)` is required so the inner pipeline is subscribed on
+     * app startup without waiting for the first reset.
+     */
+    loadConnectorParameterContextOnLoadSuccess$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.resetConnectorCanvasState),
+            startWith(null),
+            switchMap(() =>
+                this.actions$.pipe(
+                    ofType(
+                        ConnectorCanvasActions.loadConnectorFlowSuccess,
+                        ConnectorControllerServicesActions.loadConnectorControllerServicesSuccess
+                    ),
+                    map((action) => {
+                        if (action.type === ConnectorCanvasActions.loadConnectorFlowSuccess.type) {
+                            return {
+                                connectorId: action.connectorId,
+                                processGroupId: action.processGroupId,
+                                errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                            };
+                        }
+                        return {
+                            connectorId: action.response.connectorId,
+                            processGroupId: action.response.processGroupId,
+                            errorContext: ErrorContextKey.CONTROLLER_SERVICES
+                        };
+                    }),
+                    filter(
+                        (
+                            target
+                        ): target is { connectorId: string; processGroupId: string; errorContext: ErrorContextKey } =>
+                            target.processGroupId !== null && target.processGroupId !== undefined
+                    ),
+                    distinctUntilChanged(
+                        (previous, current) =>
+                            previous.connectorId === current.connectorId &&
+                            previous.processGroupId === current.processGroupId
+                    ),
+                    map((target) => ConnectorCanvasActions.loadConnectorParameterContext(target))
+                )
+            )
+        )
+    );
+
+    loadConnectorParameterContext$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadConnectorParameterContext),
+            switchMap((action) =>
+                this.connectorService.getConnectorParameterContext(action.connectorId, action.processGroupId).pipe(
+                    map((parameterContext) =>
+                        ConnectorCanvasActions.loadConnectorParameterContextSuccess({ parameterContext })
+                    ),
+                    catchError((error) =>
+                        of(
+                            ConnectorCanvasActions.loadConnectorParameterContextFailure({
+                                errorContext: {
+                                    errors: [this.errorHelper.getErrorString(error)],
+                                    context: action.errorContext
+                                }
+                            })
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    /**
+     * Surface parameter context load failures via a banner so the user sees that
+     * parameter references in the canvas property tables will not resolve.
+     */
+    loadConnectorParameterContextFailure$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadConnectorParameterContextFailure),
+            map((action) => ErrorActions.addBannerError({ errorContext: action.errorContext }))
+        )
+    );
+
+    /**
+     * Translate a reload request into a fresh {@link loadConnectorFlow} for the
+     * connector and process group currently mounted on the canvas.
+     *
+     * The connector and process group ids come from the canvas state (set by the
+     * most recent successful load) rather than the route so that a reload fired
+     * mid-navigation does not race the URL change. A 1 second throttle protects
+     * against rapid back-to-back reload requests, and the effect is a no-op when
+     * the canvas has not yet completed an initial load.
+     */
+    reloadConnectorFlow$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.reloadConnectorFlow),
+            throttleTime(1000),
+            concatLatestFrom(() => [this.store.select(selectConnectorId), this.store.select(selectProcessGroupId)]),
+            filter(([, connectorId, processGroupId]) => !!connectorId && processGroupId != null),
+            switchMap(([, connectorId, processGroupId]) => {
+                this.lastReload = Date.now();
+
+                return of(
+                    ConnectorCanvasActions.loadConnectorFlow({
+                        connectorId,
+                        processGroupId: processGroupId!
+                    })
+                );
+            })
+        )
+    );
+
+    /**
+     * Drive periodic refresh of the connector flow.
+     *
+     * The interval ticks every 30 seconds and is torn down when
+     * {@link stopConnectorCanvasPolling} is dispatched (typically from the
+     * canvas component's ngOnDestroy). Polling is skipped when the document is
+     * hidden so background tabs do not generate load, and it is also skipped
+     * while a load is already in flight to avoid racing user-initiated process
+     * group navigations.
+     */
+    startConnectorCanvasPolling$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.startConnectorCanvasPolling),
+            switchMap(() =>
+                interval(30000, asyncScheduler).pipe(
+                    takeUntil(this.actions$.pipe(ofType(ConnectorCanvasActions.stopConnectorCanvasPolling)))
+                )
+            ),
+            concatLatestFrom(() => [
+                this.store.select(selectDocumentVisibilityState),
+                this.store.select(selectLoadingStatus)
+            ]),
+            // Skip polling when the document is hidden or while a flow load is
+            // already in flight. Without the loading guard the polling-driven
+            // reload would race a user-initiated process group navigation: the
+            // load effect uses switchMap, so a polling reload would cancel the
+            // pending navigation load and replace it with a load of the
+            // previously-rendered group, leaving the URL and canvas out of sync.
+            filter(([, documentVisibility]) => documentVisibility.documentVisibility === DocumentVisibility.Visible),
+            filter(([, , loadingStatus]) => loadingStatus !== 'loading'),
+            switchMap(() => of(ConnectorCanvasActions.reloadConnectorFlow()))
+        )
+    );
+
+    /**
+     * Select components - updates route with selection
+     * Routes to /connectors/:id/canvas/:processGroupId/:type/:componentId
+     */
+    selectComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.selectComponents),
+            map((action) => action.request),
+            concatLatestFrom(() => [
+                this.store.select(selectConnectorIdFromRoute),
+                this.store.select(selectProcessGroupIdFromRoute)
+            ]),
+            switchMap(([request, connectorId, processGroupId]) => {
+                if (request.components.length === 0) {
+                    return of(ConnectorCanvasActions.deselectAllComponents());
+                }
+
+                let commands: string[];
+                if (request.components.length === 1) {
+                    commands = [
+                        '/connectors',
+                        connectorId,
+                        'canvas',
+                        processGroupId,
+                        request.components[0].componentType,
+                        request.components[0].id
+                    ];
+                } else {
+                    const ids: string[] = request.components.map(
+                        (selectedComponent: SelectedComponent) => selectedComponent.id
+                    );
+                    commands = ['/connectors', connectorId, 'canvas', processGroupId, 'bulk', ids.join(',')];
+                }
+                return of(ConnectorCanvasActions.navigateWithoutTransform({ url: commands }));
+            })
+        )
+    );
+
+    /**
+     * Deselect all components - returns to base canvas route
+     */
+    deselectAllComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.deselectAllComponents),
+            concatLatestFrom(() => [
+                this.store.select(selectConnectorIdFromRoute),
+                this.store.select(selectProcessGroupIdFromRoute)
+            ]),
+            switchMap(([, connectorId, processGroupId]) => {
+                return of(
+                    ConnectorCanvasActions.navigateWithoutTransform({
+                        url: ['/connectors', connectorId, 'canvas', processGroupId]
+                    })
+                );
+            })
+        )
+    );
+
+    /**
+     * Navigate without transform - updates router
+     */
+    navigateWithoutTransform$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.navigateWithoutTransform),
+                tap((action) => {
+                    this.router.navigate(action.url, {
+                        replaceUrl: true
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    enterProcessGroup$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.enterProcessGroup),
+                map((action) => action.request),
+                concatLatestFrom(() => this.store.select(selectConnectorIdFromRoute)),
+                tap(([request, connectorId]) => {
+                    this.router.navigate(['/connectors', connectorId, 'canvas', request.id]);
+                })
+            ),
+        { dispatch: false }
+    );
+
+    leaveProcessGroup$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.leaveProcessGroup),
+            concatLatestFrom(() => [
+                this.store.select(selectConnectorIdFromRoute),
+                this.store.select(selectParentProcessGroupId),
+                this.store.select(selectProcessGroupId)
+            ]),
+            filter(
+                ([, , parentProcessGroupId, currentProcessGroupId]) =>
+                    parentProcessGroupId != null && currentProcessGroupId != null
+            ),
+            switchMap(([, connectorId, parentProcessGroupId, childProcessGroupId]) => {
+                this.router.navigate(['/connectors', connectorId, 'canvas', parentProcessGroupId]);
+
+                return this.actions$.pipe(
+                    ofType(ConnectorCanvasActions.loadConnectorFlowComplete),
+                    take(1),
+                    map(() =>
+                        ConnectorCanvasActions.navigateWithoutTransform({
+                            url: [
+                                '/connectors',
+                                connectorId,
+                                'canvas',
+                                parentProcessGroupId!,
+                                ComponentType.ProcessGroup,
+                                childProcessGroupId!
+                            ]
+                        })
+                    )
+                );
+            })
+        )
+    );
+
+    /**
+     * Open a read-only configuration dialog for the given canvas component.
+     * Forces read-only mode by overriding canWrite regardless of entity permissions
+     * since the connector canvas is a view-only interface.
+     */
+    viewComponentConfiguration$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.viewComponentConfiguration),
+                map((action) => action.request),
+                tap(({ entity, componentType }) => {
+                    const dialogRequest = this.buildDialogRequest(entity, componentType);
+
+                    switch (componentType) {
+                        case ComponentType.Processor:
+                            this.openReadOnlyProcessorDialog(dialogRequest);
+                            break;
+                        case ComponentType.Connection:
+                            this.openReadOnlyConnectionDialog(dialogRequest);
+                            break;
+                        case ComponentType.InputPort:
+                        case ComponentType.OutputPort:
+                            this.openReadOnlyPortDialog(dialogRequest);
+                            break;
+                        case ComponentType.Label:
+                            this.openReadOnlyLabelDialog(dialogRequest);
+                            break;
+                        case ComponentType.ProcessGroup:
+                            this.openReadOnlyProcessGroupDialog(dialogRequest);
+                            break;
+                        case ComponentType.RemoteProcessGroup:
+                            this.openReadOnlyRemoteProcessGroupDialog(dialogRequest);
+                            break;
+                        default:
+                            break;
+                    }
+                })
+            ),
+        { dispatch: false }
+    );
+
+    navigateToProvenanceForComponent$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.navigateToProvenanceForComponent),
+                map((action) => ({ id: action.id, componentType: action.componentType })),
+                concatLatestFrom(() => [
+                    this.store.select(selectConnectorIdFromRoute),
+                    this.store.select(selectProcessGroupIdFromRoute)
+                ]),
+                tap(([{ id: componentId, componentType }, connectorId, processGroupId]) => {
+                    this.router.navigate(['/provenance'], {
+                        queryParams: { componentId },
+                        state: {
+                            backNavigation: {
+                                route: [
+                                    '/connectors',
+                                    connectorId,
+                                    'canvas',
+                                    processGroupId,
+                                    componentType,
+                                    componentId
+                                ],
+                                routeBoundary: ['/provenance'],
+                                context: this.componentTypeNamePipe.transform(componentType)
+                            } as BackNavigation
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * Navigate to the controller services view for the supplied process group.
+     * The current route's process group is still consulted to compute the
+     * back-navigation target so the user returns to the canvas they came from.
+     * The routeBoundary includes the controller-services segment so back
+     * navigation clears as soon as the user navigates away from the controller
+     * services view.
+     */
+    navigateToControllerServices$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.navigateToControllerServices),
+                concatLatestFrom(() => [
+                    this.store.select(selectConnectorIdFromRoute),
+                    this.store.select(selectProcessGroupIdFromRoute)
+                ]),
+                tap(([action, connectorId, currentProcessGroupId]) => {
+                    const routeBoundary = [
+                        '/connectors',
+                        connectorId,
+                        'canvas',
+                        action.processGroupId,
+                        'controller-services'
+                    ];
+                    this.router.navigate(routeBoundary, {
+                        state: {
+                            backNavigation: {
+                                route: ['/connectors', connectorId, 'canvas', currentProcessGroupId],
+                                routeBoundary,
+                                context: 'process group'
+                            } as BackNavigation
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * Navigate to a specific controller service within a process group, appending
+     * the serviceId for deep linking.
+     */
+    navigateToControllerService$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.navigateToControllerService),
+                concatLatestFrom(() => [
+                    this.store.select(selectConnectorIdFromRoute),
+                    this.store.select(selectProcessGroupIdFromRoute)
+                ]),
+                tap(([action, connectorId, currentProcessGroupId]) => {
+                    const routeBoundary = [
+                        '/connectors',
+                        connectorId,
+                        'canvas',
+                        action.processGroupId,
+                        'controller-services',
+                        action.serviceId
+                    ];
+                    this.router.navigate(routeBoundary, {
+                        state: {
+                            backNavigation: {
+                                route: ['/connectors', connectorId, 'canvas', currentProcessGroupId],
+                                routeBoundary,
+                                context: 'process group'
+                            } as BackNavigation
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * Navigate to the queue listing page for a connection. Provides back navigation
+     * back to the originating connection on the connector canvas.
+     */
+    navigateToQueueListing$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.navigateToQueueListing),
+                map((action) => action.request),
+                concatLatestFrom(() => [
+                    this.store.select(selectConnectorIdFromRoute),
+                    this.store.select(selectProcessGroupIdFromRoute)
+                ]),
+                tap(([request, connectorId, processGroupId]) => {
+                    const routeBoundary: string[] = ['/queue', request.connectionId];
+                    this.router.navigate([...routeBoundary], {
+                        state: {
+                            backNavigation: {
+                                route: [
+                                    '/connectors',
+                                    connectorId,
+                                    'canvas',
+                                    processGroupId,
+                                    ComponentType.Connection,
+                                    request.connectionId
+                                ],
+                                routeBoundary,
+                                context: 'connection'
+                            } as BackNavigation
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * Refreshes the connector canvas after a queue has been emptied from this surface.
+     * Listens for the shared queueEmptied event and filters on source so flow-designer
+     * empties do not trigger a connector-canvas refresh.
+     */
+    refreshAfterQueueEmptied$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(EmptyQueueActions.queueEmptied),
+            filter((action) => action.source === 'connector-canvas'),
+            concatLatestFrom(() => [
+                this.store.select(selectConnectorIdFromRoute),
+                this.store.select(selectProcessGroupIdFromRoute)
+            ]),
+            filter(([, connectorId, processGroupId]) => connectorId != null && processGroupId != null),
+            switchMap(([, connectorId, processGroupId]) =>
+                of(
+                    ConnectorCanvasActions.loadConnectorFlow({
+                        connectorId: connectorId!,
+                        processGroupId: processGroupId!
+                    })
+                )
+            )
+        )
+    );
+
+    /**
+     * Build a dialog request from the supplied entity. The connector canvas surfaces
+     * configuration in a strictly read-only mode, so the entity permissions are
+     * forced to readable-only-without-write before being passed to the dialog.
+     */
+    private buildDialogRequest(
+        entity: ConnectorCanvasComponentEntity,
+        componentType: ComponentType
+    ): EditComponentDialogRequest {
+        const readOnlyEntity = withReadonlyPermissions(entity);
+        return {
+            type: componentType,
+            uri: readOnlyEntity.uri,
+            entity: readOnlyEntity
+        };
+    }
+
+    private openReadOnlyProcessorDialog(request: EditComponentDialogRequest): void {
+        const dialogRef = this.dialog.open(EditProcessor, {
+            ...XL_DIALOG,
+            data: request,
+            id: request.entity.id
+        });
+        const instance = dialogRef.componentInstance;
+        instance.saving$ = of(false);
+        instance.propertyVerificationResults$ = this.store.select(selectPropertyVerificationResults);
+        instance.propertyVerificationStatus$ = this.store.select(selectPropertyVerificationStatus);
+
+        // Provide no-op stubs for callbacks not needed in read-only mode. `goToParameter` is
+        // intentionally left undefined so the property table hides the "Go to Parameter" affordance
+        // for the connector canvas, while parameter values still render in the value tip.
+        instance.createNewProperty = () => NEVER;
+        instance.createNewService = () => NEVER;
+        instance.convertToParameter = () => NEVER;
+        instance.goToService = bindGoToService(
+            this.store,
+            this.connectorService,
+            this.errorHelper,
+            dialogRef,
+            this.store.select(selectConnectorIdFromRoute),
+            ErrorContextKey.CONNECTOR_CANVAS
+        );
+
+        // EditProcessor only exposes `parameterContext`; the underlying property table
+        // disables parameter affordances on its own when parameterContext is undefined.
+        bindConnectorParameterContext(this.store, dialogRef.afterClosed(), (parameterContext) => {
+            instance.parameterContext = parameterContext ?? undefined;
+        });
+    }
+
+    private openReadOnlyConnectionDialog(request: EditComponentDialogRequest): void {
+        const dialogRef = this.dialog.open(EditConnectionComponent, {
+            ...LARGE_DIALOG,
+            data: request as EditConnectionDialogRequest
+        });
+        const instance = dialogRef.componentInstance;
+        instance.saving$ = of(false);
+        this.wireConnectionEndpointCallbacks(instance);
+    }
+
+    private wireConnectionEndpointCallbacks(instance: EditConnectionComponent): void {
+        instance.breadcrumbs$ = this.store.select(selectBreadcrumbs);
+        instance.availablePrioritizers$ = this.store.select(selectPrioritizerTypes);
+        instance.getChildOutputPorts = (groupId: string): Observable<PortEntity[]> =>
+            this.store.select(selectConnectorIdFromRoute).pipe(
+                take(1),
+                switchMap((connectorId) =>
+                    this.connectorService
+                        .getConnectorFlow(connectorId!, groupId)
+                        .pipe(map((response) => response.processGroupFlow.flow.outputPorts))
+                )
+            );
+        instance.getChildInputPorts = (groupId: string): Observable<PortEntity[]> =>
+            this.store.select(selectConnectorIdFromRoute).pipe(
+                take(1),
+                switchMap((connectorId) =>
+                    this.connectorService
+                        .getConnectorFlow(connectorId!, groupId)
+                        .pipe(map((response) => response.processGroupFlow.flow.inputPorts))
+                )
+            );
+        instance.selectProcessor = (id: string) => this.store.select(selectProcessor(id));
+        instance.selectInputPort = (id: string) => this.store.select(selectInputPort(id));
+        instance.selectOutputPort = (id: string) => this.store.select(selectOutputPort(id));
+        instance.selectProcessGroup = (id: string) => this.store.select(selectProcessGroup(id));
+        instance.selectRemoteProcessGroup = (id: string) => this.store.select(selectRemoteProcessGroup(id));
+    }
+
+    /**
+     * Open EditConnectionComponent so a process-group or remote-process-group
+     * drop can be resolved to the selected port before it is persisted.
+     */
+    private openReconnectConnectionDialog(request: EditConnectionDialogRequest): void {
+        const connection = request.entity as ConnectionEntity;
+        const previousDestination = connection.component?.destination;
+        const dialogRef = this.dialog.open(EditConnectionComponent, {
+            ...LARGE_DIALOG,
+            data: request
+        });
+        const instance = dialogRef.componentInstance;
+        instance.saving$ = this.store.select(selectSaving);
+        this.wireConnectionEndpointCallbacks(instance);
+        const processGroupId = connection.component?.parentGroupId;
+        instance.getConnectionSourceComponentId = (endpoint) => {
+            if (endpoint.sourceGroupId && endpoint.sourceGroupId !== processGroupId) {
+                return endpoint.sourceGroupId;
+            }
+            return endpoint.sourceId;
+        };
+        const afterClosed$ = dialogRef.afterClosed().pipe(take(1));
+        instance.editConnection.pipe(takeUntil(afterClosed$)).subscribe((updateRequest: UpdateConnectionRequest) => {
+            this.store.dispatch(
+                ConnectorCanvasActions.saveEditedConnection({
+                    request: {
+                        ...updateRequest,
+                        previousDestination
+                    }
+                })
+            );
+        });
+        this.actions$
+            .pipe(
+                ofType(ConnectorCanvasActions.updateConnectionDestinationSuccess),
+                filter(({ connectionId }) => connectionId === connection.id),
+                takeUntil(afterClosed$)
+            )
+            .subscribe(() => dialogRef.close('SAVED'));
+        afterClosed$.subscribe((result) =>
+            this.store.dispatch(
+                ConnectorCanvasActions.editConnectionDialogClosed({
+                    connectionId: connection.id,
+                    cancelled: result !== 'SAVED'
+                })
+            )
+        );
+    }
+
+    private openReadOnlyPortDialog(request: EditComponentDialogRequest): void {
+        const dialogRef = this.dialog.open(EditPort, {
+            ...MEDIUM_DIALOG,
+            data: request
+        });
+        dialogRef.componentInstance.saving$ = of(false);
+    }
+
+    private openReadOnlyLabelDialog(request: EditComponentDialogRequest): void {
+        const dialogRef = this.dialog.open(EditLabel, {
+            ...MEDIUM_DIALOG,
+            data: request
+        });
+        dialogRef.componentInstance.saving$ = of(false);
+    }
+
+    private openReadOnlyProcessGroupDialog(request: EditComponentDialogRequest): void {
+        const dialogRef = this.dialog.open(EditProcessGroup, {
+            ...LARGE_DIALOG,
+            data: request
+        });
+        const instance = dialogRef.componentInstance;
+        instance.saving$ = of(false);
+        instance.currentUser$ = this.store.select(selectCurrentUser);
+        instance.parameterContexts = [];
+    }
+
+    private openReadOnlyRemoteProcessGroupDialog(request: EditComponentDialogRequest): void {
+        const dialogRef = this.dialog.open(EditRemoteProcessGroup, {
+            ...LARGE_DIALOG,
+            data: request
+        });
+        dialogRef.componentInstance.saving$ = of(false);
+    }
+
+    createConnectionRequested$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.createConnectionRequested),
+            concatLatestFrom(() => this.store.select(selectConnectorId)),
+            filter(([, connectorId]) => connectorId !== ''),
+            switchMap(([action, connectorId]) =>
+                this.connectorService.getProcessGroup(connectorId, action.processGroupId).pipe(
+                    map((response) =>
+                        response.component
+                            ? ConnectorCanvasActions.openCreateConnectionDialog({
+                                  request: {
+                                      request: action.request,
+                                      defaults: {
+                                          flowfileExpiration: response.component.defaultFlowFileExpiration,
+                                          objectThreshold: response.component.defaultBackPressureObjectThreshold,
+                                          dataSizeThreshold: response.component.defaultBackPressureDataSizeThreshold
+                                      }
+                                  }
+                              })
+                            : ConnectorCanvasActions.createConnectionDialogClosed()
+                    ),
+                    catchError((error: HttpErrorResponse) => {
+                        const message = this.errorHelper.getErrorString(error);
+                        return from([
+                            ConnectorCanvasActions.createConnectionFailure({ error: message }),
+                            ErrorActions.addBannerError({
+                                errorContext: {
+                                    errors: [message],
+                                    context: ErrorContextKey.CONNECTOR_CANVAS
+                                }
+                            }),
+                            ConnectorCanvasActions.createConnectionDialogClosed()
+                        ]);
+                    })
+                )
+            )
+        )
+    );
+
+    openCreateConnectionDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.openCreateConnectionDialog),
+                concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+                filter(([, processGroupId]) => processGroupId != null),
+                tap(([action, processGroupId]) => {
+                    const dialogRef = this.dialog.open(CreateConnectionDialog, {
+                        ...LARGE_DIALOG,
+                        data: action.request
+                    });
+                    const instance = dialogRef.componentInstance;
+                    instance.saving$ = this.store.select(selectSaving);
+                    instance.breadcrumbs$ = this.store.select(selectBreadcrumbs);
+                    instance.availablePrioritizers$ = this.store.select(selectPrioritizerTypes);
+                    instance.getChildOutputPorts = (groupId: string): Observable<PortEntity[]> =>
+                        this.store.select(selectConnectorId).pipe(
+                            take(1),
+                            switchMap((connectorId) =>
+                                this.connectorService.getConnectorFlow(connectorId, groupId).pipe(
+                                    take(1),
+                                    map((response) => response.processGroupFlow.flow.outputPorts)
+                                )
+                            )
+                        );
+                    instance.getChildInputPorts = (groupId: string): Observable<PortEntity[]> =>
+                        this.store.select(selectConnectorId).pipe(
+                            take(1),
+                            switchMap((connectorId) =>
+                                this.connectorService.getConnectorFlow(connectorId, groupId).pipe(
+                                    take(1),
+                                    map((response) => response.processGroupFlow.flow.inputPorts)
+                                )
+                            )
+                        );
+
+                    const afterClosed$ = dialogRef.afterClosed().pipe(take(1));
+                    instance.createConnection.pipe(takeUntil(afterClosed$)).subscribe((request) => {
+                        this.store.dispatch(
+                            ConnectorCanvasActions.submitCreateConnection({
+                                processGroupId: processGroupId!,
+                                request
+                            })
+                        );
+                    });
+                    afterClosed$.subscribe(() =>
+                        this.store.dispatch(ConnectorCanvasActions.createConnectionDialogClosed())
+                    );
+                })
+            ),
+        { dispatch: false }
+    );
+
+    openReconnectConnectionDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.openReconnectConnectionDialog),
+                tap(({ request }) => this.openReconnectConnectionDialog(request))
+            ),
+        { dispatch: false }
+    );
+
+    saveEditedConnection$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.saveEditedConnection),
+            mergeMap(({ request }) =>
+                this.connectorEditService
+                    .updateComponent<ConnectionEntity>({
+                        id: request.id,
+                        type: ComponentType.Connection,
+                        payload: {
+                            ...request.payload,
+                            disconnectedNodeAcknowledged: this.clusterConnectionService.isDisconnectionAcknowledged()
+                        }
+                    })
+                    .pipe(
+                        map((connection) =>
+                            ConnectorCanvasActions.updateConnectionDestinationSuccess({
+                                connectionId: request.id,
+                                connection,
+                                previousDestination: request.previousDestination
+                            })
+                        ),
+                        catchError((error: HttpErrorResponse) => {
+                            const message = this.errorHelper.getErrorString(error);
+                            return from([
+                                ConnectorCanvasActions.updateConnectionDestinationFailure({
+                                    connectionId: request.id,
+                                    error: message,
+                                    dialogOpen: true
+                                }),
+                                ErrorActions.addBannerError({
+                                    errorContext: {
+                                        errors: [message],
+                                        context: ErrorContextKey.CONNECTION
+                                    }
+                                })
+                            ]);
+                        })
+                    )
+            )
+        )
+    );
+
+    submitCreateConnection$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.submitCreateConnection),
+            concatLatestFrom(() => this.store.select(selectMaxConnectionZIndex)),
+            exhaustMap(([action, maxZIndex]) =>
+                this.connectorEditService
+                    .createConnection(action.processGroupId, {
+                        payload: {
+                            ...action.request.payload,
+                            component: {
+                                ...action.request.payload.component,
+                                zIndex: maxZIndex + 1
+                            }
+                        }
+                    })
+                    .pipe(
+                        map((connection) => ConnectorCanvasActions.createConnectionSuccess({ connection })),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(
+                                    error,
+                                    (message) => ConnectorCanvasActions.createConnectionFailure({ error: message }),
+                                    ErrorContextKey.CONNECTION
+                                )
+                            )
+                        )
+                    )
+            )
+        )
+    );
+
+    createConnectionSuccess$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.createConnectionSuccess),
+                tap(({ connection }) => {
+                    this.dialog.closeAll();
+                    this.store.dispatch(
+                        ConnectorCanvasActions.selectComponents({
+                            request: {
+                                components: [{ id: connection.id, componentType: ComponentType.Connection }]
+                            }
+                        })
+                    );
+                    this.store.dispatch(ConnectorCanvasActions.loadComponentsForConnection({ connection }));
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * After a destination change persists, reloads the connection's endpoints and the
+     * destination it moved away from.
+     */
+    reloadComponentsAfterConnectionDestinationChange$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.updateConnectionDestinationSuccess),
+            mergeMap(({ connection, previousDestination }) => {
+                const endpoint = this.previousDestinationEndpoint(previousDestination);
+                return from([
+                    ConnectorCanvasActions.loadComponentsForConnection({ connection }),
+                    ...(endpoint ? [ConnectorCanvasActions.loadConnectionEndpoint(endpoint)] : [])
+                ]);
+            })
+        )
+    );
+
+    /**
+     * Reloads the source and destination of a connection. Endpoints are read from the
+     * connection's top-level fields, which are present even when the connection is not readable.
+     */
+    loadComponentsForConnection$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadComponentsForConnection),
+            mergeMap(({ connection }) =>
+                from(
+                    this.connectionEndpoints(connection).map((endpoint) =>
+                        ConnectorCanvasActions.loadConnectionEndpoint(endpoint)
+                    )
+                )
+            )
+        )
+    );
+
+    /**
+     * Reloads one connection endpoint. A failed reload is left for the next flow poll to correct.
+     */
+    loadConnectionEndpoint$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadConnectionEndpoint),
+            mergeMap(({ componentId, componentType }) =>
+                this.connectorEditService.getComponent(componentType, componentId).pipe(
+                    map((component) =>
+                        ConnectorCanvasActions.loadConnectionEndpointSuccess({ componentId, componentType, component })
+                    ),
+                    catchError(() => EMPTY)
+                )
+            )
+        )
+    );
+
+    updateComponentPositionsBulk$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.updateComponentPositionsBulk),
+            mergeMap((action) => {
+                if (action.updates.length === 0) {
+                    return of(
+                        ConnectorCanvasActions.updateComponentPositionsBulkComplete({ successes: [], failures: [] })
+                    );
+                }
+
+                return forkJoin(
+                    action.updates.map((update) => {
+                        const component =
+                            update.bends !== undefined
+                                ? {
+                                      id: update.componentId,
+                                      bends: update.bends,
+                                      ...(update.labelIndex === undefined ? {} : { labelIndex: update.labelIndex })
+                                  }
+                                : { id: update.componentId, position: update.position };
+                        return this.connectorEditService
+                            .updateComponent<ConnectorCanvasComponentEntity>({
+                                id: update.componentId,
+                                type: update.componentType,
+                                payload: {
+                                    revision: update.revision,
+                                    disconnectedNodeAcknowledged:
+                                        this.clusterConnectionService.isDisconnectionAcknowledged(),
+                                    component
+                                }
+                            })
+                            .pipe(
+                                map((response) => ({ update, response, error: null as string | null })),
+                                catchError((error: HttpErrorResponse) =>
+                                    of({
+                                        update,
+                                        response: null,
+                                        error: this.errorHelper.getErrorString(error)
+                                    })
+                                )
+                            );
+                    })
+                ).pipe(
+                    mergeMap((results) => {
+                        const successes: ConnectorCanvasActions.BulkPositionResult[] = [];
+                        const failures: ConnectorCanvasActions.BulkPositionResult[] = [];
+                        const followUps: Action[] = [];
+
+                        results.forEach(({ update, response, error }) => {
+                            if (response) {
+                                successes.push({
+                                    componentId: update.componentId,
+                                    componentType: update.componentType,
+                                    success: true,
+                                    component: response
+                                });
+                                followUps.push(
+                                    update.componentType === ComponentType.Connection
+                                        ? ConnectorCanvasActions.updateConnectionBendPointsSuccess({
+                                              connectionId: update.componentId,
+                                              connection: response as ConnectionEntity
+                                          })
+                                        : ConnectorCanvasActions.updateComponentPositionSuccess({
+                                              componentId: update.componentId,
+                                              componentType: update.componentType,
+                                              component: response
+                                          })
+                                );
+                            } else {
+                                const message = error ?? 'Failed to update component position';
+                                failures.push({
+                                    componentId: update.componentId,
+                                    componentType: update.componentType,
+                                    success: false,
+                                    error: message
+                                });
+                                followUps.push(
+                                    update.componentType === ComponentType.Connection
+                                        ? ConnectorCanvasActions.updateConnectionBendPointsFailure({
+                                              connectionId: update.componentId,
+                                              error: message
+                                          })
+                                        : ConnectorCanvasActions.updateComponentPositionFailure({
+                                              componentId: update.componentId,
+                                              componentType: update.componentType,
+                                              error: message
+                                          })
+                                );
+                            }
+                        });
+
+                        if (failures.length > 0) {
+                            followUps.push(
+                                ErrorActions.addBannerError({
+                                    errorContext: {
+                                        errors: failures.map((failure) => failure.error ?? 'Update failed'),
+                                        context: ErrorContextKey.CONNECTOR_CANVAS
+                                    }
+                                })
+                            );
+                        }
+                        followUps.push(
+                            ConnectorCanvasActions.updateComponentPositionsBulkComplete({ successes, failures })
+                        );
+                        return from(followUps);
+                    })
+                );
+            })
+        )
+    );
+
+    updateConnectionBendPoints$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.updateConnectionBendPoints),
+            mergeMap(({ update }) =>
+                this.connectorEditService
+                    .updateComponent<ConnectionEntity>({
+                        id: update.id,
+                        type: ComponentType.Connection,
+                        payload: {
+                            revision: update.revision,
+                            disconnectedNodeAcknowledged: this.clusterConnectionService.isDisconnectionAcknowledged(),
+                            component: {
+                                id: update.id,
+                                bends: update.bends,
+                                ...(update.labelIndex === undefined ? {} : { labelIndex: update.labelIndex })
+                            }
+                        }
+                    })
+                    .pipe(
+                        map((connection) =>
+                            ConnectorCanvasActions.updateConnectionBendPointsSuccess({
+                                connectionId: update.id,
+                                connection
+                            })
+                        ),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.updateConnectionBendPointsFailure({
+                                        connectionId: update.id,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    )
+            )
+        )
+    );
+
+    updateConnectionLabelIndex$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.updateConnectionLabelIndex),
+            mergeMap((action) =>
+                this.connectorEditService
+                    .updateComponent<ConnectionEntity>({
+                        id: action.connectionId,
+                        type: ComponentType.Connection,
+                        payload: {
+                            revision: action.revision,
+                            disconnectedNodeAcknowledged: this.clusterConnectionService.isDisconnectionAcknowledged(),
+                            component: { id: action.connectionId, labelIndex: action.labelIndex }
+                        }
+                    })
+                    .pipe(
+                        map((connection) =>
+                            ConnectorCanvasActions.updateConnectionLabelIndexSuccess({
+                                connectionId: action.connectionId,
+                                connection
+                            })
+                        ),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.updateConnectionLabelIndexFailure({
+                                        connectionId: action.connectionId,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    )
+            )
+        )
+    );
+
+    updateConnectionDestination$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.updateConnectionDestination),
+            // The store still holds the connection's current destination until the save succeeds.
+            concatLatestFrom(() => this.store.select(selectConnections)),
+            mergeMap(([action, connections]) => {
+                const previousDestination = connections.find((connection) => connection.id === action.connectionId)
+                    ?.component?.destination;
+                const destinationType = this.getConnectableDestinationType(action.newDestination.componentType);
+                if (!destinationType) {
+                    const message = `Unsupported connection destination type: ${action.newDestination.componentType}`;
+                    return from([
+                        ConnectorCanvasActions.updateConnectionDestinationFailure({
+                            connectionId: action.connectionId,
+                            error: message
+                        }),
+                        ErrorActions.addBannerError({
+                            errorContext: {
+                                errors: [message],
+                                context: ErrorContextKey.CONNECTOR_CANVAS
+                            }
+                        })
+                    ]);
+                }
+                return this.connectorEditService
+                    .updateComponent<ConnectionEntity>({
+                        id: action.connectionId,
+                        type: ComponentType.Connection,
+                        payload: {
+                            revision: action.revision,
+                            disconnectedNodeAcknowledged: this.clusterConnectionService.isDisconnectionAcknowledged(),
+                            component: {
+                                id: action.connectionId,
+                                destination: {
+                                    id: action.newDestination.id,
+                                    groupId: action.processGroupId,
+                                    type: destinationType
+                                },
+                                ...(action.bends ? { bends: action.bends } : {})
+                            }
+                        }
+                    })
+                    .pipe(
+                        map((connection) =>
+                            ConnectorCanvasActions.updateConnectionDestinationSuccess({
+                                connectionId: action.connectionId,
+                                connection,
+                                previousDestination
+                            })
+                        ),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.updateConnectionDestinationFailure({
+                                        connectionId: action.connectionId,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    );
+            })
+        )
+    );
+
+    resizeLabel$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.resizeLabel),
+            mergeMap((action) =>
+                this.connectorEditService
+                    .updateComponent<LabelEntity>({
+                        id: action.labelId,
+                        type: ComponentType.Label,
+                        payload: {
+                            revision: action.revision,
+                            disconnectedNodeAcknowledged: this.clusterConnectionService.isDisconnectionAcknowledged(),
+                            component: {
+                                id: action.labelId,
+                                width: action.dimensions.width,
+                                height: action.dimensions.height
+                            }
+                        }
+                    })
+                    .pipe(
+                        map((label) => ConnectorCanvasActions.resizeLabelSuccess({ labelId: action.labelId, label })),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.resizeLabelFailure({
+                                        labelId: action.labelId,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    )
+            )
+        )
+    );
+
+    moveCanvasComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.moveCanvasComponents),
+            concatLatestFrom(() => [this.store.select(selectConnectorId), this.store.select(selectProcessGroupId)]),
+            filter(([, connectorId, processGroupId]) => connectorId !== '' && processGroupId !== null),
+            mergeMap(([action, connectorId, processGroupId]) => {
+                const sourceProcessGroupId = processGroupId as string;
+                const components = action.components.map((component) => ({
+                    id: component.id,
+                    type: component.type,
+                    revision: component.revision
+                }));
+                return this.connectorEditService
+                    .moveComponents(components, action.processGroupId, action.targetGroupId)
+                    .pipe(
+                        map(() =>
+                            ConnectorCanvasActions.moveCanvasComponentsSuccess({
+                                targetGroupId: action.targetGroupId,
+                                components: action.components
+                            })
+                        ),
+                        catchError((error: HttpErrorResponse) =>
+                            of(error).pipe(
+                                concatLatestFrom(() => [
+                                    this.store.select(selectConnectorId),
+                                    this.store.select(selectProcessGroupId)
+                                ]),
+                                mergeMap(([, currentConnectorId, currentProcessGroupId]) => {
+                                    const message = this.errorHelper.getErrorString(error);
+                                    const actions: Action[] = [
+                                        ConnectorCanvasActions.moveCanvasComponentsFailure({
+                                            components: action.components,
+                                            error: message
+                                        }),
+                                        ErrorActions.addBannerError({
+                                            errorContext: {
+                                                errors: [message],
+                                                context: ErrorContextKey.CONNECTOR_CANVAS
+                                            }
+                                        })
+                                    ];
+                                    if (
+                                        currentConnectorId === connectorId &&
+                                        currentProcessGroupId === sourceProcessGroupId
+                                    ) {
+                                        actions.push(
+                                            ConnectorCanvasActions.loadConnectorFlow({
+                                                connectorId,
+                                                processGroupId: sourceProcessGroupId
+                                            })
+                                        );
+                                    }
+                                    return from(actions);
+                                })
+                            )
+                        )
+                    );
+            })
+        )
+    );
+
+    navigateToAdvancedProcessorUi$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.navigateToAdvancedProcessorUi),
+                concatLatestFrom(() => [
+                    this.store.select(selectConnectorIdFromRoute),
+                    this.store.select(selectProcessGroupIdFromRoute)
+                ]),
+                filter(([, connectorId, processGroupId]) => connectorId != null && processGroupId != null),
+                tap(([{ id }, connectorId, processGroupId]) => {
+                    const componentRoute = [
+                        '/connectors',
+                        connectorId!,
+                        'canvas',
+                        processGroupId!,
+                        ComponentType.Processor,
+                        id
+                    ];
+                    const routeBoundary = [...componentRoute, 'advanced'];
+                    this.router.navigate(routeBoundary, {
+                        state: {
+                            backNavigation: {
+                                route: componentRoute,
+                                routeBoundary,
+                                context: 'processor'
+                            } as BackNavigation
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    startComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.startComponents),
+            mergeMap(({ request }) =>
+                request.components.map((component) => ConnectorCanvasActions.startComponent({ request: component }))
+            )
+        )
+    );
+
+    stopComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.stopComponents),
+            mergeMap(({ request }) =>
+                request.components.map((component) => ConnectorCanvasActions.stopComponent({ request: component }))
+            )
+        )
+    );
+
+    enableComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.enableComponents),
+            mergeMap(({ request }) =>
+                request.components.map((component) => ConnectorCanvasActions.enableComponent({ request: component }))
+            )
+        )
+    );
+
+    disableComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.disableComponents),
+            mergeMap(({ request }) =>
+                request.components.map((component) => ConnectorCanvasActions.disableComponent({ request: component }))
+            )
+        )
+    );
+
+    startCurrentProcessGroup$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.startCurrentProcessGroup),
+            concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+            filter(([, processGroupId]) => processGroupId != null),
+            map(([, processGroupId]) =>
+                ConnectorCanvasActions.startComponent({
+                    request: {
+                        id: processGroupId!,
+                        type: ComponentType.ProcessGroup,
+                        errorStrategy: 'banner'
+                    }
+                })
+            )
+        )
+    );
+
+    stopCurrentProcessGroup$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.stopCurrentProcessGroup),
+            concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+            filter(([, processGroupId]) => processGroupId != null),
+            map(([, processGroupId]) =>
+                ConnectorCanvasActions.stopComponent({
+                    request: {
+                        id: processGroupId!,
+                        type: ComponentType.ProcessGroup,
+                        errorStrategy: 'banner'
+                    }
+                })
+            )
+        )
+    );
+
+    startComponent$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.startComponent),
+            mergeMap(({ request }) => {
+                if (request.type === ComponentType.ProcessGroup) {
+                    return forkJoin([
+                        this.flowService.startProcessGroup(request),
+                        this.flowService.startRemoteProcessGroupsInProcessGroup(request)
+                    ]).pipe(
+                        map(() => ConnectorCanvasActions.startProcessGroupSuccess({ processGroupId: request.id })),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.startComponentFailure({
+                                        componentId: request.id,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    );
+                }
+                if (!('revision' in request)) {
+                    return of(
+                        ConnectorCanvasActions.startComponentFailure({
+                            componentId: request.id,
+                            error: 'Starting this component requires a revision'
+                        })
+                    );
+                }
+                return this.flowService.startComponent(request).pipe(
+                    map((component: ProcessorEntity | PortEntity | RemoteProcessGroupEntity) =>
+                        ConnectorCanvasActions.startComponentSuccess({
+                            componentId: request.id,
+                            componentType: request.type,
+                            component
+                        })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.startComponentFailure({
+                                    componentId: request.id,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                );
+            })
+        )
+    );
+
+    stopComponent$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.stopComponent),
+            mergeMap(({ request }) => {
+                if (request.type === ComponentType.ProcessGroup) {
+                    return forkJoin([
+                        this.flowService.stopProcessGroup(request),
+                        this.flowService.stopRemoteProcessGroupsInProcessGroup(request)
+                    ]).pipe(
+                        map(() => ConnectorCanvasActions.stopProcessGroupSuccess({ processGroupId: request.id })),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.stopComponentFailure({
+                                        componentId: request.id,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    );
+                }
+                if (!('revision' in request)) {
+                    return of(
+                        ConnectorCanvasActions.stopComponentFailure({
+                            componentId: request.id,
+                            error: 'Stopping this component requires a revision'
+                        })
+                    );
+                }
+                return this.flowService.stopComponent(request).pipe(
+                    map((component: ProcessorEntity | PortEntity | RemoteProcessGroupEntity) =>
+                        ConnectorCanvasActions.stopComponentSuccess({
+                            componentId: request.id,
+                            componentType: request.type,
+                            component
+                        })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.stopComponentFailure({
+                                    componentId: request.id,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                );
+            })
+        )
+    );
+
+    enableComponent$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.enableComponent),
+            mergeMap(({ request }) => {
+                if (request.type === ComponentType.ProcessGroup) {
+                    return this.flowService.enableProcessGroup(request).pipe(
+                        map(() => ConnectorCanvasActions.enableProcessGroupSuccess({ processGroupId: request.id })),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.enableComponentFailure({
+                                        componentId: request.id,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    );
+                }
+                if (!('revision' in request)) {
+                    return of(
+                        ConnectorCanvasActions.enableComponentFailure({
+                            componentId: request.id,
+                            error: 'Enabling this component requires a revision'
+                        })
+                    );
+                }
+                return this.flowService.enableComponent(request).pipe(
+                    map((component: ProcessorEntity | PortEntity) =>
+                        ConnectorCanvasActions.enableComponentSuccess({
+                            componentId: request.id,
+                            componentType: request.type,
+                            component
+                        })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.enableComponentFailure({
+                                    componentId: request.id,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                );
+            })
+        )
+    );
+
+    disableComponent$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.disableComponent),
+            mergeMap(({ request }) => {
+                if (request.type === ComponentType.ProcessGroup) {
+                    return this.flowService.disableProcessGroup(request).pipe(
+                        map(() => ConnectorCanvasActions.disableProcessGroupSuccess({ processGroupId: request.id })),
+                        catchError((error: HttpErrorResponse) =>
+                            from(
+                                this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.disableComponentFailure({
+                                        componentId: request.id,
+                                        error: message
+                                    })
+                                )
+                            )
+                        )
+                    );
+                }
+                if (!('revision' in request)) {
+                    return of(
+                        ConnectorCanvasActions.disableComponentFailure({
+                            componentId: request.id,
+                            error: 'Disabling this component requires a revision'
+                        })
+                    );
+                }
+                return this.flowService.disableComponent(request).pipe(
+                    map((component: ProcessorEntity | PortEntity) =>
+                        ConnectorCanvasActions.disableComponentSuccess({
+                            componentId: request.id,
+                            componentType: request.type,
+                            component
+                        })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.disableComponentFailure({
+                                    componentId: request.id,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                );
+            })
+        )
+    );
+
+    reloadAfterProcessGroupRunStatusChange$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(
+                ConnectorCanvasActions.startProcessGroupSuccess,
+                ConnectorCanvasActions.stopProcessGroupSuccess,
+                ConnectorCanvasActions.enableProcessGroupSuccess,
+                ConnectorCanvasActions.disableProcessGroupSuccess
+            ),
+            concatLatestFrom(() => [this.store.select(selectConnectorId), this.store.select(selectProcessGroupId)]),
+            filter(([, connectorId]) => connectorId.length > 0),
+            map(([action, connectorId, currentProcessGroupId]) =>
+                action.processGroupId === currentProcessGroupId
+                    ? ConnectorCanvasActions.loadConnectorFlow({
+                          connectorId,
+                          processGroupId: currentProcessGroupId!
+                      })
+                    : ConnectorCanvasActions.loadChildProcessGroup({ processGroupId: action.processGroupId })
+            )
+        )
+    );
+
+    loadChildProcessGroup$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.loadChildProcessGroup),
+            mergeMap(({ processGroupId }) =>
+                this.flowService.getProcessGroup(processGroupId).pipe(
+                    map((processGroup) =>
+                        ConnectorCanvasActions.loadChildProcessGroupSuccess({ processGroupId, processGroup })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.loadChildProcessGroupFailure({
+                                    processGroupId,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    runOnceComponent$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.runOnceComponent),
+            mergeMap(({ request }) =>
+                this.flowService.runOnce(request).pipe(
+                    map((component: ProcessorEntity) =>
+                        ConnectorCanvasActions.runOnceComponentSuccess({ componentId: request.id, component })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.runOnceComponentFailure({
+                                    componentId: request.id,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    terminateComponentThreads$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.terminateComponentThreads),
+            mergeMap(({ request }) =>
+                this.flowService.terminateThreads(request).pipe(
+                    map((component: ProcessorEntity) =>
+                        ConnectorCanvasActions.terminateComponentThreadsSuccess({
+                            componentId: request.id,
+                            component
+                        })
+                    ),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(error, (message) =>
+                                ConnectorCanvasActions.terminateComponentThreadsFailure({
+                                    componentId: request.id,
+                                    error: message
+                                })
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    createComponentRequest$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.createComponentRequest),
+            map((action) => action.request),
+            concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+            switchMap(([request, processGroupId]) => {
+                // Downstream create effects drop requests without a process group, so clear dragging here.
+                if (processGroupId == null) {
+                    return of(ConnectorCanvasActions.setDragging({ dragging: false }));
+                }
+                switch (request.type) {
+                    case ComponentType.Processor:
+                        return of(ConnectorCanvasActions.openNewProcessorDialog({ request: { request } }));
+                    case ComponentType.InputPort:
+                    case ComponentType.OutputPort:
+                        return of(ConnectorCanvasActions.openNewPortDialog({ request }));
+                    case ComponentType.ProcessGroup:
+                        return of(
+                            ConnectorCanvasActions.openNewProcessGroupDialog({
+                                request: { request, parameterContexts: [] }
+                            })
+                        );
+                    case ComponentType.RemoteProcessGroup:
+                        return of(ConnectorCanvasActions.openNewRemoteProcessGroupDialog({ request }));
+                    case ComponentType.Funnel:
+                        return of(ConnectorCanvasActions.createFunnel({ request }));
+                    case ComponentType.Label:
+                        return of(ConnectorCanvasActions.createLabel({ request }));
+                    default:
+                        // No dialog opens to clear dragging through afterClosed().
+                        return from([
+                            ConnectorCanvasActions.setDragging({ dragging: false }),
+                            ErrorActions.addBannerError({
+                                errorContext: {
+                                    errors: [`Unsupported component type: ${request.type}`],
+                                    context: ErrorContextKey.CONNECTOR_CANVAS
+                                }
+                            })
+                        ]);
+                }
+            })
+        )
+    );
+
+    openNewProcessorDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.openNewProcessorDialog),
+                concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+                filter(([, processGroupId]) => processGroupId != null),
+                tap(([{ request }, processGroupId]) => {
+                    const dialogRef = this.dialog.open(CreateProcessor, {
+                        ...LARGE_DIALOG,
+                        data: request
+                    });
+                    const instance = dialogRef.componentInstance;
+                    instance.saving$ = this.store.select(selectSaving);
+                    instance.processorTypes$ = this.store.select(selectProcessorTypes);
+                    instance.processorTypesLoadingStatus$ = this.store.select(selectExtensionTypesLoadingStatus);
+
+                    const afterClosed$ = dialogRef.afterClosed().pipe(take(1));
+                    instance.createProcessor.pipe(takeUntil(afterClosed$)).subscribe((createRequest) => {
+                        this.store.dispatch(
+                            ConnectorCanvasActions.createCanvasComponent({
+                                request: { ...createRequest, type: ComponentType.Processor },
+                                processGroupId: processGroupId!,
+                                // The processor dialog has no error banner of its own.
+                                errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                            })
+                        );
+                    });
+                    afterClosed$.subscribe(() =>
+                        this.store.dispatch(ConnectorCanvasActions.setDragging({ dragging: false }))
+                    );
+                })
+            ),
+        { dispatch: false }
+    );
+
+    openNewPortDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.openNewPortDialog),
+                concatLatestFrom(() => [
+                    this.store.select(selectProcessGroupId),
+                    this.store.select(selectParentProcessGroupId)
+                ]),
+                filter(([, processGroupId]) => processGroupId != null),
+                tap(([{ request }, processGroupId, parentProcessGroupId]) => {
+                    const dialogRef = this.dialog.open(CreatePort, {
+                        ...SMALL_DIALOG,
+                        data: request
+                    });
+                    const instance = dialogRef.componentInstance;
+                    instance.saving$ = this.store.select(selectSaving);
+                    instance.isRootProcessGroup = parentProcessGroupId == null;
+
+                    const afterClosed$ = dialogRef.afterClosed().pipe(take(1));
+                    instance.createPort.pipe(takeUntil(afterClosed$)).subscribe((createRequest) => {
+                        const type =
+                            createRequest.type === ComponentType.OutputPort
+                                ? ComponentType.OutputPort
+                                : ComponentType.InputPort;
+                        this.store.dispatch(
+                            ConnectorCanvasActions.createCanvasComponent({
+                                request: { ...createRequest, type },
+                                processGroupId: processGroupId!,
+                                errorContextKey: ErrorContextKey.PORT
+                            })
+                        );
+                    });
+                    afterClosed$.subscribe(() =>
+                        this.store.dispatch(ConnectorCanvasActions.setDragging({ dragging: false }))
+                    );
+                })
+            ),
+        { dispatch: false }
+    );
+
+    openNewProcessGroupDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.openNewProcessGroupDialog),
+                concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+                filter(([, processGroupId]) => processGroupId != null),
+                tap(([{ request }, processGroupId]) => {
+                    const dialogRef = this.dialog.open(CreateProcessGroup, {
+                        ...MEDIUM_DIALOG,
+                        data: request
+                    });
+                    const instance = dialogRef.componentInstance;
+                    instance.parameterContexts = request.parameterContexts;
+                    instance.saving$ = this.store.select(selectSaving);
+                    instance.currentUser$ = this.store.select(selectCurrentUser);
+                    // Connector flows bind the connector's own parameter context.
+                    instance.supportsParameters = false;
+
+                    const afterClosed$ = dialogRef.afterClosed().pipe(take(1));
+                    instance.createProcessGroup.pipe(takeUntil(afterClosed$)).subscribe((createRequest) => {
+                        this.store.dispatch(
+                            ConnectorCanvasActions.createCanvasComponent({
+                                request: { ...createRequest, type: ComponentType.ProcessGroup },
+                                processGroupId: processGroupId!,
+                                errorContextKey: ErrorContextKey.PROCESS_GROUP
+                            })
+                        );
+                    });
+                    instance.uploadProcessGroup.pipe(takeUntil(afterClosed$)).subscribe((uploadRequest) => {
+                        this.store.dispatch(
+                            ConnectorCanvasActions.uploadProcessGroup({
+                                request: uploadRequest,
+                                processGroupId: processGroupId!
+                            })
+                        );
+                    });
+                    afterClosed$.subscribe(() =>
+                        this.store.dispatch(ConnectorCanvasActions.setDragging({ dragging: false }))
+                    );
+                })
+            ),
+        { dispatch: false }
+    );
+
+    openNewRemoteProcessGroupDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.openNewRemoteProcessGroupDialog),
+                concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+                filter(([, processGroupId]) => processGroupId != null),
+                tap(([{ request }, processGroupId]) => {
+                    const dialogRef = this.dialog.open(CreateRemoteProcessGroup, {
+                        ...LARGE_DIALOG,
+                        data: request
+                    });
+                    const instance = dialogRef.componentInstance;
+                    instance.saving$ = this.store.select(selectSaving);
+
+                    const afterClosed$ = dialogRef.afterClosed().pipe(take(1));
+                    instance.createRemoteProcessGroup.pipe(takeUntil(afterClosed$)).subscribe((createRequest) => {
+                        this.store.dispatch(
+                            ConnectorCanvasActions.createCanvasComponent({
+                                request: { ...createRequest, type: ComponentType.RemoteProcessGroup },
+                                processGroupId: processGroupId!,
+                                errorContextKey: ErrorContextKey.REMOTE_PROCESS_GROUP
+                            })
+                        );
+                    });
+                    afterClosed$.subscribe(() =>
+                        this.store.dispatch(ConnectorCanvasActions.setDragging({ dragging: false }))
+                    );
+                })
+            ),
+        { dispatch: false }
+    );
+
+    createFunnel$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.createFunnel),
+            concatLatestFrom(() => this.store.select(selectProcessGroupId)),
+            filter(([, processGroupId]) => processGroupId != null),
+            map(([{ request }, processGroupId]) =>
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: { ...request, type: ComponentType.Funnel },
+                    processGroupId: processGroupId!,
+                    errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            )
+        )
+    );
+
+    createLabel$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.createLabel),
+            concatLatestFrom(() => [this.store.select(selectProcessGroupId), this.store.select(selectMaxLabelZIndex)]),
+            filter(([, processGroupId]) => processGroupId != null),
+            map(([{ request }, processGroupId, maxZIndex]) =>
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: { ...request, type: ComponentType.Label, zIndex: maxZIndex + 1 },
+                    processGroupId: processGroupId!,
+                    errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            )
+        )
+    );
+
+    /**
+     * exhaustMap drops a second submit while the first is in flight so a double click
+     * cannot create two components.
+     */
+    createCanvasComponent$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.createCanvasComponent),
+            exhaustMap(({ request, processGroupId, errorContextKey }) =>
+                this.connectorEditService.createComponent(processGroupId, request).pipe(
+                    map((response) => ConnectorCanvasActions.createCanvasComponentSuccess({ response })),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(
+                                error,
+                                (message) =>
+                                    ConnectorCanvasActions.createCanvasComponentFailure({
+                                        error: message,
+                                        errorContextKey
+                                    }),
+                                errorContextKey
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    createCanvasComponentSuccess$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.createCanvasComponentSuccess),
+                tap(({ response }) => {
+                    this.dialog.closeAll();
+                    this.store.dispatch(
+                        ConnectorCanvasActions.selectComponents({
+                            request: {
+                                components: [{ id: response.payload.id, componentType: response.type }]
+                            }
+                        })
+                    );
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * Dialogs with their own error banner stay open so the user can retry. Any other
+     * failure is shown on the canvas banner, which an open dialog would cover.
+     */
+    createCanvasComponentFailure$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ConnectorCanvasActions.createCanvasComponentFailure),
+                filter(({ errorContextKey }) => errorContextKey === ErrorContextKey.CONNECTOR_CANVAS),
+                tap(() => this.dialog.closeAll())
+            ),
+        { dispatch: false }
+    );
+
+    uploadProcessGroup$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.uploadProcessGroup),
+            exhaustMap(({ request, processGroupId }) =>
+                this.connectorEditService.uploadProcessGroup(processGroupId, request).pipe(
+                    switchMap((payload) => {
+                        const response: ConnectorCanvasCreatedComponent = {
+                            type: ComponentType.ProcessGroup,
+                            payload
+                        };
+                        return from([
+                            ConnectorCanvasActions.createCanvasComponentSuccess({ response }),
+                            ConnectorCanvasActions.uploadProcessGroupSuccess({ response })
+                        ]);
+                    }),
+                    catchError((error: HttpErrorResponse) =>
+                        from(
+                            this.mutationFailure(
+                                error,
+                                (message) => ConnectorCanvasActions.uploadProcessGroupFailure({ error: message }),
+                                ErrorContextKey.PROCESS_GROUP
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    /**
+     * A single component is deleted directly; a multi-selection goes through a snippet.
+     * Deleting a single connection reloads its endpoints so their validity updates.
+     * A failure reloads the flow so the canvas reflects what the server kept.
+     * exhaustMap drops a second delete while the first is in flight so the same revisions
+     * are not sent twice.
+     */
+    deleteSelectedComponents$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ConnectorCanvasActions.deleteSelectedComponents),
+            concatLatestFrom(() => [
+                this.store.select(selectConnectorId),
+                this.store.select(selectProcessGroupId),
+                this.store.select(selectConnections)
+            ]),
+            filter(
+                ([{ request }, connectorId, processGroupId]) =>
+                    request.length > 0 && connectorId !== '' && processGroupId !== null
+            ),
+            exhaustMap(([{ request }, connectorId, processGroupId, connections]) => {
+                const sourceProcessGroupId = processGroupId as string;
+                const delete$ =
+                    request.length === 1
+                        ? this.connectorEditService.deleteComponent(request[0])
+                        : this.connectorEditService.deleteComponents(request, sourceProcessGroupId);
+                const deletedConnection =
+                    request.length === 1 && request[0].type === ComponentType.Connection
+                        ? connections.find((connection) => connection.id === request[0].id)
+                        : undefined;
+
+                return delete$.pipe(
+                    mergeMap(() => {
+                        const actions: Action[] = [
+                            ConnectorCanvasActions.deleteSelectedComponentsSuccess({
+                                ids: request.map((component) => ({ id: component.id, type: component.type }))
+                            })
+                        ];
+                        if (deletedConnection) {
+                            actions.push(
+                                ConnectorCanvasActions.loadComponentsForConnection({ connection: deletedConnection })
+                            );
+                        }
+                        return from(actions);
+                    }),
+                    catchError((error: HttpErrorResponse) =>
+                        of(error).pipe(
+                            concatLatestFrom(() => [
+                                this.store.select(selectConnectorId),
+                                this.store.select(selectProcessGroupId)
+                            ]),
+                            mergeMap(([, currentConnectorId, currentProcessGroupId]) => {
+                                const actions: Action[] = this.mutationFailure(error, (message) =>
+                                    ConnectorCanvasActions.deleteSelectedComponentsFailure({ error: message })
+                                );
+                                if (
+                                    currentConnectorId === connectorId &&
+                                    currentProcessGroupId === sourceProcessGroupId
+                                ) {
+                                    actions.push(
+                                        ConnectorCanvasActions.loadConnectorFlow({
+                                            connectorId,
+                                            processGroupId: sourceProcessGroupId
+                                        })
+                                    );
+                                }
+                                return from(actions);
+                            })
+                        )
+                    )
+                );
+            })
+        )
+    );
+
+    /**
+     * The components a connection touches whose displayed state depends on it. A remote
+     * port resolves to its remote process group; funnels and child process groups are skipped.
+     */
+    private connectionEndpoints(connection: ConnectionEntity): ConnectionEndpoint[] {
+        const endpoints = [
+            {
+                componentType: getComponentTypeForSource(connection.sourceType),
+                id: connection.sourceId,
+                groupId: connection.sourceGroupId
+            },
+            {
+                componentType: getComponentTypeForDestination(connection.destinationType),
+                id: connection.destinationId,
+                groupId: connection.destinationGroupId
+            }
+        ];
+        return endpoints.flatMap(({ componentType, id, groupId }): ConnectionEndpoint[] => {
+            switch (componentType) {
+                case ComponentType.Processor:
+                case ComponentType.InputPort:
+                case ComponentType.OutputPort:
+                    return [{ componentId: id, componentType }];
+                case ComponentType.RemoteProcessGroup:
+                    return [{ componentId: groupId, componentType }];
+                default:
+                    return [];
+            }
+        });
+    }
+
+    /**
+     * The destination a connection moved away from, when losing the connection can change what
+     * it displays. Processors and output ports may become invalid without an incoming connection,
+     * and a remote process group's port summary changes. A funnel has no connection-dependent
+     * state, and a child group's input port reports its validity inside that group.
+     */
+    private previousDestinationEndpoint(
+        previousDestination: { id?: string; type?: string; groupId?: string } | undefined
+    ): ConnectionEndpoint | null {
+        if (!previousDestination?.type) {
+            return null;
+        }
+        const componentType = getComponentTypeForDestination(previousDestination.type);
+        switch (componentType) {
+            case ComponentType.Processor:
+            case ComponentType.OutputPort:
+                return previousDestination.id ? { componentId: previousDestination.id, componentType } : null;
+            case ComponentType.RemoteProcessGroup:
+                return previousDestination.groupId ? { componentId: previousDestination.groupId, componentType } : null;
+            default:
+                return null;
+        }
+    }
+
+    private mutationFailure(
+        error: HttpErrorResponse,
+        failure: (message: string) => Action,
+        context: ErrorContextKey = ErrorContextKey.CONNECTOR_CANVAS
+    ): Action[] {
+        const message = this.errorHelper.getErrorString(error);
+        return [
+            failure(message),
+            ErrorActions.addBannerError({
+                errorContext: { errors: [message], context }
+            })
+        ];
+    }
+
+    private getConnectableDestinationType(componentType: ComponentType): ConnectionDTO['destination']['type'] | null {
+        switch (componentType) {
+            case ComponentType.Processor:
+                return 'PROCESSOR';
+            case ComponentType.OutputPort:
+                return 'OUTPUT_PORT';
+            case ComponentType.Funnel:
+                return 'FUNNEL';
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Sanitize all positions in a connector flow snapshot before they enter NgRx state.
+     * The connector canvas renders via the reusable canvas component, so out-of-range
+     * coordinates must be clamped here to prevent SVG overflow.
+     */
+    private sanitizeConnectorFlowPositions(flow: FlowDTO | undefined): FlowDTO {
+        const sanitizeCollectionPositions = <E extends { id: string; position: Position }>(
+            entities: readonly E[],
+            componentKind: string
+        ): E[] =>
+            entities.map((entity) => ({
+                ...entity,
+                position: sanitizePosition(entity.position, {
+                    componentId: entity.id,
+                    componentKind,
+                    warnedIds: this.warnedPositionIds
+                })
+            }));
+        const sanitizeBends = (entityId: string, bends: readonly Position[] | null | undefined): Position[] =>
+            (bends ?? []).map((bend, index) =>
+                sanitizePosition(bend, {
+                    componentId: `${entityId}:bend:${index}`,
+                    componentKind: 'Connection bend',
+                    warnedIds: this.warnedPositionIds
+                })
+            );
+        const sanitizeConnections = (connections: readonly ConnectionEntity[]): ConnectionEntity[] =>
+            connections.map((entity) => ({
+                ...entity,
+                bends: sanitizeBends(entity.id, entity.bends),
+                component: entity.component
+                    ? {
+                          ...entity.component,
+                          bends: sanitizeBends(entity.id, entity.component.bends)
+                      }
+                    : entity.component
+            }));
+
+        return {
+            labels: sanitizeCollectionPositions(flow?.labels ?? [], 'Label'),
+            funnels: sanitizeCollectionPositions(flow?.funnels ?? [], 'Funnel'),
+            inputPorts: sanitizeCollectionPositions(flow?.inputPorts ?? [], 'Input Port'),
+            outputPorts: sanitizeCollectionPositions(flow?.outputPorts ?? [], 'Output Port'),
+            remoteProcessGroups: sanitizeCollectionPositions(flow?.remoteProcessGroups ?? [], 'Remote Process Group'),
+            processGroups: sanitizeCollectionPositions(flow?.processGroups ?? [], 'Process Group'),
+            processors: sanitizeCollectionPositions(flow?.processors ?? [], 'Processor'),
+            connections: sanitizeConnections(flow?.connections ?? [])
+        };
+    }
+}

@@ -1,0 +1,70 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.processors.groovyx.sql;
+
+import groovy.lang.GString;
+import groovy.sql.InParameter;
+import groovy.sql.Sql;
+
+import java.io.InputStream;
+import java.io.Reader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.sql.Types;
+
+/***
+ * class to simplify work with CLOB, BLOB, DATE, and TIMESTAMP types.
+ * Allows following parameters set correctly Sql.BLOB(InputStream), Sql.CLOB(Reader), DATE(java.util.Date), TIMESTAMP(java.util.Date)
+ */
+
+public class OSql extends Sql {
+    public OSql(Connection connection) {
+        super(connection);
+    }
+
+    @Override
+    protected void setObject(PreparedStatement statement, int i, Object value) throws SQLException {
+        try {
+            if (value instanceof final InParameter p) {
+                if (p.getType() == Types.BLOB && p.getValue() instanceof final InputStream inputStream) {
+                    statement.setBlob(i, inputStream);
+                    return;
+                }
+                if (p.getType() == Types.CLOB && p.getValue() instanceof final Reader reader) {
+                    statement.setClob(i, reader);
+                    return;
+                }
+                if (p.getType() == Types.DATE && p.getValue() instanceof final java.util.Date date && !(p.getValue() instanceof java.sql.Date)) {
+                    statement.setDate(i, new java.sql.Date(date.getTime()));
+                    return;
+                }
+                if (p.getType() == Types.TIMESTAMP && p.getValue() instanceof final java.util.Date date && !(p.getValue() instanceof Timestamp)) {
+                    statement.setTimestamp(i, new Timestamp(date.getTime()));
+                    return;
+                }
+            }
+            if (value instanceof GString) {
+                value = value.toString();
+            }
+            super.setObject(statement, i, value);
+        } catch (Exception e) {
+            throw new SQLException("Can't set a parameter #" + i + " to value type " + (value == null ? "null" : value.getClass().getName()) + ": " + e.getMessage(), e);
+        }
+    }
+}

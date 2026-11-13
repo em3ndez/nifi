@@ -1,0 +1,23 @@
+[ {
+  "NAME" : "John Doe",
+  "age" : 30,
+  "application" : "Apache NiFi",
+  "addresses" : [ {
+    "NAME" : "Home",
+    "street" : "7777 Main Street",
+    "city" : "My City",
+    "state" : "MS",
+    "zip" : "90210"
+  } ]
+}, {
+  "NAME" : "Jane Smith",
+  "age" : 25,
+  "application" : "Apache Kafka",
+  "addresses" : [ {
+    "NAME" : "Work",
+    "street" : "1234 Office Blvd",
+    "city" : "Tech Town",
+    "state" : "CA",
+    "zip" : "94105"
+  } ]
+} ]

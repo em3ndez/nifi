@@ -19,27 +19,24 @@ package org.apache.nifi.tests.system.clustering;
 import org.apache.nifi.tests.system.NiFiInstance;
 import org.apache.nifi.tests.system.NiFiInstanceFactory;
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.tests.system.SpawnedClusterNiFiInstanceFactory;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.dto.NodeDTO;
-import org.apache.nifi.web.api.entity.ClusteSummaryEntity;
-import org.junit.Test;
+import org.apache.nifi.web.api.entity.ClusterSummaryEntity;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.Collection;
 
-import static junit.framework.TestCase.assertTrue;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class NodeRestartWithNewNodeIdIT extends NiFiSystemIT {
 
     @Override
-    protected NiFiInstanceFactory getInstanceFactory() {
-        return new SpawnedClusterNiFiInstanceFactory(
-            "src/test/resources/conf/clustered/node1/bootstrap.conf",
-            "src/test/resources/conf/clustered/node2/bootstrap.conf");
+    public NiFiInstanceFactory getInstanceFactory() {
+        return createTwoNodeInstanceFactory();
     }
 
     @Test
@@ -60,7 +57,7 @@ public class NodeRestartWithNewNodeIdIT extends NiFiSystemIT {
         // Wait for the second node to reconnect.
         waitForAllNodesConnected();
 
-        final ClusteSummaryEntity clusterSummary = getNifiClient().getFlowClient().getClusterSummary();
+        final ClusterSummaryEntity clusterSummary = getNifiClient().getFlowClient().getClusterSummary();
         // 2/2 because we replaced the state directory with a different state that had a different identifier. This will result in
         // 2 nodes each with a different UUID but the same hostname & port, but we should see that the cluster removes the old Node
         // Identifier, so we will have only 2 nodes total.
@@ -83,7 +80,6 @@ public class NodeRestartWithNewNodeIdIT extends NiFiSystemIT {
         assertEquals(originalNode2.getAddress(), updatedNode2.getAddress());
         assertEquals(originalNode2.getApiPort(), updatedNode2.getApiPort());
     }
-
 
     private void deleteChildren(final File dir) {
         if (!dir.exists()) {

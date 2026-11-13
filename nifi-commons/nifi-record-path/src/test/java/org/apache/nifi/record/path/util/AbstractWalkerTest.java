@@ -16,13 +16,6 @@
  */
 package org.apache.nifi.record.path.util;
 
-import static org.junit.Assert.assertEquals;
-
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
 import org.apache.nifi.record.path.FieldValue;
 import org.apache.nifi.serialization.SimpleRecordSchema;
 import org.apache.nifi.serialization.record.DataType;
@@ -31,6 +24,13 @@ import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.RecordSchema;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Abstract base class for tests that walk FieldValue hierarchies.
@@ -68,7 +68,7 @@ public abstract class AbstractWalkerTest {
     }
 
     protected Object[] buildMapRecordArray(int seed, int count) {
-        final ArrayList<MapRecord> list = new ArrayList<>();
+        final List<MapRecord> list = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             list.add(new MapRecord(getMapRecordSchema(), buildMapRecord(seed)));
             seed++;

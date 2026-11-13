@@ -17,13 +17,13 @@
 
 package org.apache.nifi.serialization;
 
+import org.apache.nifi.serialization.record.Record;
+import org.apache.nifi.serialization.record.RecordSet;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Collections;
 import java.util.Map;
-
-import org.apache.nifi.serialization.record.Record;
-import org.apache.nifi.serialization.record.RecordSet;
 
 public abstract class AbstractRecordSetWriter implements RecordSetWriter {
     private final OutputStream out;
@@ -68,7 +68,7 @@ public abstract class AbstractRecordSetWriter implements RecordSetWriter {
         return recordCount;
     }
 
-    protected final boolean isActiveRecordSet() {
+    public final boolean isActiveRecordSet() {
         return activeRecordSet;
     }
 
@@ -88,6 +88,7 @@ public abstract class AbstractRecordSetWriter implements RecordSetWriter {
             throw new IllegalStateException("Cannot finish RecordSet because no RecordSet has begun");
         }
 
+        activeRecordSet = false;
         final Map<String, String> attributes = onFinishRecordSet();
         return WriteResult.of(recordCount, attributes == null ? Collections.emptyMap() : attributes);
     }

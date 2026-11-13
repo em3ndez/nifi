@@ -1,0 +1,578 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.parameter.aws;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.nifi.components.ConfigVerificationResult;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.parameter.Parameter;
+import org.apache.nifi.parameter.ParameterGroup;
+import org.apache.nifi.parameter.ParameterTag;
+import org.apache.nifi.reporting.InitializationException;
+import org.apache.nifi.util.MockComponentLog;
+import org.apache.nifi.util.MockConfigurationContext;
+import org.apache.nifi.util.MockParameterProviderInitializationContext;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatcher;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretRequest;
+import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretResponse;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
+import software.amazon.awssdk.services.secretsmanager.model.ListSecretsRequest;
+import software.amazon.awssdk.services.secretsmanager.model.ListSecretsResponse;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.secretsmanager.model.SecretListEntry;
+import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
+import software.amazon.awssdk.services.secretsmanager.model.Tag;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+public class TestAwsSecretsManagerParameterProvider {
+
+    @Mock
+    private SecretsManagerClient defaultSecretsManager;
+
+    @Mock
+    private ListSecretsResponse emptyListSecretsResponse;
+
+    final ObjectMapper objectMapper = new ObjectMapper();
+
+    final List<Parameter> mySecretParameters = Arrays.asList(
+            parameter("paramA", "valueA"),
+            parameter("paramB", "valueB"),
+            parameter("otherC", "valueOther"),
+            parameter("paramD", "valueD"),
+            parameter("nonSensitiveE", "valueE"),
+            parameter("otherF", "valueF")
+    );
+    final List<Parameter> otherSecretParameters = Arrays.asList(
+            parameter("paramG", "valueG"),
+            parameter("otherH", "valueOther")
+    );
+    final List<ParameterGroup> mockParameterGroups = Arrays.asList(
+            new ParameterGroup("MySecret", mySecretParameters),
+            new ParameterGroup("OtherSecret", otherSecretParameters)
+    );
+
+    @Test
+    public void testFetchParametersWithNoSecrets() throws InitializationException {
+        final List<ParameterGroup> expectedGroups = Collections.singletonList(new ParameterGroup("MySecret", Collections.emptyList()));
+        runProviderTest(mockSecretsManagerWithTags(expectedGroups, Collections.emptyMap()), 0, ConfigVerificationResult.Outcome.SUCCESSFUL, "PATTERN", null);
+    }
+
+    @Test
+    public void testFetchParameters() throws InitializationException {
+        runProviderTest(mockSecretsManagerWithTags(mockParameterGroups, Collections.emptyMap()), 8, ConfigVerificationResult.Outcome.SUCCESSFUL, "PATTERN", null);
+    }
+
+    @Test
+    public void testFetchSpecificSecret() throws InitializationException {
+        runProviderTest(mockSecretsManagerNoList(mockParameterGroups, "MySecret"), 6, ConfigVerificationResult.Outcome.SUCCESSFUL, "ENUMERATION", "MySecret");
+    }
+
+    @Test
+    public void testFetchTwoSecrets() throws InitializationException {
+        runProviderTest(mockSecretsManagerNoList(mockParameterGroups, "MySecret,OtherSecret"), 8, ConfigVerificationResult.Outcome.SUCCESSFUL, "ENUMERATION", "MySecret,OtherSecret");
+    }
+
+    @Test
+    public void testFetchNonExistentSecret() throws InitializationException {
+        when(defaultSecretsManager.describeSecret(argThat(matchesDescribeSecretRequest("BadSecret")))).thenThrow(ResourceNotFoundException.builder().message("Fake exception").build());
+        when(defaultSecretsManager.getSecretValue(argThat(matchesGetSecretValueRequest("BadSecret")))).thenThrow(ResourceNotFoundException.builder().message("Fake exception").build());
+        runProviderTest(defaultSecretsManager, 0, ConfigVerificationResult.Outcome.FAILED, "ENUMERATION", "BadSecret");
+    }
+
+    @Test
+    public void testFetchParametersListFailure() throws InitializationException {
+        when(defaultSecretsManager.listSecrets(any(ListSecretsRequest.class))).thenThrow(SecretsManagerException.builder().message("Fake exception").build());
+        runProviderTest(defaultSecretsManager, 0, ConfigVerificationResult.Outcome.FAILED, "PATTERN", null);
+    }
+
+    @Test
+    public void testFetchParametersGetSecretFailure() throws InitializationException {
+        final List<SecretListEntry> secretList = Collections.singletonList(SecretListEntry.builder().name("MySecret").build());
+        final ListSecretsResponse listSecretsResponse = mock(ListSecretsResponse.class);
+        when(listSecretsResponse.secretList()).thenReturn(secretList);
+        when(defaultSecretsManager.listSecrets(argThat(ListSecretsRequestMatcher.hasToken(null)))).thenReturn(listSecretsResponse);
+        when(defaultSecretsManager.getSecretValue(argThat(matchesGetSecretValueRequest("MySecret")))).thenThrow(SecretsManagerException.builder().message("Fake exception").build());
+        runProviderTest(defaultSecretsManager, 0, ConfigVerificationResult.Outcome.FAILED, "PATTERN", null);
+    }
+
+    @Test
+    public void testFetchParametersWithNonStringValues() throws InitializationException {
+        // JSON with string, number, boolean, and null values
+        final String secretString = "{ \"stringParam\": \"stringValue\", \"numberParam\": 5432, \"booleanParam\": true, \"nullParam\": null }";
+
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+        final GetSecretValueResponse response = GetSecretValueResponse.builder()
+                .name("MixedSecret")
+                .secretString(secretString)
+                .build();
+        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest("MixedSecret")))).thenReturn(response);
+
+        // Mock DescribeSecret for tags (returns empty tags)
+        final DescribeSecretResponse describeResponse = DescribeSecretResponse.builder()
+                .name("MixedSecret")
+                .build();
+        when(secretsManager.describeSecret(argThat(matchesDescribeSecretRequest("MixedSecret")))).thenReturn(describeResponse);
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 3, ConfigVerificationResult.Outcome.SUCCESSFUL, "ENUMERATION", "MixedSecret");
+
+        assertEquals(1, parameterGroups.size());
+        final ParameterGroup group = parameterGroups.get(0);
+        assertEquals("MixedSecret", group.getGroupName());
+
+        final Map<String, String> parameterValues = group.getParameters().stream()
+                .collect(Collectors.toMap(p -> p.getDescriptor().getName(), Parameter::getValue));
+
+        assertEquals("stringValue", parameterValues.get("stringParam"));
+        assertEquals("5432", parameterValues.get("numberParam"));
+        assertEquals("true", parameterValues.get("booleanParam"));
+        // nullParam should not be included
+        assertEquals(3, parameterValues.size());
+    }
+
+    @Test
+    public void testFetchParametersWithNestedObjectsIgnored() throws InitializationException {
+        // JSON with nested objects and arrays that should be ignored
+        final String secretString = "{ \"validParam\": \"validValue\", \"nestedObject\": { \"inner\": \"value\" }, \"arrayParam\": [1, 2, 3] }";
+
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+        final GetSecretValueResponse response = GetSecretValueResponse.builder()
+                .name("NestedSecret")
+                .secretString(secretString)
+                .build();
+        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest("NestedSecret")))).thenReturn(response);
+
+        // Mock DescribeSecret for tags (returns empty tags)
+        final DescribeSecretResponse describeResponse = DescribeSecretResponse.builder()
+                .name("NestedSecret")
+                .build();
+        when(secretsManager.describeSecret(argThat(matchesDescribeSecretRequest("NestedSecret")))).thenReturn(describeResponse);
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 1, ConfigVerificationResult.Outcome.SUCCESSFUL, "ENUMERATION", "NestedSecret");
+
+        assertEquals(1, parameterGroups.size());
+        final ParameterGroup group = parameterGroups.get(0);
+
+        final Map<String, String> parameterValues = group.getParameters().stream()
+                .collect(Collectors.toMap(p -> p.getDescriptor().getName(), Parameter::getValue));
+
+        // Only the simple value param should be included
+        assertEquals(1, parameterValues.size());
+        assertEquals("validValue", parameterValues.get("validParam"));
+    }
+
+    @Test
+    public void testFetchParametersWithTagsPatternStrategy() throws InitializationException {
+        final List<Tag> secretTags = List.of(
+                Tag.builder().key("environment").value("production").build(),
+                Tag.builder().key("team").value("data-platform").build()
+        );
+
+        final SecretsManagerClient secretsManager = mockSecretsManagerWithTags(
+                List.of(new ParameterGroup("TaggedSecret", List.of(parameter("param1", "value1")))),
+                Map.of("TaggedSecret", secretTags)
+        );
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 1,
+                ConfigVerificationResult.Outcome.SUCCESSFUL, "PATTERN", null);
+
+        assertEquals(1, parameterGroups.size());
+        final ParameterGroup group = parameterGroups.get(0);
+        assertEquals("TaggedSecret", group.getGroupName());
+        assertEquals(1, group.getParameters().size());
+
+        final Parameter parameter = group.getParameters().get(0);
+        assertEquals("param1", parameter.getDescriptor().getName());
+        assertEquals("value1", parameter.getValue());
+
+        // Verify tags are present
+        final List<ParameterTag> tags = parameter.getTags();
+        assertEquals(2, tags.size());
+        assertEquals("environment", tags.get(0).getKey());
+        assertEquals("production", tags.get(0).getValue());
+        assertEquals("team", tags.get(1).getKey());
+        assertEquals("data-platform", tags.get(1).getValue());
+    }
+
+    @Test
+    public void testFetchParametersWithTagsEnumerationStrategy() throws InitializationException {
+        final List<Tag> secretTags = List.of(
+                Tag.builder().key("cost-center").value("12345").build()
+        );
+
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+
+        // Mock GetSecretValue
+        final String secretString = "{ \"dbPassword\": \"secret123\" }";
+        final GetSecretValueResponse response = GetSecretValueResponse.builder()
+                .name("EnumeratedSecret")
+                .secretString(secretString)
+                .build();
+        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest("EnumeratedSecret")))).thenReturn(response);
+
+        // Mock DescribeSecret to return tags
+        final DescribeSecretResponse describeResponse = DescribeSecretResponse.builder()
+                .name("EnumeratedSecret")
+                .tags(secretTags)
+                .build();
+        when(secretsManager.describeSecret(argThat(matchesDescribeSecretRequest("EnumeratedSecret")))).thenReturn(describeResponse);
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 1,
+                ConfigVerificationResult.Outcome.SUCCESSFUL, "ENUMERATION", "EnumeratedSecret");
+
+        assertEquals(1, parameterGroups.size());
+        final Parameter parameter = parameterGroups.get(0).getParameters().get(0);
+        assertEquals("dbPassword", parameter.getDescriptor().getName());
+
+        // Verify tags are present
+        final List<ParameterTag> tags = parameter.getTags();
+        assertEquals(1, tags.size());
+        assertEquals("cost-center", tags.get(0).getKey());
+        assertEquals("12345", tags.get(0).getValue());
+    }
+
+    @Test
+    public void testFetchParametersWithMultipleSecretsAndTags() throws InitializationException {
+        final Map<String, List<Tag>> secretTagsMap = Map.of(
+                "Secret1", List.of(Tag.builder().key("app").value("app1").build()),
+                "Secret2", List.of(Tag.builder().key("app").value("app2").build(), Tag.builder().key("env").value("dev").build())
+        );
+
+        final List<ParameterGroup> mockGroups = List.of(
+                new ParameterGroup("Secret1", List.of(parameter("key1", "val1"))),
+                new ParameterGroup("Secret2", List.of(parameter("key2", "val2"), parameter("key3", "val3")))
+        );
+
+        final SecretsManagerClient secretsManager = mockSecretsManagerWithTags(mockGroups, secretTagsMap);
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 3,
+                ConfigVerificationResult.Outcome.SUCCESSFUL, "PATTERN", null);
+
+        assertEquals(2, parameterGroups.size());
+
+        // Find Secret1 group
+        final ParameterGroup secret1Group = parameterGroups.stream()
+                .filter(g -> "Secret1".equals(g.getGroupName()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(1, secret1Group.getParameters().size());
+        assertEquals(1, secret1Group.getParameters().get(0).getTags().size());
+        assertEquals("app1", secret1Group.getParameters().get(0).getTags().get(0).getValue());
+
+        // Find Secret2 group
+        final ParameterGroup secret2Group = parameterGroups.stream()
+                .filter(g -> "Secret2".equals(g.getGroupName()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(2, secret2Group.getParameters().size());
+        // Both parameters in Secret2 should have the same tags
+        for (final Parameter param : secret2Group.getParameters()) {
+            assertEquals(2, param.getTags().size());
+        }
+    }
+
+    @Test
+    public void testFetchPlainTextSecretEnumeration() throws InitializationException {
+        final String secretName = "PlainTextSecret";
+        final String plainTextContent = "Lorem ipsum dolor sit amet, consectetur adipiscing elit";
+
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+
+        final GetSecretValueResponse response = GetSecretValueResponse.builder()
+                .name(secretName)
+                .secretString(plainTextContent)
+                .build();
+        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest(secretName)))).thenReturn(response);
+
+        final DescribeSecretResponse describeResponse = DescribeSecretResponse.builder()
+                .name(secretName)
+                .build();
+        when(secretsManager.describeSecret(argThat(matchesDescribeSecretRequest(secretName)))).thenReturn(describeResponse);
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 1,
+                ConfigVerificationResult.Outcome.SUCCESSFUL, "ENUMERATION", secretName);
+
+        assertEquals(1, parameterGroups.size());
+        final ParameterGroup group = parameterGroups.get(0);
+        assertEquals(secretName, group.getGroupName());
+        assertEquals(1, group.getParameters().size());
+
+        final Parameter parameter = group.getParameters().get(0);
+        assertEquals(secretName, parameter.getDescriptor().getName());
+        assertEquals(plainTextContent, parameter.getValue());
+    }
+
+    @Test
+    public void testFetchMixedJsonAndPlainTextSecretsPattern() throws InitializationException {
+        final String plainTextSecretName = "PlainTextSecret";
+        final String jsonSecretName = "JsonSecret";
+        final String plainTextContent = "Sed ut perspiciatis unde omnis iste natus error sit voluptatem";
+        final String jsonContent = "{ \"serverHost\": \"db.example.com\", \"serverPort\": \"5432\" }";
+
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+
+        final SecretListEntry plainTextEntry = SecretListEntry.builder().name(plainTextSecretName).build();
+        final SecretListEntry jsonEntry = SecretListEntry.builder().name(jsonSecretName).build();
+
+        final ListSecretsResponse firstPage = mock(ListSecretsResponse.class);
+        when(firstPage.secretList()).thenReturn(List.of(plainTextEntry, jsonEntry));
+        when(firstPage.nextToken()).thenReturn(null);
+        when(secretsManager.listSecrets(argThat(ListSecretsRequestMatcher.hasToken(null)))).thenReturn(firstPage);
+
+        final GetSecretValueResponse plainTextResponse = GetSecretValueResponse.builder()
+                .name(plainTextSecretName)
+                .secretString(plainTextContent)
+                .build();
+        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest(plainTextSecretName)))).thenReturn(plainTextResponse);
+
+        final GetSecretValueResponse jsonResponse = GetSecretValueResponse.builder()
+                .name(jsonSecretName)
+                .secretString(jsonContent)
+                .build();
+        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest(jsonSecretName)))).thenReturn(jsonResponse);
+
+        final List<ParameterGroup> parameterGroups = runProviderTest(secretsManager, 3,
+                ConfigVerificationResult.Outcome.SUCCESSFUL, "PATTERN", null);
+
+        assertEquals(2, parameterGroups.size());
+
+        final ParameterGroup plainTextGroup = parameterGroups.stream()
+                .filter(g -> plainTextSecretName.equals(g.getGroupName()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(1, plainTextGroup.getParameters().size());
+        assertEquals(plainTextSecretName, plainTextGroup.getParameters().get(0).getDescriptor().getName());
+        assertEquals(plainTextContent, plainTextGroup.getParameters().get(0).getValue());
+
+        final ParameterGroup jsonGroup = parameterGroups.stream()
+                .filter(g -> jsonSecretName.equals(g.getGroupName()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(2, jsonGroup.getParameters().size());
+        final Map<String, String> jsonParams = jsonGroup.getParameters().stream()
+                .collect(Collectors.toMap(p -> p.getDescriptor().getName(), Parameter::getValue));
+        assertEquals("db.example.com", jsonParams.get("serverHost"));
+        assertEquals("5432", jsonParams.get("serverPort"));
+    }
+
+    private AwsSecretsManagerParameterProvider getParameterProvider() {
+        return spy(new AwsSecretsManagerParameterProvider());
+    }
+
+    private SecretsManagerClient mockSecretsManagerNoList(final List<ParameterGroup> mockParameterGroups, final String secretNames) {
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+
+        mockParameterGroups.forEach(group -> {
+            final String groupName = group.getGroupName();
+            for (String secretName : Arrays.asList(secretNames.split(","))) {
+                if (groupName.equalsIgnoreCase(secretName)) {
+                    final Map<String, String> keyValues = group.getParameters().stream().collect(Collectors.toMap(
+                            param -> param.getDescriptor().getName(),
+                            Parameter::getValue));
+                    final String secretString;
+                    try {
+                        secretString = objectMapper.writeValueAsString(keyValues);
+                        final GetSecretValueResponse response = GetSecretValueResponse.builder().name(groupName).secretString(secretString).build();
+                        when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest(groupName))))
+                                .thenReturn(response);
+
+                        // Mock DescribeSecret for tags (returns empty tags)
+                        final DescribeSecretResponse describeResponse = DescribeSecretResponse.builder()
+                                .name(groupName)
+                                .build();
+                        when(secretsManager.describeSecret(argThat(matchesDescribeSecretRequest(groupName))))
+                                .thenReturn(describeResponse);
+                    } catch (final JsonProcessingException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+            }
+        });
+        return secretsManager;
+    }
+
+    private List<ParameterGroup> runProviderTest(final SecretsManagerClient secretsManager,
+                                                 final int expectedCount,
+                                                 final ConfigVerificationResult.Outcome expectedOutcome,
+                                                 final String listingStrategy,
+                                                 final String secretNames) throws InitializationException {
+
+        final AwsSecretsManagerParameterProvider parameterProvider = getParameterProvider();
+        doReturn(secretsManager).when(parameterProvider).configureClient(any());
+        final MockParameterProviderInitializationContext initContext = new MockParameterProviderInitializationContext("id", "name",
+                new MockComponentLog("providerId", parameterProvider));
+        parameterProvider.initialize(initContext);
+        final Map<PropertyDescriptor, String> properties = new HashMap<>();
+        if (listingStrategy != null) {
+            properties.put(AwsSecretsManagerParameterProvider.SECRET_LISTING_STRATEGY, listingStrategy);
+        }
+        if (secretNames != null) {
+            properties.put(AwsSecretsManagerParameterProvider.SECRET_NAMES, secretNames);
+        }
+        final MockConfigurationContext mockConfigurationContext = new MockConfigurationContext(properties, null, null);
+
+        List<ParameterGroup> parameterGroups = new ArrayList<>();
+        // Verify parameter fetching
+        if (expectedOutcome == ConfigVerificationResult.Outcome.FAILED) {
+            assertThrows(RuntimeException.class, () -> parameterProvider.fetchParameters(mockConfigurationContext));
+        } else {
+            parameterGroups = parameterProvider.fetchParameters(mockConfigurationContext);
+            final int parameterCount = (int) parameterGroups.stream()
+                    .flatMap(group -> group.getParameters().stream())
+                    .count();
+            assertEquals(expectedCount, parameterCount);
+        }
+
+        // Verify config verification
+        final List<ConfigVerificationResult> results = parameterProvider.verify(mockConfigurationContext, initContext.getLogger());
+
+        assertEquals(1, results.size());
+        assertEquals(expectedOutcome, results.get(0).getOutcome());
+
+        return parameterGroups;
+    }
+
+    private SecretsManagerClient mockSecretsManagerWithTags(final List<ParameterGroup> mockParameterGroups,
+                                                            final Map<String, List<Tag>> secretTags) {
+        final SecretsManagerClient secretsManager = mock(SecretsManagerClient.class);
+        when(emptyListSecretsResponse.secretList()).thenReturn(Collections.emptyList());
+
+        String currentToken = null;
+        for (int i = 0; i < mockParameterGroups.size(); i++) {
+            final ParameterGroup group = mockParameterGroups.get(i);
+            final String groupName = group.getGroupName();
+            final List<Tag> tags = secretTags.getOrDefault(groupName, Collections.emptyList());
+
+            // Build SecretListEntry with tags
+            final SecretListEntry.Builder entryBuilder = SecretListEntry.builder().name(groupName);
+            if (!tags.isEmpty()) {
+                entryBuilder.tags(tags);
+            }
+            final List<SecretListEntry> secretList = Collections.singletonList(entryBuilder.build());
+
+            final ListSecretsResponse listSecretsResponse = mock(ListSecretsResponse.class);
+            when(listSecretsResponse.secretList()).thenReturn(secretList);
+            when(secretsManager.listSecrets(argThat(ListSecretsRequestMatcher.hasToken(currentToken)))).thenReturn(listSecretsResponse);
+
+            currentToken = "token-" + i;
+            when(listSecretsResponse.nextToken()).thenReturn(currentToken);
+        }
+        when(secretsManager.listSecrets(argThat(ListSecretsRequestMatcher.hasToken(currentToken)))).thenReturn(emptyListSecretsResponse);
+
+        mockParameterGroups.forEach(group -> {
+            final String groupName = group.getGroupName();
+            final Map<String, String> keyValues = group.getParameters().stream().collect(Collectors.toMap(
+                    param -> param.getDescriptor().getName(),
+                    Parameter::getValue));
+            final String secretString;
+            try {
+                secretString = objectMapper.writeValueAsString(keyValues);
+                final GetSecretValueResponse response = GetSecretValueResponse.builder().name(groupName).secretString(secretString).build();
+                when(secretsManager.getSecretValue(argThat(matchesGetSecretValueRequest(groupName))))
+                        .thenReturn(response);
+            } catch (final JsonProcessingException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        return secretsManager;
+    }
+
+    private static Parameter parameter(final String name, final String value) {
+        return new Parameter.Builder()
+            .name(name)
+            .value(value)
+            .build();
+    }
+
+    private static ArgumentMatcher<GetSecretValueRequest> matchesGetSecretValueRequest(final String groupName) {
+        return new GetSecretValueRequestMatcher(groupName);
+    }
+
+    private static ArgumentMatcher<DescribeSecretRequest> matchesDescribeSecretRequest(final String secretId) {
+        return new DescribeSecretRequestMatcher(secretId);
+    }
+
+    private static class GetSecretValueRequestMatcher implements ArgumentMatcher<GetSecretValueRequest> {
+
+        private final String secretId;
+
+        private GetSecretValueRequestMatcher(final String secretId) {
+            this.secretId = secretId;
+        }
+
+        @Override
+        public boolean matches(final GetSecretValueRequest argument) {
+            return argument != null && argument.secretId().equals(secretId);
+        }
+    }
+
+    private static class ListSecretsRequestMatcher implements ArgumentMatcher<ListSecretsRequest> {
+
+        private static ListSecretsRequestMatcher hasToken(final String token) {
+            return new ListSecretsRequestMatcher(token);
+        }
+
+        private final String token;
+
+        private ListSecretsRequestMatcher(final String token) {
+            this.token = token;
+        }
+
+        @Override
+        public boolean matches(final ListSecretsRequest argument) {
+            return argument != null && Objects.equals(argument.nextToken(), token);
+        }
+    }
+
+    private static class DescribeSecretRequestMatcher implements ArgumentMatcher<DescribeSecretRequest> {
+
+        private final String secretId;
+
+        private DescribeSecretRequestMatcher(final String secretId) {
+            this.secretId = secretId;
+        }
+
+        @Override
+        public boolean matches(final DescribeSecretRequest argument) {
+            return argument != null && argument.secretId().equals(secretId);
+        }
+    }
+}

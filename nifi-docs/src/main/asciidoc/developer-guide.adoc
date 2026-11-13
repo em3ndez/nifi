@@ -29,8 +29,8 @@ of the methods in the API, as this guide is intended to supplement the JavaDocs 
 This guide also assumes that the reader is familiar with Java 7 and Apache Maven.
 
 This guide is written by developers for developers. It is expected that before reading this
-guide, you have a basic understanding of NiFi and the concepts of dataflow. If not, please see the link:overview.html[NiFi Overview]
-and the link:user-guide.html[NiFi User Guide] to familiarize yourself with the concepts of NiFi.
+guide, you have a basic understanding of NiFi and the concepts of dataflow. If not, please see the <<overview.adoc#apache-nifi-overview,NiFi Overview>>
+and the <<user-guide.adoc#apache-nifi-user-guide,NiFi User Guide>> to familiarize yourself with the concepts of NiFi.
 
 
 [[components]]
@@ -62,9 +62,13 @@ high-level description of the most common extension points:
       monitoring information, and internal NiFi state to be published to external
       endpoints, such as log files, e-mail, and remote web services.
 
+- ParameterProvider
+    * The ParameterProvider interface allows Parameters to be provided by external sources.  Provided parameters
+      are still stored in Parameter Contexts, but this mechanism allows them to be provided and managed externally.
+
 - ControllerService
     * A ControllerService provides shared state and functionality across Processors, other ControllerServices,
-      and ReportingTasks within a single JVM. An example use case may include loading a very
+      Parameter Providers, and ReportingTasks within a single JVM. An example use case may include loading a very
       large dataset into memory. By performing this work in a ControllerService, the data
       can be loaded once and be exposed to all Processors via this service, rather than requiring
       many different Processors to load the dataset themselves.
@@ -177,7 +181,7 @@ Processors to run without consuming resources unnecessarily.
 [[property_descriptor]]
 ==== PropertyDescriptor
 PropertyDescriptor defines a property that is to be used by a
-Processor, ReportingTask, or ControllerService.
+Processor, ReportingTask, ParameterProvider, or ControllerService.
 The definition of a property includes its name, a description of the
 property, an optional default value,
 validation logic, and an indicator as to whether or not the property
@@ -326,21 +330,47 @@ instance of the `PropertyDescriptor.Builder` object,
 calling the appropriate methods on the builder, and finally calling
 the `build` method.
 
-While this method covers most of the use cases, it is sometimes
+===== Dynamic Processor Properties
+
+In addition to standard properties, it is sometimes
 desirable to allow users to configure
-additional properties whose name are not known. This can be achieved
-by overriding the
+additional properties whose names are not predefined.
+This can be achieved by overriding the
 `getSupportedDynamicPropertyDescriptor` method. This method takes a
 `String` as its only argument, which
 indicates the name of the property. The method returns a
 `PropertyDescriptor` object that can be used to validate
 both the name of the property, as well as the value. Any
 PropertyDescriptor that is returned from this method
-should be built setting the value of `isDynamic` to true in the
+should be built setting the value of `isDynamic` to `true` in the
 `PropertyDescriptor.Builder` class. The default
 behavior of AbstractProcessor is to not allow any dynamically created
 properties.
 
+===== Sensitive Dynamic Properties
+
+The default implementation for dynamic properties does not treat the
+property values as sensitive. This approach is sufficient when configuring
+features such as FlowFile attributes or custom expressions, but it does
+not provide protection for values such as passwords or keys.
+
+NiFi 1.17.0 introduced framework support for sensitive dynamic properties
+through a new behavior annotation named `SupportsSensitiveDynamicProperties`.
+The annotation can be applied to a Processor, Controller Service, or
+Reporting Task that supports dynamic properties through the
+`getSupportedDynamicPropertyDescriptor` method. The annotation indicates
+that the component allows individual dynamic properties to be marked as
+sensitive for the purpose of persistence and framework processing.
+
+The `getSupportedDynamicPropertyDescriptor` must return a `PropertyDescriptor`
+with the `sensitive` field set to `false` to allow customization of sensitive
+status. Setting the `sensitive` field to `true` in this method forces all
+dynamic properties to be handled as sensitive. This approach allows sensitive
+status to be upgraded in supported components, but not downgraded.
+
+Secure handling of sensitive property values is the responsibility of the
+annotated class. Components that support sensitive dynamic properties must
+not log property values or provide property values as FlowFile attributes.
 
 ==== Validating Processor Properties
 
@@ -356,7 +386,7 @@ In addition, if a property is dependent on another property (by means of the `Pr
 
 For example, consider the following two Property Descriptors:
 ```
-PropertyDescriptor USE_FILE = new PropertyDescriptor.Buildler()
+PropertyDescriptor USE_FILE = new PropertyDescriptor.Builder()
     .name("Use File")
     .displayName("Use File")
     .required(true)
@@ -485,7 +515,7 @@ Annotations may be applied to Java methods in a NiFi component to
 indicate to
 the framework when the methods should be called. For the discussion of
 Component Lifecycle, we will define a NiFi component as a
-Processor, ControllerServices, or ReportingTask.
+Processor, ControllerServices, ParameterProviders, or ReportingTask.
 
 ==== @OnAdded
 
@@ -520,9 +550,9 @@ without throwing anything.
 Methods using this annotation must take either 0 arguments or a single argument
 of type `org.apache.nifi.controller.ConfigurationContext`.
 
-Note that this annotation will be ignored if applied to a ReportingTask or
-Processor. For a Controller Service, enabling and disabling are considered
-lifecycle events, as the action makes them usable or unusable by other
+Note that this annotation will be ignored if applied to a ReportingTask,
+Parameter Provider, or Processor. For a Controller Service, enabling and disabling
+are considered lifecycle events, as the action makes them usable or unusable by other
 components. However, for a Processor and a Reporting Task, these are not
 lifecycle events but rather a mechanism to allow a component to be excluded
 when starting or stopping a group of components.
@@ -635,19 +665,10 @@ Node but has now had its Primary Node role revoked).
 [[restricted]]
 === Restricted
 
-A Restricted component is one that can be used to execute arbitrary unsanitized code provided by the operator
-through the NiFi REST API/UI or can be used to obtain or alter data on the NiFi host system using the NiFi OS
-credentials. These components could be used by an otherwise authorized NiFi user to go beyond the intended use of
-the application, escalate privilege, or could expose data about the internals of the NiFi process or the host
-system. All of these capabilities should be considered privileged, and admins should be aware of these
-capabilities and explicitly enable them for a subset of trusted users.
-
-A Processor, Controller Service, or Reporting Task can be marked with the @Restricted annotation. This
-will result in the component being treated as restricted and will require a user to be explicitly added to the
-list of users who can access restricted components. Once a user is permitted to access restricted components,
-they will be allowed to create and modify those components assuming all other permissions are permitted.
-Without access to restricted components, a user will still be aware these types of components exist but will
-be unable to create or modify them even with otherwise sufficient permissions.
+The `Restricted` class annotation has been removed (see https://issues.apache.org/jira/browse/NIP-24[NIP-24]).
+NiFi no longer treats components as a separate "restricted" category for authorization based on this annotation.
+Document sensitive capabilities in the component's capability description and use standard authorization policies
+as appropriate for your deployment.
 
 [[state_manager]]
 === State Manager
@@ -685,8 +706,10 @@ that the instance is clustered and write the code accordingly.
 
 ==== Storing and Retrieving State
 
-State is stored using the StateManager's `getState`, `setState`, `replace`, and `clear` methods. All of these methods
-require that a Scope be provided. It should be noted that the state that is stored with the Local scope is entirely different
+State is stored using the StateManager's `getState`, `setState`, `patchState`, `replace`, and `clear` methods. All of these methods
+require that a Scope be provided. The `patchState` method changes only the keys that it is given: a key with a value is created or
+overwritten, a key with a `null` value is removed, and all other keys are left as they are. The local state provider writes only
+the changed keys to disk, which makes `patchState` much cheaper than `setState` when a component holds many keys but changes few. It should be noted that the state that is stored with the Local scope is entirely different
 than state stored with a Cluster scope. If a Processor stores a value with the key of _My Key_ using the `Scope.CLUSTER` scope,
 and then attempts to retrieve the value using the `Scope.LOCAL` scope, the value retrieved will be `null` (unless a value was
 also stored with the same key using the `Scope.CLUSTER` scope). Each Processor's state is stored in isolation from other
@@ -882,9 +905,9 @@ public final class InvokeHTTP extends AbstractProcessor {
 === Documenting Related Components
 Often Processors and ControllerServices are related to one another.  Sometimes it is a put/get relation as in `PutFile` and `GetFile`.
 Sometimes a Processor uses a ControllerService like `InvokeHTTP` and `StandardSSLContextService`.  Sometimes one ControllerService uses another
-like `DistributedMapCacheClientService` and `DistributedMapCacheServer`.  Developers of these extension points may relate these
+like `MapCacheClientService` and `MapCacheServer`.  Developers of these extension points may relate these
 different components using the `SeeAlso` tag.  This annotation links these components in the documentation.
-`SeeAlso` can be applied to Processors, ControllerServices and ReportingTasks.  An example of how to do this is listed below:
+`SeeAlso` can be applied to Processors, ControllerServices, ParameterProviders, and ReportingTasks.  An example of how to do this is listed below:
 
 [source, java]
 ----
@@ -901,7 +924,7 @@ provides a "Usage" menu item in the context menu. Additionally, the
 UI exposes a "Help" link in the top-right corner, from which the same
 Usage information can be found.
 
-The advanced documentation of a Processor is provided as an HTML file named `additionalDetails.html`.
+The advanced documentation of a Processor is provided as a Markdown file named `additionalDetails.md`.
 This file should exist within a directory whose name is the
 fully-qualified
 name of the Processor, and this directory's parent should be named
@@ -913,7 +936,7 @@ to provide a rich explanation of what this Processor is doing, what kind of
 data it expects and produces, and what FlowFile attributes it expects and produces.
 Because this documentation is in an HTML format, you may include images and tables
 to best describe this component.  The same methods can be used to provide advanced
-documentation for Processors, ControllerServices and ReportingTasks.
+documentation for Processors, ControllerServices, ParameterProviders, and ReportingTasks.
 
 [[provenance_events]]
 == Provenance Events
@@ -939,6 +962,7 @@ The different event types for provenance reporting are:
 |REPLAY                  |Indicates a provenance event for replaying a FlowFile. The UUID of the event indicates the UUID of the original FlowFile that is being replayed. The event contains one Parent UUID that is also the UUID of the FlowFile that is being replayed and one Child UUID that is the UUID of the a newly created FlowFile that will be re-queued for processing
 |ROUTE                   |Indicates that a FlowFile was routed to a specified relationship and provides information about why the FlowFile was routed to this relationship
 |SEND                    |Indicates a provenance event for sending data to an external process
+|UPLOAD                  |Indicates a provenance event for uploading external data to an external system
 |UNKNOWN                 |Indicates that the type of provenance event is unknown because the user who is attempting to access the event is not authorized to know the type
 |======================
 
@@ -1455,7 +1479,7 @@ The appropriate data is then copied from the InputStream of the
 original FlowFile to the OutputStream for the new FlowFile.
 
 *Clone Method*
-If the content of the newly created created FlowFile is to be only a
+If the content of the newly created FlowFile is to be only a
 contiguous subset of the bytes of the original FlowFile, it is
 preferred
 to use the `clone(FlowFile, long, long)` method instead of the
@@ -1774,10 +1798,6 @@ help the framework understand how to interact with the Processor in terms of sch
 The following annotations from the `org.apache.nifi.annotation.behavior` package can be used to modify how the framework
 will handle your Processor:
 
-  - `EventDriven`: Instructs the framework that the Processor can be scheduled using the Event-Driven scheduling
-    strategy. This strategy is still experimental at this point, but can result in reduced resource utilization
-    on dataflows that do not handle extremely high data rates.
-
   - `SideEffectFree`: Indicates that the Processor does not have any side effects external to NiFi. As a result, the
     framework is free to invoke the Processor many times with the same input without causing any unexpected
     results to occur. This implies idempotent behavior. This can be used by the framework to improve efficiency by
@@ -1902,14 +1922,15 @@ Controller Service's interface. See <<nars>> for more information.
 === Interacting with a ControllerService
 
 ControllerServices may be obtained by a Processor, another
-ControllerService, or a ReportingTask
+ControllerService, a ParameterProvider, or a ReportingTask
 by means of the ControllerServiceLookup or by using the
 `identifiesControllerService` method of the
 PropertyDescriptor's Builder class. The ControllerServiceLookup can be
 obtained by a Processor from the
 ProcessorInitializationContext that is passed to the `initialize`
 method. Likewise, it is obtained by
-a ControllerService from the ControllerServiceInitializationContext
+a ControllerService from the ControllerServiceInitializationContext,
+a ParameterProvider from the ParameterProviderInitializationContext,
 and by a ReportingTask via the
 ReportingConfiguration object passed to the `initialize` method.
 
@@ -1921,39 +1942,30 @@ that references a Controller Service as such:
 
 [source,java]
 ----
-public static final PropertyDescriptor SSL_CONTEXT_SERVICE = new PropertyDescriptor.Builder()
-  .name("SSL Context Service")
-  .description("Specified the SSL Context Service that can be used to create secure connections")
+public static final PropertyDescriptor SSL_CONTEXT_PROVIDER = new PropertyDescriptor.Builder()
+  .name("SSL Context Provider")
+  .description("Specifies the service for securing connections encrypted with Transport Layer Security")
   .required(true)
-  .identifiesControllerService(SSLContextService.class)
+  .identifiesControllerService(SSLContextProvider.class)
   .build();
 ----
 
 Using this method, the user will be prompted to supply the SSL Context
-Service that should be used. This is
+Provider that should be used. This is
 done by providing the user with a drop-down menu from which they are
-able to choose any of the SSLContextService
-configurations that have been configured, regardless of the implementation.
+able to choose any of the `SSLContextProvider`
+instances that have been configured, regardless of the implementation.
 
 In order to make use of this service, the Processor can use code such as:
 
 [source,java]
 ----
-final SSLContextService sslContextService = context.getProperty(SSL_CONTEXT_SERVICE)
-  .asControllerService(SSLContextService.class);
+final SSLContextProvider sslContextProvider = context.getProperty(SSL_CONTEXT_PROVIDER)
+  .asControllerService(SSLContextProvider.class);
 ----
 
-Note here that `SSLContextService` is an interface that extends
-ControllerService. The only implementation
-at this time is the `StandardSSLContextService`. However, the
-Processor developer need not worry about this
-detail.
-
-
-
-
-
-
+Note here that `SSLContextProvider` is an interface that extends
+ControllerService.
 
 == Reporting Tasks
 
@@ -1979,7 +1991,7 @@ ReportingTask interface exposes methods for
 configuration, validation, and initialization. These methods are all
 identical to those of the
 Processor and ControllerService interfaces except that the
-`initialize` method is passed a `ReportingConfiguration`
+`initialize` method is passed a `ReportingInitializationContext`
 object, as opposed to the initialization objects received by the other
 Components. The ReportingTask also has
 an `onTrigger` method that is invoked by the framework to trigger the
@@ -2022,6 +2034,44 @@ event describes. This provides a great deal of information to
 ReportingTasks, allowing reports to be generated
 in many different ways to expose metrics and monitoring capabilities
 needed for any number of operational concerns.
+
+== Parameter Providers
+
+Although Parameter Contexts cannot be extended, the `ParameterProvider`
+interface allows an extension point for providing parameters to
+Parameter Contexts.  Parameter Providers can fetch groups of parameters
+that can be mapped to new Parameter Contexts, which can then be kept
+up to date by re-fetching the parameters.
+
+This extensibility allows parameters to be both initially provided and
+managed external to NiFi.
+
+
+=== Developing a Parameter Provider
+
+The ParameterProvider interface exposes methods for
+configuration, validation, and initialization. These methods are all
+identical to those of the Processor and ControllerService interfaces except that the
+`initialize` method is passed a `ParameterProviderInitializationContext`
+object, as opposed to the initialization objects received by the other
+Components. The ParameterProvider also has a `fetchParameters` method that is invoked
+by the framework to fetch the parameters from its source.
+
+Fetched parameters are returned in `ParameterGroup` s, each of which has
+a group name and a list of parameters.  Parameter Groups may be mapped by the user
+to Parameter Contexts.  This allows a single `ParameterProvider` instance to provide different
+parameters to multiple Parameter Contexts based on their mappings.
+
+Within the `fetchParameters` method, the ParameterProvider is given access to a
+`ConfigurationContext`, from which configuration
+and information about the NiFi instance can be obtained. The
+ControllerServiceLookup that is accessible via the Context provides
+access to ControllerServices that have been
+configured. However, this method of obtaining Controller Services is
+not the preferred method. Rather, the
+preferred method for obtaining a Controller Service is to reference
+the Controller Service in a PropertyDescriptor,
+as is discussed in the <<interacting-with-controller-service>> section.
 
 == UI Extensions
 
@@ -2132,27 +2182,6 @@ avro/binary
 application/avro-binary
 application/avro+binary
 ------------------------------------------------------------------------------------------------
-
-
-== Command Line Tools
-
-=== tls-toolkit
-
-The Client/Server mode of operation came about from the desire to automatically generate required TLS configuration artifacts without needing to perform that generation in a centralized place.  This simplifies configuration in a clustered environment.  Since we don’t necessarily have a central place to run the generation logic or a trusted Certificate Authority, a shared secret is used to authenticate the clients and server to each other.
-
-The tls-toolkit prevents man in the middle attacks using HMAC verification of the public keys of the CA server and the CSR the client sends. A shared secret (the token) is used as the HMAC key.
-
-The basic process goes as follows:
-
-1. The client generates a KeyPair.
-2. The client generates a request json payload containing a CSR and an HMAC with the token as the key and the CSR’s public key fingerprint as the data.
-3. The client connects to the CA Hostname at the https port specified and validates that the CN of the CA’s certificate matches the hostname (NOTE: because we don’t trust the CA at this point, this adds NO security, it is just a way to error out early if possible).
-4. The server validates the HMAC from the client payload using the token as the key and the CSR’s public key fingerprint as the data.  This proves that the client knows the shared secret and that it wanted a CSR with that public key to be signed.  (NOTE: a man in the middle could forward this on but wouldn’t be able to change the CSR without invalidating the HMAC, defeating the purpose).
-5. The server signs the CSR and sends back a response json payload containing the certificate and an HMAC with the token as the key and a fingerprint of its public key as the data.
-6. The client validates the response HMAC using the token as the key and a fingerprint of the certificate public key supplied by the TLS session.  This validates that a CA that knows the shared secret is the one we are talking to over TLS.
-7. The client verifies that the CA certificate from the TLS session signed the certificate in the payload.
-8. The client adds the generated KeyPair to its keystore with the certificate chain and adds the CA certificate from the TLS connection to its truststore.
-9. The client writes out the configuration json containing keystore, truststore passwords and other details about the exchange.
 
 
 == Testing
@@ -2380,7 +2409,7 @@ This is included by adding the following snippet to the NAR's pom.xml:
         <plugin>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-nar-maven-plugin</artifactId>
-            <version>1.1.0</version>
+            <version>1.3.4</version>
             <extensions>true</extensions>
         </plugin>
     </plugins>
@@ -2483,7 +2512,7 @@ far less complicated. Note here that the
 This is done so that any NAR that has a dependency on
 `my-controller-service-api-nar` will also be able to access
 all of the Controller Services that are provided by the
-`nifi-standard-services-api-nar`, such as the SSLContextService.
+`nifi-standard-services-api-nar`, such as the `SSLContextProvider`.
 In this same vein, it is not necessary to create a different
 "service-api" NAR for each service. Instead, it often
 makes sense to have a single "service-api" NAR that encapsulates the
@@ -2530,8 +2559,8 @@ directories, an OS-handled temporary copy is created and cached before loading i
 and classloader isolation.
 
 Each property may impose further restrictions on the format of the value through the validators.
-For example, using StandardValidators.FILE_EXISTS_VALIDATOR restricts the property to accepting a
-single file. Using StandardValidators.NON_EMPTY_VALIDATOR allows any combination of comma-separated
+For example, using `StandardValidators.FILE_EXISTS_VALIDATOR` restricts the property to accepting a
+single file. Using `StandardValidators.NON_EMPTY_VALIDATOR` allows any combination of comma-separated
 files or directories.
 
 Resources are added to the instance ClassLoader by adding them to an inner ClassLoader that is always
@@ -2545,17 +2574,17 @@ component's NAR ClassLoader. When `@RequiresInstanceClassLoading` is not present
 instance ClassLoader simply has its parent ClassLoader set to the NAR ClassLoader, rather than
 copying resources.
 
-The `@RequiresInstanceClassLoading` annotation also provides an optional flag `cloneAncestorResources'. If
+The `@RequiresInstanceClassLoading` annotation also provides an optional flag `cloneAncestorResources`. If
 set to true, the instance ClassLoader will include ancestor resources up to the first ClassLoader containing a
 controller service API referenced by the component, or up to the Jetty NAR. If set to false, or not specified,
 only the resources from the component's NAR will be included.
 
-Because @RequiresInstanceClassLoading copies resources from the NAR ClassLoader for each instance of the
+Because `@RequiresInstanceClassLoading` copies resources from the NAR ClassLoader for each instance of the
 component, use this capability judiciously. If ten instances of one component are created, all classes
 from the component's NAR ClassLoader are loaded into memory ten times. This could eventually increase the
 memory footprint significantly when enough instances of the component are created.
 
-Additionally, there are some restrictions when using @RequiresInstanceClassLoading when using Controller
+Additionally, there are some restrictions when using `@RequiresInstanceClassLoading` when using Controller
 Services. Processors, Reporting Tasks, and Controller Services can reference a Controller Service API
 in one of its Property Descriptors. An issue may arise when the Controller Service API is bundled in the same
 NAR with a component that references it or with the Controller Service implementation. If either of these cases
@@ -2563,25 +2592,246 @@ are encountered and the extension requires instance classloading, the extension 
 ERROR will be logged. To address this issue, the Controller Service API should be bundled in a parent NAR. The
 service implementation and extensions that reference that service should depend on the Controller Service API NAR.
 Please refer to the Controller Service NAR Layout in the <<nars>> section. Anytime a Controller Service API is
-bundled with an extension that requires it, even if @RequiresInstanceClassLoading isn't used, a WARNING will be
+bundled with an extension that requires it, even if `@RequiresInstanceClassLoading` isn't used, a WARNING will be
 logged to help avoid this bad practice.
 
 
 [[deprecation]]
-== Deprecating a Component
+== Deprecating Components and Features
+Deprecating features is an important part of the software development lifecycle, providing an upgrade path for
+developers and users to follow.
+
+Apache NiFi follows the link:https://semver.org[Semantic Versioning Specification 2.0.0^] for features identified as
+part of the public version contract according to
+link:https://cwiki.apache.org/confluence/display/NIFI/Version+Scheme+and+API+Compatibility[Version Scheme]
+documentation.
+
+Components and features that fit under the public version contract require deprecation marking prior to removal. This
+approach allows developers to implement changes as part of minor version upgrades, in preparation for future removal
+of features in a subsequent major version.
+
+=== Component Deprecation
+
 Sometimes it may be desirable to deprecate a component. Whenever this occurs the developer may use the
- @DeprecationNotice annotation to indicate that a component has been deprecated, allowing the developer
- to describe a reason for the deprecation and suggest alternative components. An example of how to do this can
+ `@DeprecationNotice` annotation to indicate that a component has been deprecated, allowing the developer
+ to describe a `reason` for the deprecation and suggest alternative components. An example of how to do this can
  be found below:
 
 [source, java]
 ----
- @DeprecationNotice(alternatives = {ListenSyslog.class}, classNames = {"org.apache.nifi.processors.standard.ListenRELP"}, reason = "Technology has been superseded",  )
- public class ListenOldProtocol extends AbstractProcessor {
+@DeprecationNotice(
+        reason = "Legacy Protocol has been superseded",
+        alternatives = {SomeNewProcessor.class},
+        classNames = {"org.apache.nifi.processors.standard.SomeOldProcessor"}
+)
+public class SomeOldProcessor extends AbstractProcessor {}
 ----
-As you can see, the alternatives can be used to define and array of alternative Components, while classNames can be
-used to represent the similar content through an array of strings.
+The `alternatives` property can be used to define an array of recommended replacement Components, while `classNames`
+can be used to represent similar content through an array of class name strings.
 
+Adding the `@DeprecationNotice` annotation renders a warning message in generated documentation and also logs the
+following warning when the Flow Configuration includes the component:
+
+----
+Added Deprecated Component SomeOldProcessor[id=929a52c7-1e3e-423e-b303-6ca2ef657617] See alternatives [SomeNewProcessor]
+----
+
+=== Feature Deprecation
+
+Deprecating features includes changing component configuration strategies, introducing new repository classes, and
+refactoring a Controller Service interface. Removing component properties can create invalid Flow Configurations after
+upgrading, and removing public methods from a Controller Service interface can break components compiled against
+previous versions. For these reasons, introducing new properties and methods must include a deprecation strategy that
+supports compatibility when upgrading from one minor version to another.
+
+Annotating methods and properties with the Java `@Deprecated` annotation provides a warning to software developers, but
+does not provide any information to users. Adding selective deprecation logging provides a method for users to determine
+whether the current Flow Configuration uses deprecated properties or features.
+
+=== Deprecation Logging
+
+The `nifi-deprecation-log` module provides an abstraction for logging deprecation warnings. The `DeprecationLogger`
+interface has a `warn()` method that accepts a message string with a variable number of arguments. The standard
+implementation delegates to SLF4J, supporting standard features for providing and resolving placeholder arguments. The
+standard `DeprecationLogger` implementation also logs a `DeprecationException` with the referenced class, supporting
+tracing to the usage location.
+
+Instantiating a `DeprecationLogger` follows the same conventions as instantiating an SLF4J `Logger`:
+
+[source, java]
+----
+private static final DeprecationLogger deprecationLogger = DeprecationLoggerFactory.getLogger(Service.class);
+----
+
+Logging warnings for deprecated extension component properties and methods should include the simple class name and the
+component identifier for tracing. Warning messages should also reference recommended alternatives.
+
+[source, java]
+----
+deprecationLogger.warn(
+        "{}[id={}] createServiceContext() should be replaced with createContext()",
+        getClass().getSimpleName(),
+        getIdentifier()
+);
+----
+
+[[build]]
+== Build Options
+=== Maven Profiles
+
+[options="header,footer"]
+|==================================================================================================================================================
+| Package                | Maven Profile         | Description
+| Apache Hadoop Bundle   | include-hadoop        | Adds support for Apache Hadoop with HDFS and Parquet components
+| Apache IoTDB Bundle    | include-iotdb         | Adds support for Apache IoTDB
+| ASN.1 Support          | include-asn1          | Adds support for ASN.1
+| Contribution Check     | contrib-check         | Runs various quality checks that are required to be accepted before a contribution can be accepted into the core NiFi code base.
+| Couchbase Bundle       | include-couchbase     | Adds support for https://www.couchbase.com[Couchbase] with processors for getting and putting documents, along with connection, lookup, and map cache controller services.
+| Graph Database Bundle  | include-graph         | Adds support for various common graph database scenarios. Support is currently for https://neo4j.com/developer/cypher[Cypher] and https://tinkerpop.apache.org/gremlin.html[Gremlin]-compatible databases such as Neo4J and JanusGraph. Includes controller services that provide driver functionality and a suite of processors for ingestion and querying.
+| Media Bundle           | include-media         | The media bundle provides functionality based on https://tika.apache.org[Apache Tika] for extracting content and metadata from various types of binary formats supported by Apache Tika (ex. PDF, Microsoft Office).
+| QuestDB Bundle         | include-questdb       | Adds support for persistent Status History using QuestDB
+| Snowflake Bundle       | include-snowflake     | Adds support for integration with the https://www.snowflake.com[Snowflake platform].
+| SQL Reporting Bundle   | include-sql-reporting | Adds reporting tasks that are designed to use SQL to update a RDBMS with metrics and other related data from Apache NiFi.
+|==================================================================================================================================================
+
+=== Standard Build Instructions
+
+The following command is used to generate a standard binary distribution of Apache NiFi:
+
+`mvn clean install -Pcontrib-check`
+
+== Supporting migration from a Versioned Process Group
+
+Connectors can implement a one-time migration flow that uses a source Versioned Process Group as a reference for populating a freshly created Connector.
+This is intended for Connectors that can translate an exported flow definition, its parameter contexts, referenced assets, and any attached component state into their own managed flow.
+The source Versioned Process Group is not installed onto the Connector; instead, the Connector reads the source as input and updates its own flow to mirror the source's configuration and state.
+
+Migration support is optional.
+Connectors opt in by implementing the optional capability interface `org.apache.nifi.components.connector.migration.MigratableConnector`.
+A Connector that does not implement `MigratableConnector` is never offered as a migration target and continues to behave as before.
+
+=== Migration contract
+
+`MigratableConnector` is a separate interface that the Connector class must implement (typically alongside extending `AbstractConnector`). It exposes three methods:
+
+- `isMigrationSupported(ConnectorMigrationContext)` is a cheap, side-effect-free predicate.
+  It should inspect `context.getSourceFlow()` and return `true` only when the Connector can be migrated from the source structure.
+  Implementations should limit themselves to structural checks such as processor types, parameter names, and exported metadata.
+  Component state and asset content are not available at listing time and must not be relied on; per-state precondition checks belong inside `migrateConfiguration` or `migrateState`.
+  This method must not call `ConnectorMigrationContext.copyAssetFromSource(...)` or any of the write APIs described below; the framework wraps the eligibility-time context so any such attempt is rejected with `IllegalStateException` and the Connector is filtered out of the listing.
+- `migrateConfiguration(ConnectorMigrationContext)` records the configuration the Connector wants on the other side of the migration.
+  The Connector reads `context.getSourceFlow()` and records configuration changes via `context.setProperties(stepName, propertyValues)` (merge) or `context.replaceProperties(stepName, propertyValues)` (full replacement of the step).
+  These calls are applied to a working copy of the Connector's configuration that the framework seeded with the Connector's current active configuration, so the working copy always reflects the fully-merged result.
+  After `migrateConfiguration` returns, the framework drives `Connector.applyUpdate(workingContext, activeContext)` from that merged configuration so the managed Process Group is rebuilt by the same code path the framework uses on restart.
+  The Connector must not call `updateFlow(...)` from this method; the framework hands the Connector a read-only wrapper around the active `FlowContext`, so any direct `updateFlow(...)` attempt is rejected with `IllegalStateException`.
+  Component-state writes are also rejected in this phase: `setComponentState(...)` throws because the managed components do not exist yet.
+- `migrateState(ConnectorMigrationContext)` runs after the framework has rebuilt the managed Process Group from the merged configuration.
+  At this point every Processor and Controller Service in the source flow has a corresponding managed component in the active `FlowContext`, so the Connector can match each source `VersionedConfigurableExtension` to its managed counterpart by versioned identifier.
+  The Connector records the desired `StateManager` state for each managed component via `context.setComponentState(versionedComponentId, versionedComponentState)`.
+  After `migrateState` returns, the framework writes each staged `VersionedComponentState` into the corresponding managed component's live `StateManager`.
+  Configuration writes (`setProperties`, `replaceProperties`) and direct `updateFlow(...)` calls are rejected in this phase for the same reasons described above.
+
+The two phases together form a single, all-or-nothing migration. The framework only commits the merged configuration onto the Connector's persisted active configuration after both `migrateState` and the framework's subsequent state-application step have succeeded. Any failure in either phase rolls the migration back: the managed Process Group is restored from `getInitialFlow()`, the working configuration copy is discarded, any assets copied via `copyAssetFromSource(...)` are deleted, and the Connector's persisted configuration remains unchanged.
+
+=== Accessing the source flow
+
+`ConnectorMigrationContext` exposes the source `VersionedExternalFlow` using `getSourceFlow()`.
+The source includes:
+
+- The exported `VersionedProcessGroup`
+- Parameter contexts
+- Referenced assets
+- Attached `VersionedComponentState` for `@Stateful` components
+- Export metadata such as flow name, registry identifiers, and version
+
+The same context also indicates whether the request came from a local Process Group on the same NiFi instance or from an uploaded payload using `isLocalMigration()`.
+
+The active `FlowContext` is available via `context.getActiveFlowContext()` and is read-only during migration: it forwards reads (configuration, managed Process Group) to the live active flow context but rejects `updateFlow(...)` with `IllegalStateException`. The Connector should treat this object as a window onto the current state of the Connector, not as a write target. After `migrateConfiguration` returns, the framework rebuilds the managed Process Group by calling `Connector.applyUpdate(workingContext, activeContext)` with this same active `FlowContext` as the target, so any component references the Connector resolves against `getActiveFlowContext()` remain valid once the migrated flow is applied.
+
+=== Recording configuration changes
+
+A typical `migrateConfiguration` implementation translates the source flow into a representation the Connector can rebuild from later (often a serialized version of the source `VersionedExternalFlow` or a derived configuration), then stages it onto the Connector's own configuration:
+
+[source,java]
+----
+@Override
+public void migrateConfiguration(final ConnectorMigrationContext context) throws FlowUpdateException {
+    final VersionedExternalFlow sourceFlow = context.getSourceFlow();
+    final String serializedSourceFlow = OBJECT_MAPPER.writeValueAsString(sourceFlow);
+
+    // Record the configuration the Connector wants on the other side of the migration. The framework merges this
+    // delta onto the active configuration and then drives Connector.applyUpdate(workingContext, activeContext),
+    // which is the same path used on every restart - so the managed Process Group is rebuilt the same way after
+    // migration and after every subsequent restart.
+    context.setProperties(MIGRATION_STATE_STEP_NAME, Map.of(MIGRATED_SOURCE_FLOW_PROPERTY_NAME, serializedSourceFlow));
+}
+----
+
+`setProperties` is additive: existing properties on the step keep their values unless the staged map overrides them.
+`replaceProperties` is destructive: the step is reset to exactly the supplied property map, and any pre-existing properties not present in the map are removed.
+
+The Connector's `applyUpdate(workingContext, activeContext)` implementation reads the merged configuration from the supplied `workingContext`, rebuilds the desired managed Process Group, and calls `getInitializationContext().updateFlow(activeContext, rebuiltFlow)` to install it. Because the framework drives the same `applyUpdate(...)` call during restart via `inheritConfiguration(...)`, the migrated managed flow is rebuilt automatically on every restart from the persisted configuration; the Connector does not need to do anything extra to make migrations survive restarts.
+
+=== Recording component state
+
+After the managed Process Group has been rebuilt, `migrateState` records the `StateManager` state for individual managed components:
+
+[source,java]
+----
+@Override
+public void migrateState(final ConnectorMigrationContext context) {
+    final VersionedProcessGroup sourceGroup = context.getSourceFlow().getFlowContents();
+    for (final VersionedProcessor sourceProcessor : sourceGroup.getProcessors()) {
+        final VersionedComponentState sourceState = sourceProcessor.getComponentState();
+        if (sourceState != null) {
+            context.setComponentState(sourceProcessor.getIdentifier(), sourceState);
+        }
+    }
+}
+----
+
+The first argument to `setComponentState` is the source-side versioned identifier; the framework resolves it to the matching managed Processor or Controller Service and writes the supplied `VersionedComponentState` into that component's live `StateManager`. Cluster-scope state is applied unconditionally on every node; per-node local-scope state is selected by node ordinal so a clustered migration installs the right entry on each node. Components whose `@Stateful` annotation does not declare a requested scope are skipped with a warning rather than failing the migration.
+
+`setComponentState` only stages the desired state; the framework writes it after `migrateState` returns. If a Connector calls `setComponentState` more than once for the same versioned identifier, only the last call is applied.
+
+=== Rewriting parameters and assets
+
+The exported source flow contains parameter contexts and any asset references that were attached to exported parameters.
+Connectors are responsible for mapping those values into their own target shape inside `migrateConfiguration`.
+
+A Connector can copy an asset from a local source Process Group into its own asset namespace using `ConnectorMigrationContext.copyAssetFromSource(String)`.
+This method is available only for local migrations.
+It throws `IllegalArgumentException` when the supplied source asset identifier is null or blank, and `IllegalStateException` when invoked for an uploaded-payload migration.
+Uploaded payloads do not have access to a live source asset namespace, so asset references from uploaded payloads must be handled outside of the migration request.
+
+The following example locates a source parameter's referenced asset, copies it into the Connector's own asset namespace, and records the returned `AssetReference` on the target property:
+
+[source,java]
+----
+final VersionedParameter sourceParameter = findSourceParameter(context.getSourceFlow(), sourceParameterName);
+if (sourceParameter != null && sourceParameter.getReferencedAssets() != null && !sourceParameter.getReferencedAssets().isEmpty() && context.isLocalMigration()) {
+    final VersionedAsset referencedAsset = sourceParameter.getReferencedAssets().getFirst();
+    final AssetReference assetReference = context.copyAssetFromSource(referencedAsset.getIdentifier());
+    context.setValueReference(targetStepName, targetPropertyName, assetReference);
+}
+----
+
+=== Sensitive values
+
+Sensitive parameter values and other secret material are not present in the exported source flow.
+Connectors must leave those values unset during migration.
+After the migration completes, the user supplies the missing values through the normal Configure step before starting the Connector.
+
+=== Additional expectations
+
+- `isMigrationSupported(...)` must not mutate flow state, parameter values, or assets.
+- `migrateConfiguration` and `migrateState` should either complete successfully or throw an exception. Any thrown exception aborts the migration and rolls back every side effect: copied assets are deleted, the managed Process Group is restored from `getInitialFlow()`, every component's `StateManager` state is cleared, and the persisted active configuration is left unchanged.
+- Migration is rejected once the Connector has been modified from the state it was created in.
+  The framework considers a Connector modified when any configured property on its active or working configuration differs from that property's declared default value, or when any Processor or Controller Service in the managed flow has stored component state.
+  This check is evaluated at the time `migrateConfiguration` is invoked, and again whenever the `MIGRATE` allowable action is evaluated, so the user is shown why migration is unavailable.
+  This check is restart-safe because the persisted configuration and any stored component state are recomputed each time from durable sources.
+- Migration is one-shot from the framework's point of view.
+  Because a successful migration writes configuration and, typically, component state onto the Connector, the Connector is considered modified immediately afterward, and a subsequent migration request will be rejected until the Connector is discarded and a fresh one is created.
 
 == How to contribute to Apache NiFi
 
@@ -2593,7 +2843,7 @@ can be applied as icons or styling to the application.
 === Technologies
 
 The back end of Apache NiFi is written in Java. The web tier makes use of JAX-RS and JavaScript is extensively
-used to provide a user interface. We depend on several third-party JavaScript libraries, including D3 and JQuery,
+used to provide a user interface. We depend on several third-party JavaScript libraries, including D3 and Angular,
 among others. We make use of Apache Maven for our builds and Git for our version control system.
 
 Documentation is created in link:http://asciidoctor.org[AsciiDoc^].

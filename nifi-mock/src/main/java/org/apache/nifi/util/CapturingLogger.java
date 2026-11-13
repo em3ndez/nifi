@@ -1,11 +1,12 @@
 package org.apache.nifi.util;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.Marker;
 import org.slf4j.helpers.MessageFormatter;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
@@ -32,11 +33,11 @@ public class CapturingLogger implements Logger {
 
     private final Logger logger;
 
-    private final List<LogMessage> traceMessages = new ArrayList<>();
-    private final List<LogMessage> debugMessages = new ArrayList<>();
-    private final List<LogMessage> infoMessages = new ArrayList<>();
-    private final List<LogMessage> warnMessages = new ArrayList<>();
-    private final List<LogMessage> errorMessages = new ArrayList<>();
+    private final List<LogMessage> traceMessages = Collections.synchronizedList(new ArrayList<>());
+    private final List<LogMessage> debugMessages = Collections.synchronizedList(new ArrayList<>());
+    private final List<LogMessage> infoMessages = Collections.synchronizedList(new ArrayList<>());
+    private final List<LogMessage> warnMessages = Collections.synchronizedList(new ArrayList<>());
+    private final List<LogMessage> errorMessages = Collections.synchronizedList(new ArrayList<>());
 
     public CapturingLogger(final Logger logger) {
         this.logger = logger;
@@ -87,7 +88,8 @@ public class CapturingLogger implements Logger {
 
     @Override
     public void trace(String format, Object... arguments) {
-        traceMessages.add(new LogMessage(null, format, null, arguments));
+        final Throwable throwable = lastArgIsException(arguments) ? (Throwable) arguments[arguments.length - 1] : null;
+        traceMessages.add(new LogMessage(null, format, throwable, arguments));
         logger.trace(format, arguments);
     }
 
@@ -123,9 +125,9 @@ public class CapturingLogger implements Logger {
     }
 
     @Override
-    public void trace(Marker marker, String format, Object... argArray) {
-        traceMessages.add(new LogMessage(marker, format, null, argArray));
-        logger.trace(marker, format, argArray);
+    public void trace(Marker marker, String format, Object... arguments) {
+        traceMessages.add(new LogMessage(marker, format, null, arguments));
+        logger.trace(marker, format, arguments);
     }
 
     @Override
@@ -160,7 +162,8 @@ public class CapturingLogger implements Logger {
 
     @Override
     public void debug(String format, Object... arguments) {
-        debugMessages.add(new LogMessage(null, format, null, arguments));
+        final Throwable throwable = lastArgIsException(arguments) ? (Throwable) arguments[arguments.length - 1] : null;
+        debugMessages.add(new LogMessage(null, format, throwable, arguments));
         logger.debug(format, arguments);
     }
 
@@ -196,9 +199,9 @@ public class CapturingLogger implements Logger {
     }
 
     @Override
-    public void debug(Marker marker, String format, Object... argArray) {
-        debugMessages.add(new LogMessage(marker, format, null, argArray));
-        logger.debug(marker, format, argArray);
+    public void debug(Marker marker, String format, Object... arguments) {
+        debugMessages.add(new LogMessage(marker, format, null, arguments));
+        logger.debug(marker, format, arguments);
     }
 
     @Override
@@ -223,15 +226,17 @@ public class CapturingLogger implements Logger {
         this.info(format, arg, null);
     }
 
+    @SuppressWarnings("PMD.UnnecessaryVarargsArrayCreation")
     @Override
     public void info(String format, Object arg1, Object arg2) {
-        this.info(format, new Object[] { arg1, arg2 });
+        this.info(format, new Object[] {arg1, arg2});
     }
 
     @Override
     public void info(String format, Object... arguments) {
+        final Throwable throwable = lastArgIsException(arguments) ? (Throwable) arguments[arguments.length - 1] : null;
         String message = MessageFormatter.arrayFormat(format, arguments).getMessage();
-        infoMessages.add(new LogMessage(null, message, null, arguments));
+        infoMessages.add(new LogMessage(null, message, throwable, arguments));
         logger.info(format, arguments);
     }
 
@@ -267,9 +272,9 @@ public class CapturingLogger implements Logger {
     }
 
     @Override
-    public void info(Marker marker, String format, Object... argArray) {
-        infoMessages.add(new LogMessage(marker, format, null, argArray));
-        logger.info(marker, format, argArray);
+    public void info(Marker marker, String format, Object... arguments) {
+        infoMessages.add(new LogMessage(marker, format, null, arguments));
+        logger.info(marker, format, arguments);
     }
 
     @Override
@@ -293,15 +298,17 @@ public class CapturingLogger implements Logger {
         this.warn(format, arg, null);
     }
 
+    @SuppressWarnings("PMD.UnnecessaryVarargsArrayCreation")
     @Override
     public void warn(String format, Object arg1, Object arg2) {
-        this.warn(format, new Object[] { arg1, arg2 });
+        this.warn(format, new Object[] {arg1, arg2});
     }
 
     @Override
     public void warn(String format, Object... arguments) {
+        final Throwable throwable = lastArgIsException(arguments) ? (Throwable) arguments[arguments.length - 1] : null;
         String message = MessageFormatter.arrayFormat(format, arguments).getMessage();
-        warnMessages.add(new LogMessage(null, message, null, arguments));
+        warnMessages.add(new LogMessage(null, message, throwable, arguments));
         logger.warn(format, arguments);
     }
 
@@ -337,9 +344,9 @@ public class CapturingLogger implements Logger {
     }
 
     @Override
-    public void warn(Marker marker, String format, Object... argArray) {
-        warnMessages.add(new LogMessage(marker, format, null, argArray));
-        logger.warn(marker, format, argArray);
+    public void warn(Marker marker, String format, Object... arguments) {
+        warnMessages.add(new LogMessage(marker, format, null, arguments));
+        logger.warn(marker, format, arguments);
     }
 
     @Override
@@ -361,24 +368,29 @@ public class CapturingLogger implements Logger {
 
     @Override
     public void error(String format, Object arg) {
-        errorMessages.add(new LogMessage(null, format, null, arg));
+        final String message = MessageFormatter.arrayFormat(format, new Object[] {arg}).getMessage();
+        errorMessages.add(new LogMessage(null, message, null, arg));
         logger.error(format, arg);
     }
 
     @Override
     public void error(String format, Object arg1, Object arg2) {
-        errorMessages.add(new LogMessage(null, format, null, arg1, arg2));
+        final String message = MessageFormatter.arrayFormat(format, new Object[] {arg1, arg2}).getMessage();
+        errorMessages.add(new LogMessage(null, message, null, arg1, arg2));
         logger.error(format, arg1, arg2);
     }
 
     public void error(String format, Object arg1, Throwable t) {
-        errorMessages.add(new LogMessage(null, format, t, arg1));
+        final String message = MessageFormatter.arrayFormat(format, new Object[] {arg1}).getMessage();
+        errorMessages.add(new LogMessage(null, message, t, arg1));
         logger.error(format, arg1, t);
     }
 
     @Override
     public void error(String format, Object... arguments) {
-        errorMessages.add(new LogMessage(null, format, null, arguments));
+        final Throwable throwable = lastArgIsException(arguments) ? (Throwable) arguments[arguments.length - 1] : null;
+        final String message = MessageFormatter.arrayFormat(format, arguments).getMessage();
+        errorMessages.add(new LogMessage(null, message, throwable, arguments));
         logger.error(format, arguments);
     }
 
@@ -402,21 +414,23 @@ public class CapturingLogger implements Logger {
 
     @Override
     public void error(Marker marker, String format, Object arg) {
-        errorMessages.add(new LogMessage(marker, format, null, arg));
+        final String message = MessageFormatter.arrayFormat(format, new Object[] {arg}).getMessage();
+        errorMessages.add(new LogMessage(marker, message, null, arg));
         logger.error(marker, format, arg);
-
     }
 
     @Override
     public void error(Marker marker, String format, Object arg1, Object arg2) {
-        errorMessages.add(new LogMessage(marker, format, null, arg1, arg2));
+        final String message = MessageFormatter.arrayFormat(format, new Object[] {arg1, arg2}).getMessage();
+        errorMessages.add(new LogMessage(marker, message, null, arg1, arg2));
         logger.error(marker, format, arg1, arg2);
     }
 
     @Override
-    public void error(Marker marker, String format, Object... argArray) {
-        errorMessages.add(new LogMessage(marker, format, null, argArray));
-        logger.error(marker, format, argArray);
+    public void error(Marker marker, String format, Object... arguments) {
+        final String message = MessageFormatter.arrayFormat(format, arguments).getMessage();
+        errorMessages.add(new LogMessage(marker, message, null, arguments));
+        logger.error(marker, format, arguments);
     }
 
     @Override
@@ -425,4 +439,7 @@ public class CapturingLogger implements Logger {
         logger.error(marker, msg, t);
     }
 
+    private boolean lastArgIsException(final Object[] os) {
+        return (os != null && os.length > 0 && (os[os.length - 1] instanceof Throwable));
+    }
 }

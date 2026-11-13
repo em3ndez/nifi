@@ -1,0 +1,215 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.nifi.web.standard.api.transformjson;
+
+import io.joltcommunity.jolt.JoltTransform;
+import io.joltcommunity.jolt.JsonUtils;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.nifi.attribute.expression.language.EvaluationContext;
+import org.apache.nifi.attribute.expression.language.PreparedQuery;
+import org.apache.nifi.attribute.expression.language.Query;
+import org.apache.nifi.attribute.expression.language.evaluation.EvaluatorState;
+import org.apache.nifi.jolt.util.JoltTransformStrategy;
+import org.apache.nifi.jolt.util.TransformFactory;
+import org.apache.nifi.jolt.util.TransformUtils;
+import org.apache.nifi.parameter.Parameter;
+import org.apache.nifi.web.standard.api.AbstractStandardResource;
+import org.apache.nifi.web.standard.api.transformjson.dto.JoltSpecificationDTO;
+import org.apache.nifi.web.standard.api.transformjson.dto.ValidationDTO;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+@Path("/standard/transformjson")
+public class TransformJSONResource extends AbstractStandardResource {
+
+    private static final Logger logger = LoggerFactory.getLogger(TransformJSONResource.class);
+    private static final String DEFAULT_CHARSET = "UTF-8";
+
+    private static final String CUSTOM_TRANSFORM_NAME = "jolt-transform-custom";
+
+    private static final String OPERATION_KEY = "operation";
+
+    private static final Set<String> STANDARD_TRANSFORM_NAMES = Set.of(
+            JoltTransformStrategy.SHIFTR.getValue(),
+            JoltTransformStrategy.CHAINR.getValue(),
+            JoltTransformStrategy.DEFAULTR.getValue(),
+            JoltTransformStrategy.REMOVR.getValue(),
+            JoltTransformStrategy.CARDINALITY.getValue(),
+            JoltTransformStrategy.SORTR.getValue(),
+            JoltTransformStrategy.MODIFIER_DEFAULTR.getValue(),
+            JoltTransformStrategy.MODIFIER_OVERWRITER.getValue(),
+            JoltTransformStrategy.MODIFIER_DEFINER.getValue()
+    );
+
+    private static final Set<String> STANDARD_CHAIN_OPERATIONS = Set.of(
+            "shift",
+            "default",
+            "remove",
+            "sort",
+            "cardinality",
+            "modify-overwrite",
+            "modify-default",
+            "modify-define",
+            "modify-overwrite-beta",
+            "modify-default-beta",
+            "modify-define-beta"
+    );
+
+    protected Object getSpecificationJsonObject(JoltSpecificationDTO specificationDTO, boolean evaluateAttributes) {
+        if (!StringUtils.isEmpty(specificationDTO.getSpecification())) {
+            final String specification;
+
+            if (evaluateAttributes) {
+                final PreparedQuery preparedQuery = Query.prepare(specificationDTO.getSpecification());
+                final Map<String, String> attributes = specificationDTO.getExpressionLanguageAttributes() == null ? Collections.unmodifiableMap(new HashMap<>())
+                        : specificationDTO.getExpressionLanguageAttributes();
+                specification = preparedQuery.evaluateExpressions(new AttributeEvaluationContext(attributes), null);
+            } else {
+                specification = specificationDTO.getSpecification().replaceAll("\\$\\{", "\\\\\\\\\\${");
+            }
+            return JsonUtils.jsonToObject(specification, DEFAULT_CHARSET);
+
+        } else {
+            return null;
+        }
+    }
+
+    @POST
+    @Produces({MediaType.APPLICATION_JSON})
+    @Path("/validate")
+    public Response validateSpec(JoltSpecificationDTO specificationDTO) {
+        ValidationDTO validation;
+
+        try {
+            getTransformation(specificationDTO, false);
+            validation = new ValidationDTO(true, null);
+        } catch (final Exception e) {
+            logger.warn("Jolt Transform Validation Failed", e);
+
+            final String message;
+            if (CUSTOM_TRANSFORM_NAME.equals(specificationDTO.getTransform())) {
+                message = "Custom Transform not supported for advanced validation";
+            } else if (e instanceof IllegalArgumentException) {
+                message = e.getMessage();
+            } else {
+                message = "Validation Failed: Please review the Jolt Specification formatting";
+            }
+
+            validation = new ValidationDTO(false, message);
+        }
+
+        return Response.ok(validation).build();
+    }
+
+    @POST
+    @Produces({MediaType.APPLICATION_JSON})
+    @Path("/execute")
+    public Response executeSpec(JoltSpecificationDTO specificationDTO) {
+        try {
+            JoltTransform transform = getTransformation(specificationDTO, true);
+            Object inputJson = JsonUtils.jsonToObject(specificationDTO.getInput());
+            return Response.ok(JsonUtils.toJsonString(TransformUtils.transform(transform, inputJson))).build();
+        } catch (final Exception e) {
+            logger.warn("Jolt Transform Execute Failed", e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    private JoltTransform getTransformation(JoltSpecificationDTO specificationDTO, boolean evaluateAttributes) throws Exception {
+        final String transformName = specificationDTO.getTransform();
+
+        if (transformName == null || !STANDARD_TRANSFORM_NAMES.contains(transformName)) {
+            throw new IllegalArgumentException("Transform not supported [%s]".formatted(transformName));
+        }
+
+        final Object specJson = getSpecificationJsonObject(specificationDTO, evaluateAttributes);
+        if (JoltTransformStrategy.CHAINR.getValue().equals(transformName)) {
+            validateChainOperations(specJson);
+        }
+
+        return TransformFactory.getTransform(getClass().getClassLoader(), transformName, specJson);
+    }
+
+    private void validateChainOperations(final Object specJson) {
+        if (!(specJson instanceof final List<?> operations)) {
+            throw new IllegalArgumentException("Chain specification must be a JSON array of operations");
+        }
+
+        for (final Object operation : operations) {
+            if (!(operation instanceof final Map<?, ?> operationMap)) {
+                throw new IllegalArgumentException("Chain operation must be a JSON object");
+            }
+
+            if (!(operationMap.get(OPERATION_KEY) instanceof final String operationName)) {
+                throw new IllegalArgumentException("Chain operation must name its operation as a string");
+            }
+
+            if (!STANDARD_CHAIN_OPERATIONS.contains(operationName)) {
+                throw new IllegalArgumentException("Chain operation not supported [%s]".formatted(operationName));
+            }
+        }
+    }
+
+    /**
+     * Evaluates Expression Language using only the attributes supplied with the specification.
+     */
+    private static final class AttributeEvaluationContext implements EvaluationContext {
+        private final Map<String, String> attributes;
+        private final EvaluatorState evaluatorState = new EvaluatorState();
+
+        private AttributeEvaluationContext(final Map<String, String> attributes) {
+            this.attributes = attributes;
+        }
+
+        @Override
+        public String getExpressionValue(final String name) {
+            return attributes.get(name);
+        }
+
+        @Override
+        public Set<String> getExpressionKeys() {
+            return attributes.keySet();
+        }
+
+        @Override
+        public String getState(final String key) {
+            return null;
+        }
+
+        @Override
+        public Parameter getParameter(final String parameterName) {
+            return null;
+        }
+
+        @Override
+        public EvaluatorState getEvaluatorState() {
+            return evaluatorState;
+        }
+    }
+}

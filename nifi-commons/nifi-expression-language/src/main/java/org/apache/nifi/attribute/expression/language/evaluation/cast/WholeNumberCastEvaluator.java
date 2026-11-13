@@ -20,6 +20,7 @@ import org.apache.nifi.attribute.expression.language.EvaluationContext;
 import org.apache.nifi.attribute.expression.language.evaluation.DateQueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.DecimalQueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.Evaluator;
+import org.apache.nifi.attribute.expression.language.evaluation.InstantQueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.NumberQueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.QueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.StringQueryResult;
@@ -53,7 +54,7 @@ public class WholeNumberCastEvaluator extends WholeNumberEvaluator {
             case STRING:
                 final String trimmed = ((StringQueryResult) result).getValue().trim();
                 NumberParsing.ParseResultType parseType = NumberParsing.parse(trimmed);
-                switch (parseType){
+                switch (parseType) {
                     case DECIMAL:
                         final Double doubleResultValue = Double.valueOf(trimmed);
                         return new WholeNumberQueryResult(doubleResultValue.longValue());
@@ -61,17 +62,19 @@ public class WholeNumberCastEvaluator extends WholeNumberEvaluator {
                         Long longResultValue;
                         try {
                             longResultValue = Long.valueOf(trimmed);
-                        } catch (NumberFormatException e){
+                        } catch (NumberFormatException e) {
                             // Will only occur if trimmed is a hex number
                             longResultValue = Long.decode(trimmed);
                         }
                         return new WholeNumberQueryResult(longResultValue);
                     case NOT_NUMBER:
-                    default:
                         return new WholeNumberQueryResult(null);
                 }
+                // fallthrough
             case DATE:
                 return new WholeNumberQueryResult(((DateQueryResult) result).getValue().getTime());
+            case INSTANT:
+                return new WholeNumberQueryResult(((InstantQueryResult) result).getValue().toEpochMilli());
             case DECIMAL:
                 final Double resultValue = ((DecimalQueryResult) result).getValue();
                 return new WholeNumberQueryResult(resultValue.longValue());

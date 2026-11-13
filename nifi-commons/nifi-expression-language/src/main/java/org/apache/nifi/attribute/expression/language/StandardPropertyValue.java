@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.attribute.expression.language;
 
+import org.apache.nifi.components.DescribedValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.components.resource.ResourceContext;
@@ -30,9 +31,9 @@ import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.parameter.ParameterLookup;
 import org.apache.nifi.processor.DataUnit;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.registry.VariableRegistry;
-import org.apache.nifi.util.FormatUtils;
+import org.apache.nifi.time.DurationFormat;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -41,7 +42,6 @@ public class StandardPropertyValue implements PropertyValue {
     private final String rawValue;
     private final ControllerServiceLookup serviceLookup;
     private final PreparedQuery preparedQuery;
-    private final VariableRegistry variableRegistry;
     private final ParameterLookup parameterLookup;
     private final ResourceContext resourceContext;
 
@@ -51,21 +51,14 @@ public class StandardPropertyValue implements PropertyValue {
     }
 
     public StandardPropertyValue(final ResourceContext resourceContext, final String rawValue, final ControllerServiceLookup serviceLookup, final ParameterLookup parameterLookup) {
-        this(resourceContext, rawValue, serviceLookup, parameterLookup, Query.prepare(rawValue), VariableRegistry.EMPTY_REGISTRY);
-    }
-
-    public StandardPropertyValue(final ResourceContext resourceContext, final String rawValue, final ControllerServiceLookup serviceLookup, final ParameterLookup parameterLookup,
-                                 final VariableRegistry variableRegistry) {
-        this(resourceContext, rawValue, serviceLookup, parameterLookup, Query.prepare(rawValue), variableRegistry);
+        this(resourceContext, rawValue, serviceLookup, parameterLookup, Query.prepare(rawValue));
     }
 
     /**
      * Constructs a new StandardPropertyValue with the given value & service
      * lookup and indicates whether or not the rawValue contains any NiFi
      * Expressions. If it is unknown whether or not the value contains any NiFi
-     * Expressions, the
-     * {@link #StandardPropertyValue(ResourceContext, String, ControllerServiceLookup, ParameterLookup, VariableRegistry)}
-     * constructor should be used or <code>true</code> should be passed.
+     * Expressions, the StandardPropertyValue constructor should be used or <code>true</code> should be passed.
      * However, if it is known that the value contains no NiFi Expression, that
      * information should be provided so that calls to
      * {@link #evaluateAttributeExpressions()} are much more efficient
@@ -75,14 +68,12 @@ public class StandardPropertyValue implements PropertyValue {
      * @param serviceLookup lookup
      * @param  parameterLookup the parameter lookup
      * @param preparedQuery query
-     * @param variableRegistry variableRegistry
      */
     public StandardPropertyValue(final ResourceContext resourceContext, final String rawValue, final ControllerServiceLookup serviceLookup, final ParameterLookup parameterLookup,
-                                 final PreparedQuery preparedQuery, final VariableRegistry variableRegistry) {
+                                 final PreparedQuery preparedQuery) {
         this.rawValue = rawValue;
         this.serviceLookup = serviceLookup;
         this.preparedQuery = preparedQuery;
-        this.variableRegistry = variableRegistry;
         this.parameterLookup = parameterLookup == null ? ParameterLookup.EMPTY : parameterLookup;
         this.resourceContext = resourceContext;
     }
@@ -119,7 +110,12 @@ public class StandardPropertyValue implements PropertyValue {
 
     @Override
     public Long asTimePeriod(final TimeUnit timeUnit) {
-        return (rawValue == null) ? null : FormatUtils.getTimeDuration(rawValue.trim(), timeUnit);
+        return (rawValue == null) ? null : DurationFormat.getTimeDuration(rawValue.trim(), timeUnit);
+    }
+
+    @Override
+    public Duration asDuration() {
+        return isSet() ? Duration.ofNanos(asTimePeriod(TimeUnit.NANOSECONDS)) : null;
     }
 
     @Override
@@ -175,11 +171,11 @@ public class StandardPropertyValue implements PropertyValue {
             return this;
         }
 
-        final ValueLookup lookup = new ValueLookup(variableRegistry, flowFile, additionalAttributes);
+        final ValueLookup lookup = new ValueLookup(flowFile, additionalAttributes);
         final EvaluationContext evaluationContext = new StandardEvaluationContext(lookup, stateValues, parameterLookup);
         final String evaluated = preparedQuery.evaluateExpressions(evaluationContext, decorator);
 
-        return new StandardPropertyValue(resourceContext, evaluated, serviceLookup, parameterLookup, new EmptyPreparedQuery(evaluated), null);
+        return new StandardPropertyValue(resourceContext, evaluated, serviceLookup, parameterLookup, new EmptyPreparedQuery(evaluated));
     }
 
     @Override
@@ -235,6 +231,25 @@ public class StandardPropertyValue implements PropertyValue {
         }
 
         return resourceContext.getResourceReferenceFactory().createResourceReferences(rawValue, propertyDescriptor.getResourceDefinition());
+    }
+
+    @Override
+    public <E extends Enum<E>> E asAllowableValue(Class<E> enumType) throws IllegalArgumentException {
+        if (rawValue == null) {
+            return null;
+        }
+
+        for (E enumConstant : enumType.getEnumConstants()) {
+            if (enumConstant instanceof final DescribedValue describedValue) {
+                if (describedValue.getValue().equals(rawValue)) {
+                    return enumConstant;
+                }
+            } else if (enumConstant.name().equals(rawValue)) {
+                return enumConstant;
+            }
+        }
+
+        throw new IllegalArgumentException(String.format("%s does not have an entry with value %s", enumType.getSimpleName(), rawValue));
     }
 
     @Override

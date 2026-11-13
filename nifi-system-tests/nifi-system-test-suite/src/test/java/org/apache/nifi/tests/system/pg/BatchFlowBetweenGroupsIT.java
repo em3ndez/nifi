@@ -20,12 +20,12 @@ package org.apache.nifi.tests.system.pg;
 import org.apache.nifi.groups.FlowFileConcurrency;
 import org.apache.nifi.groups.FlowFileOutboundPolicy;
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.entity.ConnectionEntity;
 import org.apache.nifi.web.api.entity.PortEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -51,7 +51,7 @@ public class BatchFlowBetweenGroupsIT extends NiFiSystemIT {
         // Start input port for Group B
         // Wait for all 5 FlowFiles to be ingested into Group B
         // Wait for 5 additional FlowFiles to be queued between A and B
-        // Ensure that queue between A and B has 2 FlowFiles
+        // Ensure that queue Generate and Input Port A has 2 FlowFiles
         // Start Output Port of Group B
         // Wait for count from CountEvents to equal 25
 
@@ -66,7 +66,7 @@ public class BatchFlowBetweenGroupsIT extends NiFiSystemIT {
         getClientUtil().updateProcessorProperties(duplicate, Collections.singletonMap("Output Count", "5"));
 
         final ProcessorEntity sleep = getClientUtil().createProcessor("Sleep", processGroupA.getId());
-        getClientUtil().updateProcessorProperties(sleep, Collections.singletonMap("onTrigger Sleep Time", "10 ms"));
+        getClientUtil().updateProcessorProperties(sleep, Collections.singletonMap("onTrigger Sleep Time", "2 sec"));
 
         getClientUtil().createConnection(inputPortA, duplicate);
         getClientUtil().createConnection(duplicate, sleep, "success");
@@ -75,7 +75,6 @@ public class BatchFlowBetweenGroupsIT extends NiFiSystemIT {
         processGroupA.getComponent().setFlowfileConcurrency(FlowFileConcurrency.SINGLE_FLOWFILE_PER_NODE.name());
         processGroupA.getComponent().setFlowfileOutboundPolicy(FlowFileOutboundPolicy.BATCH_OUTPUT.name());
         getNifiClient().getProcessGroupClient().updateProcessGroup(processGroupA);
-
 
         //
         // Build Process Group B
@@ -108,7 +107,7 @@ public class BatchFlowBetweenGroupsIT extends NiFiSystemIT {
         getClientUtil().startProcessGroupComponents(processGroupA.getId());
 
         // Start generate processor and wait for data to queue up. Then stop.
-        getNifiClient().getProcessorClient().startProcessor(generate);
+        getClientUtil().startProcessor(generate);
         waitForQueueNotEmpty(generateToInputPortA.getId());
         getNifiClient().getProcessorClient().stopProcessor(generate);
 

@@ -20,7 +20,6 @@ import org.apache.nifi.authorization.exception.AuthorizationAccessException;
 import org.apache.nifi.authorization.exception.AuthorizerCreationException;
 import org.apache.nifi.authorization.exception.AuthorizerDestructionException;
 import org.apache.nifi.authorization.exception.UninheritableAuthorizationsException;
-import org.apache.nifi.security.xml.XmlUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.w3c.dom.Document;
@@ -29,13 +28,9 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.SAXException;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.stream.XMLOutputFactory;
-import javax.xml.stream.XMLStreamException;
-import javax.xml.stream.XMLStreamWriter;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -43,12 +38,26 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.stream.XMLOutputFactory;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamWriter;
 
 /**
  * An Authorizer that provides management of users, groups, and policies.
+ *
+ * @deprecated Deprecated under NIP-39 for removal and transition to Controller-level authorization
  */
+@Deprecated(forRemoval = true, since = "2.12.0")
 public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer {
     private static final Logger logger = LoggerFactory.getLogger(AbstractPolicyBasedAuthorizer.class);
+    private static final String DISALLOW_DOCTYPES = "http://apache.org/xml/features/disallow-doctype-decl";
+    private static final String ALLOW_EXTERNAL_GENERAL_ENTITIES = "http://xml.org/sax/features/external-general-entities";
+    private static final String ALLOW_EXTERNAL_PARAM_ENTITIES = "http://xml.org/sax/features/external-parameter-entities";
+    private static final String ALLOW_EXTERNAL_DTD = "http://apache.org/xml/features/nonvalidating/load-external-dtd";
 
     static final XMLOutputFactory XML_OUTPUT_FACTORY = XMLOutputFactory.newInstance();
 
@@ -201,7 +210,6 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
      * @throws AuthorizationAccessException if there was an unexpected error performing the operation
      */
     public abstract Set<Group> getGroups() throws AuthorizationAccessException;
-
 
     /**
      * Adds the given user.
@@ -376,7 +384,7 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
      */
     @Override
     public final void inheritFingerprint(final String fingerprint) throws AuthorizationAccessException {
-        if (fingerprint == null || fingerprint.trim().isEmpty()) {
+        if (fingerprint == null || fingerprint.isBlank()) {
             return;
         }
 
@@ -396,7 +404,7 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
 
     @Override
     public void forciblyInheritFingerprint(final String fingerprint) throws AuthorizationAccessException {
-        if (fingerprint == null || fingerprint.trim().isEmpty()) {
+        if (fingerprint == null || fingerprint.isBlank()) {
             logger.info("Inheriting Empty Policies, Users & Groups. Will backup existing Policies, Users & Groups first.");
             backupPoliciesUsersAndGroups();
             purgePoliciesUsersAndGroups();
@@ -406,7 +414,7 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
 
         final PoliciesUsersAndGroups policiesUsersAndGroups = parsePoliciesUsersAndGroups(fingerprint);
         if (isInheritable(policiesUsersAndGroups)) {
-            logger.debug("Inheriting Polciies, Users & Groups");
+            logger.debug("Inheriting Policies, Users & Groups");
             inheritPoliciesUsersAndGroups(policiesUsersAndGroups);
         } else {
             logger.info("Cannot directly inherit Policies, Users & Groups. Will backup existing Policies, Users & Groups, and then replace with proposed configuration");
@@ -423,35 +431,56 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
 
         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
-            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(null);
-            final Document document = docBuilder.parse(in);
+            final Document document = parseFingerprint(in);
             final Element rootElement = document.getDocumentElement();
 
             // parse all the users and add them to the current authorizer
             NodeList userNodes = rootElement.getElementsByTagName(USER_ELEMENT);
-            for (int i=0; i < userNodes.getLength(); i++) {
+            for (int i = 0; i < userNodes.getLength(); i++) {
                 Node userNode = userNodes.item(i);
                 users.add(parseUser((Element) userNode));
             }
 
             // parse all the groups and add them to the current authorizer
             NodeList groupNodes = rootElement.getElementsByTagName(GROUP_ELEMENT);
-            for (int i=0; i < groupNodes.getLength(); i++) {
+            for (int i = 0; i < groupNodes.getLength(); i++) {
                 Node groupNode = groupNodes.item(i);
                 groups.add(parseGroup((Element) groupNode));
             }
 
             // parse all the policies and add them to the current authorizer
             NodeList policyNodes = rootElement.getElementsByTagName(POLICY_ELEMENT);
-            for (int i=0; i < policyNodes.getLength(); i++) {
+            for (int i = 0; i < policyNodes.getLength(); i++) {
                 Node policyNode = policyNodes.item(i);
                 accessPolicies.add(parsePolicy((Element) policyNode));
             }
-        } catch (SAXException | ParserConfigurationException | IOException e) {
+        } catch (final IOException e) {
             throw new AuthorizationAccessException("Unable to parse fingerprint", e);
         }
 
         return new PoliciesUsersAndGroups(accessPolicies, users, groups);
+    }
+
+    private Document parseFingerprint(final InputStream inputStream) throws IOException {
+        final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
+        docFactory.setSchema(null);
+        docFactory.setNamespaceAware(true);
+
+        // Disable DTDs and external entities to protect against XXE
+        docFactory.setAttribute(DISALLOW_DOCTYPES, true);
+        docFactory.setAttribute(ALLOW_EXTERNAL_DTD, false);
+        docFactory.setAttribute(ALLOW_EXTERNAL_GENERAL_ENTITIES, false);
+        docFactory.setAttribute(ALLOW_EXTERNAL_PARAM_ENTITIES, false);
+        docFactory.setXIncludeAware(false);
+        docFactory.setExpandEntityReferences(false);
+
+        try {
+            docFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            final DocumentBuilder documentBuilder = docFactory.newDocumentBuilder();
+            return documentBuilder.parse(inputStream);
+        } catch (final ParserConfigurationException | SAXException e) {
+            throw new IOException("Fingerprint parsing failed", e);
+        }
     }
 
     private User parseUser(final Element element) {
@@ -468,7 +497,7 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
                 .name(element.getAttribute(NAME_ATTR));
 
         NodeList groupUsers = element.getElementsByTagName(GROUP_USER_ELEMENT);
-        for (int i=0; i < groupUsers.getLength(); i++) {
+        for (int i = 0; i < groupUsers.getLength(); i++) {
             Element groupUserNode = (Element) groupUsers.item(i);
             builder.addUser(groupUserNode.getAttribute(IDENTIFIER_ATTR));
         }
@@ -491,13 +520,13 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
         }
 
         NodeList policyUsers = element.getElementsByTagName(POLICY_USER_ELEMENT);
-        for (int i=0; i < policyUsers.getLength(); i++) {
+        for (int i = 0; i < policyUsers.getLength(); i++) {
             Element policyUserNode = (Element) policyUsers.item(i);
             builder.addUser(policyUserNode.getAttribute(IDENTIFIER_ATTR));
         }
 
         NodeList policyGroups = element.getElementsByTagName(POLICY_GROUP_ELEMENT);
-        for (int i=0; i < policyGroups.getLength(); i++) {
+        for (int i = 0; i < policyGroups.getLength(); i++) {
             Element policyGroupNode = (Element) policyGroups.item(i);
             builder.addGroup(policyGroupNode.getAttribute(IDENTIFIER_ATTR));
         }
@@ -735,7 +764,7 @@ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer
             if (writer != null) {
                 try {
                     writer.close();
-                } catch (XMLStreamException e) {
+                } catch (XMLStreamException ignored) {
                     // nothing to do here
                 }
             }

@@ -18,7 +18,9 @@
 package org.apache.nifi.serialization.record.type;
 
 import org.apache.nifi.serialization.record.DataType;
+import org.apache.nifi.serialization.record.RecordFieldRemovalPath;
 import org.apache.nifi.serialization.record.RecordFieldType;
+import org.apache.nifi.serialization.record.RecordSchema;
 
 import java.util.List;
 import java.util.Objects;
@@ -41,6 +43,30 @@ public class ChoiceDataType extends DataType {
     }
 
     @Override
+    public void removePath(final RecordFieldRemovalPath path) {
+        if (path.length() == 0) {
+            return;
+        }
+        getPossibleSubTypes().forEach(subType -> subType.removePath(path));
+    }
+
+    @Override
+    public boolean isRecursive(final List<RecordSchema> schemas) {
+        // allow for null possibleSubTypes during scheme inference
+        if (!schemas.isEmpty() && getPossibleSubTypes() != null) {
+            for (final DataType possibleSubType : getPossibleSubTypes()) {
+                if (possibleSubType.isRecursive(schemas)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    @Override
     public int hashCode() {
         return 31 + 41 * getFieldType().hashCode() + 41 * (possibleSubTypes == null ? 0 : possibleSubTypes.hashCode());
     }
@@ -53,11 +79,10 @@ public class ChoiceDataType extends DataType {
         if (obj == null) {
             return false;
         }
-        if (!(obj instanceof ChoiceDataType)) {
+        if (!(obj instanceof final ChoiceDataType other)) {
             return false;
         }
 
-        final ChoiceDataType other = (ChoiceDataType) obj;
         return getFieldType().equals(other.getFieldType()) && Objects.equals(possibleSubTypes, other.possibleSubTypes);
     }
 

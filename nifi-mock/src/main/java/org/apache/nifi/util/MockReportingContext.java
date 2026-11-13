@@ -16,23 +16,23 @@
  */
 package org.apache.nifi.util;
 
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.PropertyValue;
+import org.apache.nifi.components.state.StateManager;
+import org.apache.nifi.controller.ControllerService;
+import org.apache.nifi.controller.ControllerServiceLookup;
+import org.apache.nifi.reporting.Bulletin;
+import org.apache.nifi.reporting.BulletinFactory;
+import org.apache.nifi.reporting.BulletinRepository;
+import org.apache.nifi.reporting.ReportingContext;
+import org.apache.nifi.reporting.Severity;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.components.PropertyValue;
-import org.apache.nifi.components.state.StateManager;
-import org.apache.nifi.controller.ControllerService;
-import org.apache.nifi.controller.ControllerServiceLookup;
-import org.apache.nifi.registry.VariableRegistry;
-import org.apache.nifi.reporting.Bulletin;
-import org.apache.nifi.reporting.BulletinFactory;
-import org.apache.nifi.reporting.BulletinRepository;
-import org.apache.nifi.reporting.ReportingContext;
-import org.apache.nifi.reporting.Severity;
 
 public class MockReportingContext extends MockControllerServiceLookup implements ReportingContext, ControllerServiceLookup {
 
@@ -40,14 +40,12 @@ public class MockReportingContext extends MockControllerServiceLookup implements
     private final MockEventAccess eventAccess = new MockEventAccess();
     private final Map<PropertyDescriptor, String> properties = new HashMap<>();
     private final StateManager stateManager;
-    private final VariableRegistry variableRegistry;
 
     private final Map<String, List<Bulletin>> componentBulletinsCreated = new HashMap<>();
 
-    public MockReportingContext(final Map<String, ControllerService> controllerServices, final StateManager stateManager, final VariableRegistry variableRegistry) {
+    public MockReportingContext(final Map<String, ControllerService> controllerServices, final StateManager stateManager) {
         this.controllerServices = new HashMap<>();
         this.stateManager = stateManager;
-        this.variableRegistry = variableRegistry;
         for (final Map.Entry<String, ControllerService> entry : controllerServices.entrySet()) {
             this.controllerServices.put(entry.getKey(), new ControllerServiceConfiguration(entry.getValue()));
         }
@@ -60,7 +58,7 @@ public class MockReportingContext extends MockControllerServiceLookup implements
 
     @Override
     public Map<String, String> getAllProperties() {
-        final Map<String,String> propValueMap = new LinkedHashMap<>();
+        final Map<String, String> propValueMap = new LinkedHashMap<>();
         for (final Map.Entry<PropertyDescriptor, String> entry : getProperties().entrySet()) {
             propValueMap.put(entry.getKey().getName(), entry.getValue());
         }
@@ -70,7 +68,7 @@ public class MockReportingContext extends MockControllerServiceLookup implements
     @Override
     public PropertyValue getProperty(final PropertyDescriptor property) {
         final String configuredValue = properties.get(property);
-        return new MockPropertyValue(configuredValue == null ? property.getDefaultValue() : configuredValue, this, variableRegistry);
+        return new MockPropertyValue(configuredValue == null ? property.getDefaultValue() : configuredValue, this, null);
     }
 
     public void setProperty(final String propertyName, final String value) {
@@ -100,11 +98,7 @@ public class MockReportingContext extends MockControllerServiceLookup implements
     @Override
     public Bulletin createBulletin(final String componentId, final String category, final Severity severity, final String message) {
         final Bulletin bulletin = BulletinFactory.createBulletin(null, null, componentId, "test processor", category, severity.name(), message);
-        List<Bulletin> bulletins = componentBulletinsCreated.get(componentId);
-        if (bulletins == null) {
-            bulletins = new ArrayList<>();
-            componentBulletinsCreated.put(componentId, bulletins);
-        }
+        List<Bulletin> bulletins = componentBulletinsCreated.computeIfAbsent(componentId, k -> new ArrayList<>());
         bulletins.add(bulletin);
         return bulletin;
     }

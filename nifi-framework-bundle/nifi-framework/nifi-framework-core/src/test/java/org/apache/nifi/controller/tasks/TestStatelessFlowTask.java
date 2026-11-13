@@ -1,0 +1,847 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.nifi.controller.tasks;
+
+import org.apache.nifi.connectable.ConnectableFlowFileActivity;
+import org.apache.nifi.connectable.Connection;
+import org.apache.nifi.connectable.ConnectionUtils.FlowFileCloneResult;
+import org.apache.nifi.connectable.FlowFileActivity;
+import org.apache.nifi.connectable.FlowFileTransferCounts;
+import org.apache.nifi.connectable.Port;
+import org.apache.nifi.controller.MockFlowFileRecord;
+import org.apache.nifi.controller.ProcessScheduler;
+import org.apache.nifi.controller.ScheduledState;
+import org.apache.nifi.controller.metrics.ProcessSessionEvent;
+import org.apache.nifi.controller.queue.FlowFileQueue;
+import org.apache.nifi.controller.queue.LocalQueuePartitionDiagnostics;
+import org.apache.nifi.controller.queue.StandardFlowFileQueue;
+import org.apache.nifi.controller.repository.ContentRepository;
+import org.apache.nifi.controller.repository.DeferredStatelessContentRepository;
+import org.apache.nifi.controller.repository.FlowFileEventRepository;
+import org.apache.nifi.controller.repository.FlowFileRecord;
+import org.apache.nifi.controller.repository.FlowFileRepository;
+import org.apache.nifi.controller.repository.FlowFileSwapManager;
+import org.apache.nifi.controller.repository.RepositoryRecord;
+import org.apache.nifi.controller.repository.RepositoryRecordType;
+import org.apache.nifi.controller.repository.StandardContentRepositoryContext;
+import org.apache.nifi.controller.repository.claim.ContentClaim;
+import org.apache.nifi.controller.repository.claim.ResourceClaim;
+import org.apache.nifi.controller.repository.claim.ResourceClaimManager;
+import org.apache.nifi.controller.repository.claim.StandardContentClaim;
+import org.apache.nifi.controller.repository.claim.StandardResourceClaim;
+import org.apache.nifi.controller.repository.claim.StandardResourceClaimManager;
+import org.apache.nifi.controller.service.mock.MockProcessGroup;
+import org.apache.nifi.controller.tasks.StatelessFlowTask.Invocation;
+import org.apache.nifi.controller.tasks.StatelessFlowTask.PolledFlowFile;
+import org.apache.nifi.events.EventReporter;
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
+import org.apache.nifi.groups.ProcessGroup;
+import org.apache.nifi.groups.StatelessGroupNode;
+import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.mock.MockComponentLogger;
+import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.provenance.ProvenanceEventRecord;
+import org.apache.nifi.provenance.ProvenanceEventRepository;
+import org.apache.nifi.provenance.ProvenanceEventType;
+import org.apache.nifi.provenance.StandardProvenanceEventRecord;
+import org.apache.nifi.stateless.flow.DataflowTrigger;
+import org.apache.nifi.stateless.flow.DataflowTriggerContext;
+import org.apache.nifi.stateless.flow.StatelessDataflow;
+import org.apache.nifi.stateless.flow.TriggerResult;
+import org.apache.nifi.stateless.repository.ByteArrayContentRepository;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+public class TestStatelessFlowTask {
+
+    private StatelessFlowTask task;
+    private ProcessGroup rootGroup;
+    private Port successPort;
+    private Port secondOutputPort;
+    private Port inputPort1;
+    private ResourceClaimManager resourceClaimManager;
+    private List<ProvenanceEventRecord> registeredProvenanceEvents;
+    private List<ProvenanceEventRecord> statelessProvenanceEvents;
+    private Map<String, ProcessSessionEvent> flowFileEventsByComponentId;
+    private ProvenanceEventRepository statelessProvRepo;
+    private FlowFileActivity groupNodeFlowFileActivity;
+    private StatelessDataflow statelessFlow;
+    private StatelessGroupNode statelessGroupNode;
+    private FlowFileRepository flowFileRepository;
+    private FlowFileEventRepository flowFileEventRepository;
+    private ProvenanceEventRepository provenanceRepository;
+    private ComponentLog logger;
+
+    @BeforeEach
+    public void setup() throws IOException {
+        rootGroup = new MockProcessGroup(null);
+
+        inputPort1 = mock(Port.class);
+        when(inputPort1.getName()).thenReturn("input1");
+        when(inputPort1.getIdentifier()).thenReturn("inputPortId");
+        rootGroup.addInputPort(inputPort1);
+
+        successPort = mock(Port.class);
+        when(successPort.getName()).thenReturn("success");
+        when(successPort.getIdentifier()).thenReturn("successPortId");
+        rootGroup.addOutputPort(successPort);
+
+        secondOutputPort = mock(Port.class);
+        when(secondOutputPort.getName()).thenReturn("port2");
+        when(secondOutputPort.getIdentifier()).thenReturn("port2Id");
+        rootGroup.addOutputPort(secondOutputPort);
+
+        statelessProvenanceEvents = new ArrayList<>();
+        statelessProvRepo = mock(ProvenanceEventRepository.class);
+        doAnswer(invocation -> statelessProvenanceEvents.size() - 1).when(statelessProvRepo).getMaxEventId();
+        doAnswer(invocation -> {
+            final long startEventId = invocation.getArgument(0, Long.class);
+            final int numEvents = invocation.getArgument(1, Integer.class);
+            if (startEventId >= statelessProvenanceEvents.size()) {
+                return Collections.emptyList();
+            }
+            final long lastEvent = Math.min(startEventId + numEvents, statelessProvenanceEvents.size());
+            return statelessProvenanceEvents.subList((int) startEventId, (int) lastEvent);
+        }).when(statelessProvRepo).getEvents(anyLong(), anyInt());
+
+        statelessFlow = mock(StatelessDataflow.class);
+        when(statelessFlow.getLatestActivityTime()).thenReturn(OptionalLong.empty());
+
+        statelessGroupNode = mock(StatelessGroupNode.class);
+        when(statelessGroupNode.getProcessGroup()).thenReturn(rootGroup);
+        groupNodeFlowFileActivity = new ConnectableFlowFileActivity();
+        when(statelessGroupNode.getFlowFileActivity()).thenReturn(groupNodeFlowFileActivity);
+
+        flowFileRepository = mock(FlowFileRepository.class);
+
+        resourceClaimManager = new StandardResourceClaimManager();
+        final ContentRepository contentRepo = mock(ContentRepository.class);
+        doAnswer(invocation -> {
+            final ContentClaim claim = invocation.getArgument(0, ContentClaim.class);
+            if (claim == null) {
+                return 0;
+            }
+
+            return resourceClaimManager.incrementClaimantCount(claim.getResourceClaim());
+        }).when(contentRepo).incrementClaimaintCount(any(ContentClaim.class));
+
+        doAnswer(invocation -> {
+            final ContentClaim claim = invocation.getArgument(0, ContentClaim.class);
+            if (claim == null) {
+                return 0;
+            }
+
+            return resourceClaimManager.decrementClaimantCount(claim.getResourceClaim());
+        }).when(contentRepo).decrementClaimantCount(any(ContentClaim.class));
+
+        flowFileEventsByComponentId = new HashMap<>();
+        flowFileEventRepository = mock(FlowFileEventRepository.class);
+        doAnswer(invocation -> {
+            final ProcessSessionEvent event = invocation.getArgument(0, ProcessSessionEvent.class);
+            flowFileEventsByComponentId.put(event.getComponentMetricContext().id(), event);
+            return null;
+        }).when(flowFileEventRepository).updateRepository(any(ProcessSessionEvent.class));
+        logger = new MockComponentLogger();
+
+        registeredProvenanceEvents = new ArrayList<>();
+        provenanceRepository = mock(ProvenanceEventRepository.class);
+        doAnswer(invocation -> {
+            final Iterable<ProvenanceEventRecord> events = invocation.getArgument(0, Iterable.class);
+            events.forEach(registeredProvenanceEvents::add);
+            return null;
+        }).when(provenanceRepository).registerEvents(any(Iterable.class));
+
+        task = createTask(contentRepo);
+        task.resetState();
+    }
+
+    @Test
+    public void testDropInputFlowFile() {
+        // Test method with an Invocation that has no input FlowFile
+        final TriggerResult triggerResult = mock(TriggerResult.class);
+        final Invocation noInputInvocation = new Invocation();
+        noInputInvocation.setTriggerResult(triggerResult);
+        task.dropInputFlowFiles(noInputInvocation);
+        assertTrue(task.getOutputRepositoryRecords().isEmpty());
+
+        final FlowFileRecord inputFlowFile = new MockFlowFileRecord(1L);
+        final FlowFileQueue queue = mock(FlowFileQueue.class);
+        final Port port = mock(Port.class);
+
+        // Test method with multiple Invocations each having an input FlowFile
+        for (int i = 0; i < 5; i++) {
+            final Invocation invocation = new Invocation();
+            invocation.setTriggerResult(triggerResult);
+            invocation.addPolledFlowFile(new PolledFlowFile(inputFlowFile, queue, port));
+
+            task.dropInputFlowFiles(invocation);
+            final List<RepositoryRecord> dropRecords = task.getOutputRepositoryRecords();
+            assertEquals(i + 1, dropRecords.size());
+            final RepositoryRecord dropRecord = dropRecords.get(i);
+            assertEquals(RepositoryRecordType.DELETE, dropRecord.getType());
+            assertEquals(inputFlowFile, dropRecord.getCurrent());
+        }
+    }
+
+    @Test
+    public void testCreateOutputRecordsOnSuccessWithOneOutput() throws IOException {
+        final Connection conn1 = mockConnection();
+        final Set<Connection> singleConnectionSet = Collections.singleton(conn1);
+
+        when(successPort.getConnections()).thenReturn(singleConnectionSet);
+
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        final FlowFileRecord flowFileRecord = new MockFlowFileRecord(1L);
+        outputFlowFiles.put("success", Collections.singletonList(flowFileRecord));
+        task.createOutputRecords(outputFlowFiles);
+
+        final List<RepositoryRecord> outputRecords = task.getOutputRepositoryRecords();
+        assertEquals(1, outputRecords.size());
+
+        final List<FlowFileCloneResult> cloneResults = task.getCloneResults();
+        assertEquals(1, cloneResults.size());
+        final FlowFileCloneResult cloneResult = cloneResults.get(0);
+        final Map<FlowFileQueue, List<FlowFileRecord>> outputAfterClone = cloneResult.getFlowFilesToEnqueue();
+        assertEquals(1, outputAfterClone.size());
+        final List<FlowFileRecord> flowFilesForQueue = outputAfterClone.get(conn1.getFlowFileQueue());
+        assertEquals(Collections.singletonList(flowFileRecord), flowFilesForQueue);
+
+        assertTrue(task.getCloneProvenanceEvents().isEmpty());
+    }
+
+    @Test
+    public void testCreateOutputRecordsExportsSharedInMemoryClaimOnce() throws IOException {
+        final byte[] content = "shared content".getBytes(StandardCharsets.UTF_8);
+        final DeferredStatelessContentRepository deferredRepository = createDeferredContentRepository();
+
+        final ContentClaim inMemoryClaim = deferredRepository.create(false);
+        try (final OutputStream out = deferredRepository.write(inMemoryClaim)) {
+            out.write(content);
+        }
+
+        final int firstFlowFileOffset = 5;
+        final FlowFileRecord firstFlowFile = new MockFlowFileRecord(Map.of(), content.length - firstFlowFileOffset, inMemoryClaim) {
+            @Override
+            public long getContentClaimOffset() {
+                return firstFlowFileOffset;
+            }
+        };
+        final FlowFileRecord secondFlowFile = new MockFlowFileRecord(Map.of(), content.length, inMemoryClaim);
+        deferredRepository.incrementClaimaintCount(inMemoryClaim);
+
+        final Connection connection = mockConnection();
+        when(successPort.getConnections()).thenReturn(Set.of(connection));
+        final StatelessFlowTask boundaryTask = createTask(deferredRepository);
+        boundaryTask.resetState();
+        boundaryTask.createOutputRecords(Map.of("success", List.of(firstFlowFile, secondFlowFile)));
+
+        final List<RepositoryRecord> outputRecords = boundaryTask.getOutputRepositoryRecords();
+        final ContentClaim firstBackingClaim = outputRecords.get(0).getCurrentClaim();
+        final ContentClaim secondBackingClaim = outputRecords.get(1).getCurrentClaim();
+        assertSame(firstBackingClaim, secondBackingClaim);
+        final FlowFileRecord firstOutputFlowFile = outputRecords.get(0).getCurrent();
+        assertEquals(firstFlowFileOffset, firstOutputFlowFile.getContentClaimOffset());
+        try (final InputStream in = deferredRepository.read(firstBackingClaim)) {
+            in.skipNBytes(firstOutputFlowFile.getContentClaimOffset());
+            assertArrayEquals(Arrays.copyOfRange(content, firstFlowFileOffset, content.length), in.readNBytes((int) firstOutputFlowFile.getSize()));
+        }
+        try (final InputStream in = deferredRepository.read(secondBackingClaim)) {
+            assertArrayEquals(content, in.readAllBytes());
+        }
+    }
+
+    @Test
+    public void testCompleteInvocationsRollsBackPreparedExportsWhenRepositoryUpdateFails() throws IOException {
+        final DeferredStatelessContentRepository deferredRepository = createDeferredContentRepository();
+
+        final ContentClaim firstClaim = deferredRepository.create(false);
+        final ContentClaim secondClaim = deferredRepository.create(false);
+        try (final OutputStream out = deferredRepository.write(firstClaim)) {
+            out.write("first".getBytes(StandardCharsets.UTF_8));
+        }
+        try (final OutputStream out = deferredRepository.write(secondClaim)) {
+            out.write("second".getBytes(StandardCharsets.UTF_8));
+        }
+
+        final FlowFileRecord firstFlowFile = new MockFlowFileRecord(Map.of(), 5, firstClaim);
+        final FlowFileRecord secondFlowFile = new MockFlowFileRecord(Map.of(), 6, secondClaim);
+        final TriggerResult triggerResult = mock(TriggerResult.class);
+        when(triggerResult.getOutputFlowFiles()).thenReturn(Map.of("success", List.of(firstFlowFile, secondFlowFile)));
+        final Invocation invocation = new Invocation();
+        invocation.setTriggerResult(triggerResult);
+
+        final Connection connection = mockConnection();
+        when(successPort.getConnections()).thenReturn(Set.of(connection));
+        doThrow(new IOException("Repository update failed")).doNothing().when(flowFileRepository).updateRepository(any());
+        final StatelessFlowTask boundaryTask = createTask(deferredRepository);
+
+        assertThrows(IOException.class, () -> boundaryTask.completeInvocations(List.of(invocation), statelessProvRepo));
+
+        final List<RepositoryRecord> outputRecords = boundaryTask.getOutputRepositoryRecords();
+        final ContentClaim firstBackingClaim = outputRecords.get(0).getCurrentClaim();
+        final ContentClaim secondBackingClaim = outputRecords.get(1).getCurrentClaim();
+        assertEquals(1, resourceClaimManager.getClaimantCount(firstBackingClaim.getResourceClaim()));
+        assertEquals(1, resourceClaimManager.getClaimantCount(secondBackingClaim.getResourceClaim()));
+
+        deferredRepository.decrementClaimantCount(firstClaim);
+        deferredRepository.decrementClaimantCount(secondClaim);
+        deferredRepository.purge();
+
+        assertEquals(0, resourceClaimManager.getClaimantCount(firstBackingClaim.getResourceClaim()));
+        assertEquals(0, resourceClaimManager.getClaimantCount(secondBackingClaim.getResourceClaim()));
+    }
+
+    @Test
+    public void testCreateOutputRecordsOnSuccessWithOnePortTwoConnections() throws IOException {
+        final FlowFileQueue queue1 = mock(FlowFileQueue.class);
+        final Connection conn1 = mock(Connection.class);
+        when(conn1.getFlowFileQueue()).thenReturn(queue1);
+
+        final FlowFileQueue queue2 = mock(FlowFileQueue.class);
+        final Connection conn2 = mock(Connection.class);
+        when(conn2.getFlowFileQueue()).thenReturn(queue2);
+
+        final Set<Connection> connectionSet = Set.of(conn1, conn2);
+        when(successPort.getConnections()).thenReturn(connectionSet);
+
+        final FlowFileRecord flowFileRecord = new MockFlowFileRecord(1L);
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        outputFlowFiles.put("success", Collections.singletonList(flowFileRecord));
+        task.createOutputRecords(outputFlowFiles);
+
+        final List<RepositoryRecord> outputRecords = task.getOutputRepositoryRecords();
+        assertEquals(2, outputRecords.size());
+
+        final List<FlowFileCloneResult> cloneResults = task.getCloneResults();
+        assertEquals(1, cloneResults.size());
+        final FlowFileCloneResult cloneResult = cloneResults.getFirst();
+        final Map<FlowFileQueue, List<FlowFileRecord>> outputAfterClone = cloneResult.getFlowFilesToEnqueue();
+        assertEquals(2, outputAfterClone.size());
+
+        assertEquals(1, outputAfterClone.get(queue1).size());
+        assertEquals(1, outputAfterClone.get(queue2).size());
+        assertNotEquals(outputAfterClone.get(queue1), outputAfterClone.get(queue2));
+
+        final List<ProvenanceEventRecord> cloneEvents = task.getCloneProvenanceEvents();
+        assertEquals(1, cloneEvents.size());
+        final ProvenanceEventRecord cloneEvent = cloneEvents.getFirst();
+
+        assertEquals(Collections.singletonList(flowFileRecord.getAttribute(CoreAttributes.UUID.key())), cloneEvent.getParentUuids());
+
+        // The clone event's child UUIDs should have either the UUID of the FlowFile in queue1 or queue2 but we aren't sure which, as there's no guarantee
+        // whether the original will go to queue1 and the clone to queue2 or vice versa.
+        assertTrue(cloneEvent.getChildUuids().contains(outputAfterClone.get(queue1).getFirst().getAttribute(CoreAttributes.UUID.key()))
+            || cloneEvent.getChildUuids().contains(outputAfterClone.get(queue2).getFirst().getAttribute(CoreAttributes.UUID.key())));
+        assertFalse(cloneEvent.getChildUuids().contains(cloneEvent.getParentUuids().getFirst()));
+    }
+
+    @Test
+    public void testCreateOutputRecordsOnSuccessWithTwoPorts() throws IOException {
+        final Connection successConnection = mockConnection();
+        when(successPort.getConnections()).thenReturn(Collections.singleton(successConnection));
+
+        final Connection port2Connection = mockConnection();
+        when(secondOutputPort.getConnections()).thenReturn(Collections.singleton(port2Connection));
+
+        final FlowFileRecord flowFileRecord = new MockFlowFileRecord(1L);
+        final FlowFileRecord port2FlowFile1 = new MockFlowFileRecord(2L);
+        final FlowFileRecord port2FlowFile2 = new MockFlowFileRecord(3L);
+
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        outputFlowFiles.put("success", Collections.singletonList(flowFileRecord));
+        outputFlowFiles.put("port2", Arrays.asList(port2FlowFile1, port2FlowFile2));
+        task.createOutputRecords(outputFlowFiles);
+
+        final List<RepositoryRecord> outputRecords = task.getOutputRepositoryRecords();
+        assertEquals(3, outputRecords.size());
+
+        // We should have a FlowFileCloneResult for each output FlowFile.
+        // The results are a bit messy to check because of the collections that have indeterminate ordering.
+        // Because of that, we'll check that the collections have the correct counts, and that each of the FlowFiles is found in one of the collections.
+        final List<FlowFileCloneResult> cloneResults = task.getCloneResults();
+        assertEquals(3, cloneResults.size());
+
+        int successQueueCount = 0;
+        int port2Count = 0;
+        boolean port2FlowFile1Found = false;
+        boolean port2FlowFile2Found = false;
+        for (final FlowFileCloneResult cloneResult : cloneResults) {
+            final Map<FlowFileQueue, List<FlowFileRecord>> outputAfterClone = cloneResult.getFlowFilesToEnqueue();
+            assertEquals(1, outputAfterClone.size());
+            assertEquals(1, outputAfterClone.values().iterator().next().size());
+
+            final FlowFileQueue successQueue = successConnection.getFlowFileQueue();
+            final FlowFileQueue port2Queue = port2Connection.getFlowFileQueue();
+
+            if (outputAfterClone.containsKey(successQueue)) {
+                assertEquals(Collections.singletonList(flowFileRecord), outputAfterClone.get(successQueue));
+                successQueueCount++;
+            } else if (outputAfterClone.containsKey(port2Queue)) {
+                assertEquals(1, outputAfterClone.get(port2Queue).size());
+                final FlowFileRecord outputFlowFile = outputAfterClone.get(port2Queue).get(0);
+                if (outputFlowFile.equals(port2FlowFile1)) {
+                    port2FlowFile1Found = true;
+                } else if (outputFlowFile.equals(port2FlowFile2)) {
+                    port2FlowFile2Found = true;
+                } else {
+                    Assertions.fail("Found FlowFileCloneResult for unknown FlowFile " + outputFlowFile);
+                }
+
+                port2Count++;
+            } else {
+                Assertions.fail("Found FlowFileCloneResult for unknown FlowFileQueue " + outputAfterClone.keySet());
+            }
+        }
+
+        assertEquals(1, successQueueCount);
+        assertEquals(2, port2Count);
+        assertTrue(port2FlowFile1Found);
+        assertTrue(port2FlowFile2Found);
+
+        assertTrue(task.getCloneProvenanceEvents().isEmpty());
+    }
+
+    @Test
+    public void testUpdateClaimantCountSingleOutput() throws IOException {
+        final Connection conn1 = mockConnection();
+        final Set<Connection> singleConnectionSet = Collections.singleton(conn1);
+
+        when(successPort.getConnections()).thenReturn(singleConnectionSet);
+
+        final FlowFileRecord flowFileRecord = createFlowFile();
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        outputFlowFiles.put("success", Collections.singletonList(flowFileRecord));
+        task.createOutputRecords(outputFlowFiles);
+
+        task.updateClaimantCounts();
+        assertEquals(1, resourceClaimManager.getClaimantCount(flowFileRecord.getContentClaim().getResourceClaim()));
+    }
+
+    @Test
+    public void testUpdateClaimantCountWithClone() throws IOException {
+        final Connection conn1 = mockConnection();
+        final Connection conn2 = mockConnection();
+
+        final Set<Connection> connectionSet = new HashSet<>(Arrays.asList(conn1, conn2));
+        when(successPort.getConnections()).thenReturn(connectionSet);
+
+        final FlowFileRecord flowFileRecord = createFlowFile();
+        when(flowFileRecord.getAttribute("uuid")).thenReturn("uuid1");
+
+        assertEquals(0, resourceClaimManager.getClaimantCount(flowFileRecord.getContentClaim().getResourceClaim()));
+
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        outputFlowFiles.put("success", Collections.singletonList(flowFileRecord));
+        task.createOutputRecords(outputFlowFiles);
+
+        task.updateClaimantCounts();
+        assertEquals(2, resourceClaimManager.getClaimantCount(flowFileRecord.getContentClaim().getResourceClaim()));
+    }
+
+    @Test
+    public void testContentClaimCountWhenMultipleFlowFilesTransferredToPort() throws IOException {
+        final Connection conn1 = mockConnection();
+        final Set<Connection> singleConnectionSet = Collections.singleton(conn1);
+
+        when(successPort.getConnections()).thenReturn(singleConnectionSet);
+
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        final FlowFileRecord flowFile1 = createFlowFile();
+        final FlowFileRecord flowFile2 = createFlowFile();
+        outputFlowFiles.put("success", Arrays.asList(flowFile1, flowFile2));
+        task.createOutputRecords(outputFlowFiles);
+
+        task.updateClaimantCounts();
+        assertEquals(2, resourceClaimManager.getClaimantCount(flowFile1.getContentClaim().getResourceClaim()));
+    }
+
+    @Test
+    public void testFailureReturnsInputFlowFileToFrontOfSwappingQueue() throws InterruptedException {
+        // The source queue's swap threshold is 3, so the fourth FlowFile goes to the swap queue and the queue enters swap mode
+        final StandardFlowFileQueue sourceQueue = new StandardFlowFileQueue("source-queue", flowFileRepository, provenanceRepository, mock(ProcessScheduler.class),
+            mock(FlowFileSwapManager.class), null, 3, "0 sec", 0L, "0 B");
+        final List<FlowFileRecord> queuedFlowFiles = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            final FlowFileRecord flowFile = new MockFlowFileRecord();
+            queuedFlowFiles.add(flowFile);
+            sourceQueue.put(flowFile);
+        }
+
+        final Connection sourceConnection = mock(Connection.class);
+        when(sourceConnection.getFlowFileQueue()).thenReturn(sourceQueue);
+        when(inputPort1.getIncomingConnections()).thenReturn(List.of(sourceConnection));
+
+        final AtomicReference<ScheduledState> desiredState = new AtomicReference<>();
+        when(statelessGroupNode.getDesiredState()).thenAnswer(invocation -> desiredState.get());
+
+        // The group is stopped while the flow is running, so the input FlowFile is returned to the source queue without a penalty
+        final TriggerResult canceledResult = mock(TriggerResult.class);
+        when(canceledResult.isCanceled()).thenReturn(true);
+        triggerFailingFlow(canceledResult, desiredState, ScheduledState.STOPPED);
+
+        final FlowFileRecord flowFileAfterCancel = sourceQueue.poll(new HashSet<>());
+        assertEquals(queuedFlowFiles.getFirst().getId(), flowFileAfterCancel.getId());
+        sourceQueue.acknowledge(flowFileAfterCancel);
+
+        // The flow fails, so the input FlowFile is penalized and returned to the active queue, ahead of the FlowFile on the swap queue
+        final TriggerResult failedResult = mock(TriggerResult.class);
+        when(failedResult.getFailureCause()).thenReturn(Optional.of(new ProcessException("Intentional failure")));
+        triggerFailingFlow(failedResult, desiredState, ScheduledState.RUNNING);
+
+        final LocalQueuePartitionDiagnostics diagnostics = sourceQueue.getQueueDiagnostics().getLocalQueuePartitionDiagnostics();
+        assertEquals(2, diagnostics.getActiveQueueSize().getObjectCount());
+        assertEquals(1, diagnostics.getSwapQueueSize().getObjectCount());
+    }
+
+    private void triggerFailingFlow(final TriggerResult triggerResult, final AtomicReference<ScheduledState> desiredState, final ScheduledState stateAfterTrigger) throws InterruptedException {
+        final DataflowTrigger dataflowTrigger = mock(DataflowTrigger.class);
+        when(dataflowTrigger.getResult(anyLong(), any(TimeUnit.class))).thenReturn(Optional.of(triggerResult));
+        when(statelessFlow.trigger(any(DataflowTriggerContext.class))).thenAnswer(invocation -> {
+            final DataflowTriggerContext triggerContext = invocation.getArgument(0);
+            triggerContext.getFlowFileSupplier().getFlowFile(inputPort1.getName());
+            desiredState.set(stateAfterTrigger);
+            return dataflowTrigger;
+        });
+
+        desiredState.set(ScheduledState.RUNNING);
+        task.trigger();
+    }
+
+    private Connection mockConnection() {
+        final FlowFileQueue queue = mock(FlowFileQueue.class);
+        final Connection connection = mock(Connection.class);
+        when(connection.getFlowFileQueue()).thenReturn(queue);
+        return connection;
+    }
+
+    private DeferredStatelessContentRepository createDeferredContentRepository() {
+        final ByteArrayContentRepository backingRepository = new ByteArrayContentRepository();
+        backingRepository.initialize(new StandardContentRepositoryContext(resourceClaimManager, EventReporter.NO_OP));
+        final ProcessGroup processGroup = mock(ProcessGroup.class);
+        when(processGroup.resolveStatelessContentMaxHeap()).thenReturn(1024L);
+        return new DeferredStatelessContentRepository(processGroup, backingRepository, flowFileRepository, resourceClaimManager, EventReporter.NO_OP);
+    }
+
+    private StatelessFlowTask createTask(final ContentRepository contentRepository) {
+        return new StatelessFlowTask.Builder()
+            .statelessFlow(statelessFlow)
+            .statelessGroupNode(statelessGroupNode)
+            .nifiFlowFileRepository(flowFileRepository)
+            .nifiContentRepository(contentRepository)
+            .nifiProvenanceRepository(provenanceRepository)
+            .flowFileEventRepository(flowFileEventRepository)
+            .logger(logger)
+            .build();
+    }
+
+    @Test
+    public void testProvenanceEventsCopiedFromStatelessFlow() {
+        for (int i = 0; i < 5; i++) {
+            final ProvenanceEventRecord event = new StandardProvenanceEventRecord.Builder()
+                .setEventId(i)
+                .setEventType(ProvenanceEventType.CREATE)
+                .setComponentId("component-" + i)
+                .setEventTime(System.currentTimeMillis())
+                .setFlowFileUUID("uuid-" + i)
+                .setComponentType("Unit Test")
+                .setCurrentContentClaim(null, null, null, null, 0)
+                .build();
+            statelessProvenanceEvents.add(event);
+        }
+
+        task.updateProvenanceRepository(statelessProvRepo, event -> true);
+
+        assertEquals(statelessProvenanceEvents, registeredProvenanceEvents);
+        for (final ProvenanceEventRecord eventRecord : registeredProvenanceEvents) {
+            assertEquals(-1, eventRecord.getEventId());
+        }
+    }
+
+    @Test
+    public void testMoreThan1000ProvenanceEventsCopied() {
+        for (int i = 0; i < 2003; i++) {
+            final ProvenanceEventRecord event = new StandardProvenanceEventRecord.Builder()
+                .setEventId(i)
+                .setEventType(ProvenanceEventType.CREATE)
+                .setComponentId("component-" + i)
+                .setEventTime(System.currentTimeMillis())
+                .setFlowFileUUID("uuid-" + i)
+                .setComponentType("Unit Test")
+                .setCurrentContentClaim(null, null, null, null, 0)
+                .build();
+            statelessProvenanceEvents.add(event);
+        }
+
+        task.updateProvenanceRepository(statelessProvRepo, event -> true);
+
+        assertEquals(statelessProvenanceEvents, registeredProvenanceEvents);
+        for (final ProvenanceEventRecord eventRecord : registeredProvenanceEvents) {
+            assertEquals(-1, eventRecord.getEventId());
+        }
+    }
+
+    @Test
+    public void testUpdateEventRepositoryWithNoInputFlowFile() {
+        when(successPort.getConnections()).thenReturn(Collections.singleton(mock(Connection.class)));
+        when(secondOutputPort.getConnections()).thenReturn(Collections.singleton(mock(Connection.class)));
+
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        outputFlowFiles.put(successPort.getName(), Collections.singletonList(createFlowFile()));
+        outputFlowFiles.put(secondOutputPort.getName(), Arrays.asList(createFlowFile(), createFlowFile(), createFlowFile()));
+
+        final TriggerResult triggerResult = mock(TriggerResult.class);
+        when(triggerResult.getOutputFlowFiles()).thenReturn(outputFlowFiles);
+
+        final Invocation noInputInvocation = new Invocation();
+        noInputInvocation.setTriggerResult(triggerResult);
+
+        task.updateEventRepository(Collections.singletonList(noInputInvocation));
+
+        final ProcessSessionEvent port1Event = flowFileEventsByComponentId.get(successPort.getIdentifier());
+        assertNotNull(port1Event);
+        assertEquals(1, port1Event.getFlowFilesOut());
+        assertEquals(5, port1Event.getContentSizeOut());
+
+        final ProcessSessionEvent port2Event = flowFileEventsByComponentId.get(secondOutputPort.getIdentifier());
+        assertNotNull(port2Event);
+        assertEquals(3, port2Event.getFlowFilesOut());
+        assertEquals(15, port2Event.getContentSizeOut());
+    }
+
+    @Test
+    public void testUpdateEventRepositoryWithOutputCloned() {
+        when(successPort.getConnections()).thenReturn(new HashSet<>(Arrays.asList(mock(Connection.class), mock(Connection.class), mock(Connection.class))));
+
+        final Map<String, List<FlowFile>> outputFlowFiles = new HashMap<>();
+        outputFlowFiles.put(successPort.getName(), Collections.singletonList(createFlowFile()));
+
+        final TriggerResult triggerResult = mock(TriggerResult.class);
+        when(triggerResult.getOutputFlowFiles()).thenReturn(outputFlowFiles);
+
+        final Invocation noInputInvocation = new Invocation();
+        noInputInvocation.setTriggerResult(triggerResult);
+
+        task.updateEventRepository(Collections.singletonList(noInputInvocation));
+
+        final ProcessSessionEvent port1Event = flowFileEventsByComponentId.get(successPort.getIdentifier());
+        assertNotNull(port1Event);
+        assertEquals(3, port1Event.getFlowFilesOut());
+        assertEquals(15, port1Event.getContentSizeOut());
+        assertEquals(1, port1Event.getFlowFilesIn());
+        assertEquals(5, port1Event.getContentSizeIn());
+    }
+
+    @Test
+    public void testUpdateEventRepositoryWithInputFlowFile() {
+        final Map<String, List<FlowFile>> outputFlowFiles = Collections.emptyMap();
+        final TriggerResult triggerResult = mock(TriggerResult.class);
+        when(triggerResult.getOutputFlowFiles()).thenReturn(outputFlowFiles);
+
+        final FlowFileRecord inputFlowFile = createFlowFile();
+        final FlowFileQueue queue = mock(FlowFileQueue.class);
+
+        when(inputPort1.getConnections()).thenReturn(new HashSet<>(Arrays.asList(mock(Connection.class), mock(Connection.class))));
+
+        // Test method with multiple Invocations each having an input FlowFile
+        final Invocation invocationWithInput = new Invocation();
+        invocationWithInput.setTriggerResult(triggerResult);
+        invocationWithInput.addPolledFlowFile(new PolledFlowFile(inputFlowFile, queue, inputPort1));
+
+        task.updateEventRepository(Collections.singletonList(invocationWithInput));
+        final ProcessSessionEvent inputPortEvent = flowFileEventsByComponentId.get(inputPort1.getIdentifier());
+        assertNotNull(inputPortEvent);
+        assertEquals(1, inputPortEvent.getFlowFilesIn());
+        assertEquals(5, inputPortEvent.getContentSizeIn());
+        assertEquals(2, inputPortEvent.getFlowFilesOut());
+        assertEquals(10, inputPortEvent.getContentSizeOut());
+    }
+
+
+    @Test
+    public void testUpdateFlowFileActivityWithNoEvents() {
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        final FlowFileTransferCounts counts = groupNodeFlowFileActivity.getTransferCounts();
+        assertEquals(0L, counts.getReceivedCount());
+        assertEquals(0L, counts.getReceivedBytes());
+        assertEquals(0L, counts.getSentCount());
+        assertEquals(0L, counts.getSentBytes());
+        assertTrue(groupNodeFlowFileActivity.getLatestActivityTime().isEmpty());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivityCountsReceiveAndSendEvents() {
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.RECEIVE, 100L));
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.RECEIVE, 200L));
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.SEND, 50L));
+
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        final FlowFileTransferCounts counts = groupNodeFlowFileActivity.getTransferCounts();
+        assertEquals(2L, counts.getReceivedCount());
+        assertEquals(300L, counts.getReceivedBytes());
+        assertEquals(1L, counts.getSentCount());
+        assertEquals(50L, counts.getSentBytes());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivityCountsCreateEvents() {
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.CREATE, 75L));
+
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        final FlowFileTransferCounts counts = groupNodeFlowFileActivity.getTransferCounts();
+        assertEquals(1L, counts.getReceivedCount());
+        assertEquals(75L, counts.getReceivedBytes());
+        assertEquals(0L, counts.getSentCount());
+        assertEquals(0L, counts.getSentBytes());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivityCountsFetchBytesButNotCount() {
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.FETCH, 500L));
+
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        final FlowFileTransferCounts counts = groupNodeFlowFileActivity.getTransferCounts();
+        assertEquals(0L, counts.getReceivedCount());
+        assertEquals(500L, counts.getReceivedBytes());
+        assertEquals(0L, counts.getSentCount());
+        assertEquals(0L, counts.getSentBytes());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivityIgnoresOtherEventTypes() {
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.ATTRIBUTES_MODIFIED, 100L));
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.CONTENT_MODIFIED, 200L));
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.ROUTE, 300L));
+
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        final FlowFileTransferCounts counts = groupNodeFlowFileActivity.getTransferCounts();
+        assertEquals(0L, counts.getReceivedCount());
+        assertEquals(0L, counts.getReceivedBytes());
+        assertEquals(0L, counts.getSentCount());
+        assertEquals(0L, counts.getSentBytes());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivitySetsActivityTimeFromFlow() {
+        when(statelessFlow.getLatestActivityTime()).thenReturn(OptionalLong.of(System.currentTimeMillis()));
+
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        assertTrue(groupNodeFlowFileActivity.getLatestActivityTime().isPresent());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivityNoActivityTimeWhenFlowReportsNone() {
+        when(statelessFlow.getLatestActivityTime()).thenReturn(OptionalLong.empty());
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.RECEIVE, 100L));
+
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        assertTrue(groupNodeFlowFileActivity.getLatestActivityTime().isEmpty());
+    }
+
+    @Test
+    public void testUpdateFlowFileActivityAccumulatesAcrossMultipleCalls() {
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.RECEIVE, 100L));
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        statelessProvenanceEvents.clear();
+        statelessProvenanceEvents.add(createProvenanceEvent(ProvenanceEventType.SEND, 50L));
+        task.updateFlowFileActivity(statelessProvRepo);
+
+        final FlowFileTransferCounts counts = groupNodeFlowFileActivity.getTransferCounts();
+        assertEquals(1L, counts.getReceivedCount());
+        assertEquals(100L, counts.getReceivedBytes());
+        assertEquals(1L, counts.getSentCount());
+        assertEquals(50L, counts.getSentBytes());
+    }
+
+    private ProvenanceEventRecord createProvenanceEvent(final ProvenanceEventType eventType, final long fileSize) {
+        final StandardProvenanceEventRecord.Builder builder = new StandardProvenanceEventRecord.Builder()
+            .setEventType(eventType)
+            .setComponentId("component-1")
+            .setEventTime(System.currentTimeMillis())
+            .setFlowFileUUID("uuid-1")
+            .setComponentType("Unit Test")
+            .setCurrentContentClaim(null, null, null, null, fileSize);
+
+        switch (eventType) {
+            case RECEIVE:
+            case SEND:
+            case FETCH:
+                builder.setTransitUri("http://localhost/test");
+                break;
+            case ROUTE:
+                builder.setRelationship("success");
+                break;
+            default:
+                break;
+        }
+
+        return builder.build();
+    }
+
+    private FlowFileRecord createFlowFile() {
+        final ResourceClaim resourceClaim = new StandardResourceClaim(resourceClaimManager, "container", "section", "1", false);
+        final ContentClaim contentClaim = new StandardContentClaim(resourceClaim, 0L);
+        final FlowFileRecord flowFileRecord = mock(FlowFileRecord.class);
+        when(flowFileRecord.getContentClaim()).thenReturn(contentClaim);
+        when(flowFileRecord.getSize()).thenReturn(5L);
+
+        return flowFileRecord;
+    }
+}

@@ -17,10 +17,6 @@
 
 package org.apache.nifi.record.path.functions;
 
-import java.util.Optional;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
-
 import org.apache.nifi.record.path.FieldValue;
 import org.apache.nifi.record.path.RecordPathEvaluationContext;
 import org.apache.nifi.record.path.StandardFieldValue;
@@ -28,6 +24,10 @@ import org.apache.nifi.record.path.paths.LiteralValuePath;
 import org.apache.nifi.record.path.paths.RecordPathSegment;
 import org.apache.nifi.record.path.util.RecordPathUtils;
 import org.apache.nifi.serialization.record.util.DataTypeUtils;
+
+import java.util.Optional;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 public class ReplaceRegex extends RecordPathSegment {
 
@@ -43,9 +43,9 @@ public class ReplaceRegex extends RecordPathSegment {
         this.recordPath = recordPath;
         this.searchValuePath = searchValue;
         if (searchValue instanceof LiteralValuePath) {
-            final FieldValue fieldValue = ((LiteralValuePath) searchValue).evaluate((RecordPathEvaluationContext) null).findFirst().get();
+            final FieldValue fieldValue = searchValue.evaluate((RecordPathEvaluationContext) null).findFirst().get();
             final Object value = fieldValue.getValue();
-            final String regex = DataTypeUtils.toString(value, (String) null);
+            final String regex = DataTypeUtils.toString(value, null);
             compiledPattern = Pattern.compile(regex);
         } else {
             compiledPattern = null;
@@ -59,7 +59,7 @@ public class ReplaceRegex extends RecordPathSegment {
         final Stream<FieldValue> fieldValues = recordPath.evaluate(context);
         return fieldValues.filter(fv -> fv.getValue() != null)
             .map(fv -> {
-                final String value = DataTypeUtils.toString(fv.getValue(), (String) null);
+                final String value = DataTypeUtils.toString(fv.getValue(), null);
 
                 // Determine the Replacement Value
                 final String replacementValue = RecordPathUtils.getFirstStringValue(replacementValuePath, context);
@@ -79,7 +79,7 @@ public class ReplaceRegex extends RecordPathSegment {
                         return fv;
                     }
 
-                    final String regex = DataTypeUtils.toString(fieldValue, (String) null);
+                    final String regex = DataTypeUtils.toString(fieldValue, null);
                     pattern = Pattern.compile(regex);
                 } else {
                     pattern = compiledPattern;

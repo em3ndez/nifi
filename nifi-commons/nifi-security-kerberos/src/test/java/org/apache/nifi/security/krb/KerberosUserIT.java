@@ -17,36 +17,32 @@
 package org.apache.nifi.security.krb;
 
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.ProcessContext;
-import org.junit.BeforeClass;
-import org.junit.ClassRule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import javax.security.auth.Subject;
-import javax.security.auth.kerberos.KerberosPrincipal;
-import javax.security.auth.kerberos.KerberosTicket;
-import javax.security.auth.login.LoginException;
 import java.io.File;
-import java.security.AccessControlContext;
-import java.security.AccessController;
+import java.nio.file.Path;
 import java.security.Principal;
 import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.security.auth.Subject;
+import javax.security.auth.kerberos.KerberosPrincipal;
+import javax.security.auth.kerberos.KerberosTicket;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class KerberosUserIT {
-
-    @ClassRule
-    public static TemporaryFolder tmpDir = new TemporaryFolder();
+    private static final Logger logger = LoggerFactory.getLogger(KerberosUserIT.class);
 
     private static KDCServer kdc;
 
@@ -59,18 +55,21 @@ public class KerberosUserIT {
     private static KerberosPrincipal principal3;
     private static final String principal3Password = "changeme";
 
-    @BeforeClass
-    public static void setupClass() throws Exception {
-        kdc = new KDCServer(tmpDir.newFolder("mini-kdc_"));
+    @BeforeAll
+    public static void setupClass(@TempDir Path tmpDir) throws Exception {
+        File kdcFolder = tmpDir.resolve("mini-kdc_").toFile();
+        kdcFolder.mkdirs();
+
+        kdc = new KDCServer(kdcFolder);
         kdc.setMaxTicketLifetime("15"); // set ticket lifetime to 15 seconds so we can test relogin
         kdc.start();
 
         principal1 = new KerberosPrincipal("user1@" + kdc.getRealm());
-        principal1KeytabFile = tmpDir.newFile("user1.keytab");
+        principal1KeytabFile = tmpDir.resolve("user1.keytab").toFile();
         kdc.createKeytabPrincipal(principal1KeytabFile, "user1");
 
         principal2 = new KerberosPrincipal("user2@" + kdc.getRealm());
-        principal2KeytabFile = tmpDir.newFile("user2.keytab");
+        principal2KeytabFile = tmpDir.resolve("user2.keytab").toFile();
         kdc.createKeytabPrincipal(principal2KeytabFile, "user2");
 
         principal3 = new KerberosPrincipal("user3@" + kdc.getRealm());
@@ -78,23 +77,23 @@ public class KerberosUserIT {
     }
 
     @Test
-    public void testKeytabUserSuccessfulLoginAndLogout() throws LoginException {
+    public void testKeytabUserSuccessfulLoginAndLogout() {
         // perform login for user1
-        final KerberosUser user1 = new KerberosKeytabUser(principal1.getName(), principal1KeytabFile.getAbsolutePath());
+        final KerberosKeytabUser user1 = new KerberosKeytabUser(principal1.getName(), principal1KeytabFile.getAbsolutePath());
         user1.login();
 
         // perform login for user2
-        final KerberosUser user2 = new KerberosKeytabUser(principal2.getName(), principal2KeytabFile.getAbsolutePath());
+        final KerberosKeytabUser user2 = new KerberosKeytabUser(principal2.getName(), principal2KeytabFile.getAbsolutePath());
         user2.login();
 
         // verify user1 Subject only has user1 principal
-        final Subject user1Subject = ((KerberosKeytabUser) user1).getSubject();
+        final Subject user1Subject = user1.getSubject();
         final Set<Principal> user1SubjectPrincipals = user1Subject.getPrincipals();
         assertEquals(1, user1SubjectPrincipals.size());
         assertEquals(principal1.getName(), user1SubjectPrincipals.iterator().next().getName());
 
         // verify user2 Subject only has user2 principal
-        final Subject user2Subject = ((KerberosKeytabUser) user2).getSubject();
+        final Subject user2Subject = user2.getSubject();
         final Set<Principal> user2SubjectPrincipals = user2Subject.getPrincipals();
         assertEquals(1, user2SubjectPrincipals.size());
         assertEquals(principal2.getName(), user2SubjectPrincipals.iterator().next().getName());
@@ -113,26 +112,20 @@ public class KerberosUserIT {
     }
 
     @Test
-    public void testKeytabLoginWithUnknownPrincipal() throws LoginException {
+    public void testKeytabLoginWithUnknownPrincipal() {
         final String unknownPrincipal = "doesnotexist@" + kdc.getRealm();
         final KerberosUser user1 = new KerberosKeytabUser(unknownPrincipal, principal1KeytabFile.getAbsolutePath());
-        try {
-            user1.login();
-            fail("Login should have failed");
-        } catch (Exception e) {
-            // exception is expected here
-            //e.printStackTrace();
-        }
+        assertThrows(Exception.class, user1::login);
     }
 
     @Test
-    public void testPasswordUserSuccessfulLoginAndLogout() throws LoginException {
+    public void testPasswordUserSuccessfulLoginAndLogout() {
         // perform login for user
-        final KerberosUser user = new KerberosPasswordUser(principal3.getName(), principal3Password);
+        final KerberosPasswordUser user = new KerberosPasswordUser(principal3.getName(), principal3Password);
         user.login();
 
         // verify user Subject only has user principal
-        final Subject userSubject = ((KerberosPasswordUser) user).getSubject();
+        final Subject userSubject = user.getSubject();
         final Set<Principal> userSubjectPrincipals = userSubject.getPrincipals();
         assertEquals(1, userSubjectPrincipals.size());
         assertEquals(principal3.getName(), userSubjectPrincipals.iterator().next().getName());
@@ -147,37 +140,34 @@ public class KerberosUserIT {
         assertEquals(0, userSubject.getPrincipals().size());
     }
 
-    @Test(expected = LoginException.class)
-    public void testPasswordUserLoginWithInvalidPassword() throws LoginException {
+    @Test
+    public void testPasswordUserLoginWithInvalidPassword() {
         // perform login for user
         final KerberosUser user = new KerberosPasswordUser("user3", "NOT THE PASSWORD");
-        user.login();
+        assertThrows(KerberosLoginException.class, user::login);
     }
 
     @Test
-    public void testCheckTGTAndRelogin() throws LoginException, InterruptedException {
+    public void testCheckTGTAndRelogin() throws InterruptedException {
         final KerberosUser user1 = new KerberosKeytabUser(principal1.getName(), principal1KeytabFile.getAbsolutePath());
         user1.login();
 
         // Since we set the lifetime to 15 seconds we should hit a relogin before 15 attempts
 
         boolean performedRelogin = false;
-        for (int i=0; i < 30; i++) {
+        for (int i = 0; i < 30; i++) {
             Thread.sleep(1000);
-            System.out.println("checkTGTAndRelogin #" + i);
+            logger.info("checkTGTAndRelogin #{}", i);
             performedRelogin = user1.checkTGTAndRelogin();
 
             if (performedRelogin) {
-                System.out.println("Performed relogin!");
+                logger.info("Performed relogin!");
                 break;
             }
         }
-        assertEquals(true, performedRelogin);
+        assertTrue(performedRelogin);
 
-        Subject subject = user1.doAs((PrivilegedAction<Subject>) () -> {
-            AccessControlContext context = AccessController.getContext();
-            return Subject.getSubject(context);
-        });
+        Subject subject = user1.doAs((PrivilegedAction<Subject>) Subject::current);
 
         // verify only a single KerberosTicket exists in the Subject after relogin
         Set<KerberosTicket> kerberosTickets = subject.getPrivateCredentials(KerberosTicket.class);
@@ -188,7 +178,7 @@ public class KerberosUserIT {
         long currentTimeMillis = System.currentTimeMillis();
         long startMilli = kerberosTicket.getStartTime().toInstant().toEpochMilli();
         long endMilli = kerberosTicket.getEndTime().toInstant().toEpochMilli();
-        System.out.println("New ticket is valid for " + TimeUnit.MILLISECONDS.toSeconds(endMilli - startMilli) + " seconds");
+        logger.info("New ticket is valid for {}", TimeUnit.MILLISECONDS.toSeconds(endMilli - startMilli) + " seconds");
         assertTrue(startMilli < currentTimeMillis);
         assertTrue(endMilli > currentTimeMillis);
     }
@@ -203,11 +193,10 @@ public class KerberosUserIT {
             return null;
         };
 
-        final ProcessContext context = Mockito.mock(ProcessContext.class);
         final ComponentLog logger = Mockito.mock(ComponentLog.class);
 
         // create the action to test and execute it
-        final KerberosAction kerberosAction = new KerberosAction<>(user1, privilegedAction, logger);
+        final KerberosAction<Void> kerberosAction = new KerberosAction<>(user1, privilegedAction, logger);
         kerberosAction.execute();
 
         // if the result holder has the string success then we know the action executed

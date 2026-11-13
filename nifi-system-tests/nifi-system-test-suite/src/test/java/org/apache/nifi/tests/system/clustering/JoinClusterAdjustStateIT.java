@@ -21,20 +21,21 @@ import org.apache.nifi.tests.system.NiFiInstance;
 import org.apache.nifi.tests.system.NiFiInstanceFactory;
 import org.apache.nifi.tests.system.NiFiSystemIT;
 import org.apache.nifi.tests.system.SpawnedClusterNiFiInstanceFactory;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Collections;
 
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class JoinClusterAdjustStateIT extends NiFiSystemIT {
     @Override
-    protected NiFiInstanceFactory getInstanceFactory() {
+    public NiFiInstanceFactory getInstanceFactory() {
+        // Create a factory explicitly because we want the second instance not to be auto-started
         return new SpawnedClusterNiFiInstanceFactory(
             new InstanceConfiguration.Builder()
                 .bootstrapConfig("src/test/resources/conf/clustered/node1/bootstrap.conf")
@@ -46,6 +47,11 @@ public class JoinClusterAdjustStateIT extends NiFiSystemIT {
                 .autoStart(false)
                 .build()
         );
+    }
+
+    @Override
+    protected boolean isAllowFactoryReuse() {
+        return false; // Do not allow reuse because this test requires that Node 1 be auto-started and Node 2 not be.
     }
 
     @Test
@@ -70,21 +76,21 @@ public class JoinClusterAdjustStateIT extends NiFiSystemIT {
 
         // Start the Processor that requires a file named "monitored" to exist. When we join Node 2 to the cluster, this directory will not exist.
         // We want to ensure that the Processor does in fact start on its own when the directory is created.
-        getNifiClient().getProcessorClient().startProcessor(fileProcessor.getId(), fileProcessor.getRevision().getClientId(), 1);
+        getClientUtil().startProcessor(fileProcessor);
         getClientUtil().waitForRunningProcessor(fileProcessor.getId());
 
         // Create a new NiFi instance
         final NiFiInstance node2Instance = getNiFiInstance().getNodeInstance(2);
 
         // Copy the flow from Node 1 to Node 2.
-        final File node1Flow = new File(firstNodeInstanceDir, "conf/flow.xml.gz");
-        final File node2Flow = new File(node2Instance.getInstanceDirectory(), "conf/flow.xml.gz");
+        final File node1Flow = new File(firstNodeInstanceDir, "conf/flow.json.gz");
+        final File node2Flow = new File(node2Instance.getInstanceDirectory(), "conf/flow.json.gz");
         Thread.sleep(2000L); // Wait a bit before copying it, since the flow is written out in the background, and we want to ensure that the flow is up-to-date.
         Files.copy(node1Flow.toPath(), node2Flow.toPath());
 
         // Start the Count Processor on Node 1. When Node 2 joins the cluster, we know that its flow will indicate that the Processor is stopped.
         // But because the cluster indicates that the Processor is running, the second node should inherit this value and immediately start the Processor also.
-        getNifiClient().getProcessorClient().startProcessor(countProcessor.getId(), countProcessor.getRevision().getClientId(), 1);
+        getClientUtil().startProcessor(countProcessor);
 
         node2Instance.start();
 

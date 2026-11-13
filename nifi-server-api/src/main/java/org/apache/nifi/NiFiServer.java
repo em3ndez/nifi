@@ -17,6 +17,9 @@
 package org.apache.nifi;
 
 import org.apache.nifi.bundle.Bundle;
+import org.apache.nifi.cluster.ClusterDetailsFactory;
+import org.apache.nifi.controller.DecommissionTask;
+import org.apache.nifi.controller.status.history.StatusHistoryDumpFactory;
 import org.apache.nifi.diagnostics.DiagnosticsFactory;
 import org.apache.nifi.nar.ExtensionMapping;
 import org.apache.nifi.util.NiFiProperties;
@@ -24,7 +27,7 @@ import org.apache.nifi.util.NiFiProperties;
 import java.util.Set;
 
 /**
- *
+ * The main interface for declaring a NiFi-based server application
  */
 public interface NiFiServer {
 
@@ -37,4 +40,10 @@ public interface NiFiServer {
     DiagnosticsFactory getDiagnosticsFactory();
 
     DiagnosticsFactory getThreadDumpFactory();
+
+    DecommissionTask getDecommissionTask();
+
+    ClusterDetailsFactory getClusterDetailsFactory();
+
+    StatusHistoryDumpFactory getStatusHistoryDumpFactory();
 }

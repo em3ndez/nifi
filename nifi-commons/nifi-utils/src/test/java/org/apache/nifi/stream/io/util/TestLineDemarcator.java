@@ -17,8 +17,10 @@
 package org.apache.nifi.stream.io.util;
 
 import org.apache.nifi.stream.io.RepeatingInputStream;
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -32,23 +34,24 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertLinesMatch;
 
 public class TestLineDemarcator {
+
+    private static final Logger logger = LoggerFactory.getLogger(TestLineDemarcator.class);
 
     @Test
     public void testSingleCharacterLines() throws IOException {
         final String input = "A\nB\nC\rD\r\nE\r\nF\r\rG";
 
         final List<String> lines = getLines(input);
-        assertEquals(Arrays.asList("A\n", "B\n", "C\r", "D\r\n", "E\r\n", "F\r", "\r", "G"), lines);
+        assertLinesMatch(Arrays.asList("A\n", "B\n", "C\r", "D\r\n", "E\r\n", "F\r", "\r", "G"), lines);
     }
-
 
     @Test
     public void testEmptyStream() throws IOException {
         final List<String> lines = getLines("");
-        assertEquals(Collections.emptyList(), lines);
+        assertLinesMatch(Collections.emptyList(), lines);
     }
 
     @Test
@@ -56,7 +59,7 @@ public class TestLineDemarcator {
         final String input = "\r\r\r\n\n\n\r\n";
 
         final List<String> lines = getLines(input);
-        assertEquals(Arrays.asList("\r", "\r", "\r\n", "\n", "\n", "\r\n"), lines);
+        assertLinesMatch(Arrays.asList("\r", "\r", "\r\n", "\n", "\n", "\r\n"), lines);
     }
 
     @Test
@@ -64,25 +67,25 @@ public class TestLineDemarcator {
         final String input = "ABC\r\nXYZ";
         final List<String> lines = getLines(input, 10, 4);
 
-        assertEquals(Arrays.asList("ABC\r\n", "XYZ"), lines);
+        assertLinesMatch(Arrays.asList("ABC\r\n", "XYZ"), lines);
     }
 
     @Test
     public void testEndsWithCarriageReturn() throws IOException {
         final List<String> lines = getLines("ABC\r");
-        assertEquals(Arrays.asList("ABC\r"), lines);
+        assertLinesMatch(Arrays.asList("ABC\r"), lines);
     }
 
     @Test
     public void testEndsWithNewLine() throws IOException {
         final List<String> lines = getLines("ABC\n");
-        assertEquals(Arrays.asList("ABC\n"), lines);
+        assertLinesMatch(Arrays.asList("ABC\n"), lines);
     }
 
     @Test
     public void testEndsWithCarriageReturnNewLine() throws IOException {
         final List<String> lines = getLines("ABC\r\n");
-        assertEquals(Arrays.asList("ABC\r\n"), lines);
+        assertLinesMatch(Arrays.asList("ABC\r\n"), lines);
     }
 
     @Test
@@ -90,23 +93,25 @@ public class TestLineDemarcator {
         final String input = "he\ra-to-a\rb-to-b\rc-to-c\r\nd-to-d";
         final List<String> lines = getLines(input, 10, 10);
 
-        assertEquals(Arrays.asList("he\r", "a-to-a\r", "b-to-b\r", "c-to-c\r\n", "d-to-d"), lines);
+        assertLinesMatch(Arrays.asList("he\r", "a-to-a\r", "b-to-b\r", "c-to-c\r\n", "d-to-d"), lines);
     }
 
     @Test
     public void testFirstCharMatchOnly() throws IOException {
         final List<String> lines = getLines("\nThe quick brown fox jumped over the lazy dog.");
-        assertEquals(Arrays.asList("\n", "The quick brown fox jumped over the lazy dog."), lines);
+        assertLinesMatch(Arrays.asList("\n", "The quick brown fox jumped over the lazy dog."), lines);
     }
 
     @Test
-    @Ignore("Intended only for manual testing. While this can take a while to run, it can be very helpful for manual testing before and after a change to the class. However, we don't want this to " +
-        "run in automated tests because we have no way to compare from one run to another, so it will only slow down automated tests.")
+    @EnabledIfSystemProperty(named = "nifi.test.performance", matches = "true",
+            disabledReason = "Intended only for manual testing. While this can take a while to run, it can be very helpful for manual testing before " +
+                    "and after a change to the class. However, we don't want this to run in automated tests because we have no way to compare " +
+                    "from one run to another, so it will only slow down automated tests.")
     public void testPerformance() throws IOException {
         final String lines = "The\nquick\nbrown\nfox\njumped\nover\nthe\nlazy\ndog.\r\n\n";
         final byte[] bytes = lines.getBytes(StandardCharsets.UTF_8);
 
-        for (int i=0; i < 100; i++) {
+        for (int i = 0; i < 100; i++) {
             final long start = System.nanoTime();
 
             long count = 0;
@@ -119,7 +124,7 @@ public class TestLineDemarcator {
             }
 
             final long millis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-            System.out.println("Took " + millis + " millis to demarcate " + count + " lines");
+            logger.info("Took {} millis to demarcate {} lines", millis, count);
         }
     }
 

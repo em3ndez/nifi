@@ -16,6 +16,30 @@
  */
 package org.apache.nifi.remote.protocol.http;
 
+import org.apache.nifi.remote.Peer;
+import org.apache.nifi.remote.PeerDescription;
+import org.apache.nifi.remote.SiteToSiteEventReporter;
+import org.apache.nifi.remote.TransferDirection;
+import org.apache.nifi.remote.codec.FlowFileCodec;
+import org.apache.nifi.remote.codec.StandardFlowFileCodec;
+import org.apache.nifi.remote.io.http.HttpCommunicationsSession;
+import org.apache.nifi.remote.io.http.HttpInput;
+import org.apache.nifi.remote.io.http.HttpOutput;
+import org.apache.nifi.remote.protocol.CommunicationsSession;
+import org.apache.nifi.remote.protocol.DataPacket;
+import org.apache.nifi.remote.protocol.ResponseCode;
+import org.apache.nifi.remote.util.SiteToSiteRestApiClient;
+import org.apache.nifi.web.api.entity.TransactionResultEntity;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+
 import static org.apache.nifi.remote.protocol.ResponseCode.CONFIRM_TRANSACTION;
 import static org.apache.nifi.remote.protocol.SiteToSiteTestUtils.createDataPacket;
 import static org.apache.nifi.remote.protocol.SiteToSiteTestUtils.execReceiveOneFlowFile;
@@ -28,7 +52,7 @@ import static org.apache.nifi.remote.protocol.SiteToSiteTestUtils.execSendTwoFlo
 import static org.apache.nifi.remote.protocol.SiteToSiteTestUtils.execSendWithInvalidChecksum;
 import static org.apache.nifi.remote.protocol.SiteToSiteTestUtils.execSendZeroFlowFile;
 import static org.apache.nifi.remote.protocol.SiteToSiteTestUtils.readContents;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -37,56 +61,25 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import org.apache.nifi.events.EventReporter;
-import org.apache.nifi.remote.Peer;
-import org.apache.nifi.remote.PeerDescription;
-import org.apache.nifi.remote.TransferDirection;
-import org.apache.nifi.remote.codec.FlowFileCodec;
-import org.apache.nifi.remote.codec.StandardFlowFileCodec;
-import org.apache.nifi.remote.io.http.HttpCommunicationsSession;
-import org.apache.nifi.remote.io.http.HttpInput;
-import org.apache.nifi.remote.io.http.HttpOutput;
-import org.apache.nifi.remote.protocol.CommunicationsSession;
-import org.apache.nifi.remote.protocol.DataPacket;
-import org.apache.nifi.remote.protocol.ResponseCode;
-import org.apache.nifi.remote.util.SiteToSiteRestApiClient;
-import org.apache.nifi.reporting.Severity;
-import org.apache.nifi.web.api.entity.TransactionResultEntity;
-import org.junit.Test;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 public class TestHttpClientTransaction {
 
-    private Logger logger = LoggerFactory.getLogger(TestHttpClientTransaction.class);
-    private FlowFileCodec codec = new StandardFlowFileCodec();
+    private static final Logger logger = LoggerFactory.getLogger(TestHttpClientTransaction.class);
+    private final FlowFileCodec codec = new StandardFlowFileCodec();
 
     private HttpClientTransaction getClientTransaction(InputStream is, OutputStream os, SiteToSiteRestApiClient apiClient, TransferDirection direction, String transactionUrl) throws IOException {
         PeerDescription description = null;
         String peerUrl = "";
 
         HttpCommunicationsSession commsSession = new HttpCommunicationsSession();
-        ((HttpInput)commsSession.getInput()).setInputStream(is);
-        ((HttpOutput)commsSession.getOutput()).setOutputStream(os);
+        ((HttpInput) commsSession.getInput()).setInputStream(is);
+        ((HttpOutput) commsSession.getOutput()).setOutputStream(os);
 
         String clusterUrl = "";
         Peer peer = new Peer(description, commsSession, peerUrl, clusterUrl);
         String portId = "portId";
         boolean useCompression = false;
         int penaltyMillis = 1000;
-        EventReporter eventReporter = new EventReporter() {
-            @Override
-            public void reportEvent(Severity severity, String category, String message) {
-                logger.info("Reporting event... severity={}, category={}, message={}", severity, category, message);
-            }
-        };
+        SiteToSiteEventReporter eventReporter = (severity, category, message) -> logger.info("Reporting event... severity={}, category={}, message={}", severity, category, message);
         int protocolVersion = 5;
 
         HttpClientTransaction transaction = new HttpClientTransaction(protocolVersion, peer, direction, useCompression, portId, penaltyMillis, eventReporter);
@@ -108,7 +101,7 @@ public class TestHttpClientTransaction {
 
         execReceiveZeroFlowFile(transaction);
 
-        assertEquals("Client sends nothing as payload to receive flow files.", 0, clientRequest.toByteArray().length);
+        assertEquals(0, clientRequest.toByteArray().length, "Client sends nothing as payload to receive FlowFiles.");
     }
 
     @Test
@@ -129,7 +122,7 @@ public class TestHttpClientTransaction {
 
         execReceiveOneFlowFile(transaction);
 
-        assertEquals("Client sends nothing as payload to receive flow files.", 0, clientRequest.toByteArray().length);
+        assertEquals(0, clientRequest.toByteArray().length, "Client sends nothing as payload to receive FlowFiles.");
         verify(apiClient).commitReceivingFlowFiles(transactionUrl, CONFIRM_TRANSACTION, "3680976076");
     }
 
@@ -152,7 +145,7 @@ public class TestHttpClientTransaction {
 
         execReceiveTwoFlowFiles(transaction);
 
-        assertEquals("Client sends nothing as payload to receive flow files.", 0, clientRequest.toByteArray().length);
+        assertEquals(0, clientRequest.toByteArray().length, "Client sends nothing as payload to receive FlowFiles.");
         verify(apiClient).commitReceivingFlowFiles(transactionUrl, CONFIRM_TRANSACTION, "2969091230");
     }
 
@@ -176,7 +169,7 @@ public class TestHttpClientTransaction {
 
         execReceiveWithInvalidChecksum(transaction);
 
-        assertEquals("Client sends nothing as payload to receive flow files.", 0, clientRequest.toByteArray().length);
+        assertEquals(0, clientRequest.toByteArray().length, "Client sends nothing as payload to receive FlowFiles.");
         verify(apiClient).commitReceivingFlowFiles(transactionUrl, CONFIRM_TRANSACTION, "2969091230");
     }
 
@@ -194,7 +187,7 @@ public class TestHttpClientTransaction {
 
         execSendZeroFlowFile(transaction);
 
-        assertEquals("Client didn't send anything", 0, clientRequest.toByteArray().length);
+        assertEquals(0, clientRequest.toByteArray().length, "Client didn't send anything");
     }
 
     @Test
@@ -204,13 +197,10 @@ public class TestHttpClientTransaction {
         final String transactionUrl = "http://www.example.com/data-transfer/input-ports/portId/transactions/transactionId";
         doNothing().when(apiClient).openConnectionForSend(eq(transactionUrl), any(Peer.class));
         // Emulate that server returns correct checksum.
-        doAnswer(new Answer() {
-            @Override
-            public Object answer(InvocationOnMock invocation) throws Throwable {
-                HttpCommunicationsSession commSession = (HttpCommunicationsSession)invocation.getArguments()[0];
-                commSession.setChecksum("2946083981");
-                return null;
-            }
+        doAnswer(invocation -> {
+            HttpCommunicationsSession commSession = (HttpCommunicationsSession) invocation.getArguments()[0];
+            commSession.setChecksum("2946083981");
+            return null;
         }).when(apiClient).finishTransferFlowFiles(any(CommunicationsSession.class));
         TransactionResultEntity resultEntity = new TransactionResultEntity();
         resultEntity.setResponseCode(ResponseCode.TRANSACTION_FINISHED.getCode());
@@ -238,13 +228,10 @@ public class TestHttpClientTransaction {
         final String transactionUrl = "http://www.example.com/data-transfer/input-ports/portId/transactions/transactionId";
         doNothing().when(apiClient).openConnectionForSend(eq("portId"), any(Peer.class));
         // Emulate that server returns correct checksum.
-        doAnswer(new Answer() {
-            @Override
-            public Object answer(InvocationOnMock invocation) throws Throwable {
-                HttpCommunicationsSession commSession = (HttpCommunicationsSession)invocation.getArguments()[0];
-                commSession.setChecksum("3359812065");
-                return null;
-            }
+        doAnswer(invocation -> {
+            HttpCommunicationsSession commSession = (HttpCommunicationsSession) invocation.getArguments()[0];
+            commSession.setChecksum("3359812065");
+            return null;
         }).when(apiClient).finishTransferFlowFiles(any(CommunicationsSession.class));
         TransactionResultEntity resultEntity = new TransactionResultEntity();
         resultEntity.setResponseCode(ResponseCode.TRANSACTION_FINISHED.getCode());
@@ -273,21 +260,15 @@ public class TestHttpClientTransaction {
         final String transactionUrl = "http://www.example.com/data-transfer/input-ports/portId/transactions/transactionId";
         doNothing().when(apiClient).openConnectionForSend(eq(transactionUrl), any(Peer.class));
         // Emulate that server returns incorrect checksum.
-        doAnswer(new Answer() {
-            @Override
-            public Object answer(InvocationOnMock invocation) throws Throwable {
-                HttpCommunicationsSession commSession = (HttpCommunicationsSession)invocation.getArguments()[0];
-                commSession.setChecksum("Different checksum");
-                return null;
-            }
+        doAnswer(invocation -> {
+            HttpCommunicationsSession commSession = (HttpCommunicationsSession) invocation.getArguments()[0];
+            commSession.setChecksum("Different checksum");
+            return null;
         }).when(apiClient).finishTransferFlowFiles(any(CommunicationsSession.class));
-        doAnswer(new Answer() {
-            @Override
-            public Object answer(InvocationOnMock invocation) throws Throwable {
-                TransactionResultEntity serverResult = new TransactionResultEntity();
-                serverResult.setResponseCode(ResponseCode.CANCEL_TRANSACTION.getCode());
-                return serverResult;
-            }
+        doAnswer(invocation -> {
+            TransactionResultEntity serverResult = new TransactionResultEntity();
+            serverResult.setResponseCode(ResponseCode.CANCEL_TRANSACTION.getCode());
+            return serverResult;
         }).when(apiClient).commitTransferFlowFiles(eq(transactionUrl), eq(ResponseCode.BAD_CHECKSUM));
 
         ByteArrayOutputStream serverResponseBos = new ByteArrayOutputStream();
@@ -314,13 +295,10 @@ public class TestHttpClientTransaction {
         final String transactionUrl = "http://www.example.com/data-transfer/input-ports/portId/transactions/transactionId";
         doNothing().when(apiClient).openConnectionForSend(eq("portId"), any(Peer.class));
         // Emulate that server returns correct checksum.
-        doAnswer(new Answer() {
-            @Override
-            public Object answer(InvocationOnMock invocation) throws Throwable {
-                HttpCommunicationsSession commSession = (HttpCommunicationsSession)invocation.getArguments()[0];
-                commSession.setChecksum("3359812065");
-                return null;
-            }
+        doAnswer(invocation -> {
+            HttpCommunicationsSession commSession = (HttpCommunicationsSession) invocation.getArguments()[0];
+            commSession.setChecksum("3359812065");
+            return null;
         }).when(apiClient).finishTransferFlowFiles(any(CommunicationsSession.class));
         TransactionResultEntity resultEntity = new TransactionResultEntity();
         resultEntity.setResponseCode(ResponseCode.TRANSACTION_FINISHED_BUT_DESTINATION_FULL.getCode());

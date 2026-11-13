@@ -18,11 +18,13 @@
 package org.apache.nifi.tests.system.repositories;
 
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.entity.ConnectionEntity;
+import org.apache.nifi.web.api.entity.FlowFileEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
@@ -30,7 +32,8 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * This test is intended to verify that Processors are able to access the content that their FlowFiles represent in several different situations.
@@ -39,6 +42,40 @@ import static org.junit.Assert.assertTrue;
  * same Content Claim) as well as writing to multiple FlowFiles in multiple sessions (which may result in writing to multiple Content Claims).
  */
 public class ContentAccessIT extends NiFiSystemIT {
+
+    @Test
+    public void testWriteZeroBytesToFlowFileThenWriteBytes() throws NiFiClientException, IOException, InterruptedException {
+        final ProcessorEntity ingestFile = getClientUtil().createProcessor("IngestFile");
+        final ProcessorEntity unzipFile = getClientUtil().createProcessor("UnzipFlowFile");
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+
+        getClientUtil().createConnection(ingestFile, unzipFile, "success");
+        final ConnectionEntity unzipped = getClientUtil().createConnection(unzipFile, terminate, "unzipped");
+
+        getClientUtil().setAutoTerminatedRelationships(unzipFile, "failure");
+
+        final Map<String, String> ingestProperties = new HashMap<>();
+        ingestProperties.put("Filename", new File("src/test/resources/empty-and-small-text-files.zip").getAbsolutePath());
+        ingestProperties.put("Delete File", "false");
+        getClientUtil().updateProcessorProperties(ingestFile, ingestProperties);
+        getClientUtil().updateProcessorSchedulingPeriod(ingestFile, "10 mins");
+        getClientUtil().waitForValidProcessor(ingestFile.getId());
+
+        getClientUtil().startProcessor(ingestFile);
+        getClientUtil().startProcessor(unzipFile);
+
+        waitForQueueCount(unzipped.getId(), 2);
+
+        final FlowFileEntity flowFileEntity1 = getClientUtil().getQueueFlowFile(unzipped.getId(), 0);
+        assertEquals("a.txt", flowFileEntity1.getFlowFile().getAttributes().get("filename"));
+        assertEquals(0, flowFileEntity1.getFlowFile().getSize());
+
+        final FlowFileEntity flowFileEntity2 = getClientUtil().getQueueFlowFile(unzipped.getId(), 1);
+        assertEquals("b.txt", flowFileEntity2.getFlowFile().getAttributes().get("filename"));
+
+        final String content2 = getClientUtil().getFlowFileContentAsUtf8(unzipped.getId(), 1);
+        assertEquals("Hello there! b.txt", content2);
+    }
 
     @Test
     public void testCorrectContentReadWhenMultipleFlowFilesInClaimWithBatchAndWrite() throws NiFiClientException, IOException, InterruptedException {
@@ -68,7 +105,7 @@ public class ContentAccessIT extends NiFiSystemIT {
         final ProcessorEntity terminateAa = getClientUtil().createProcessor("TerminateFlowFile");
         final ProcessorEntity terminateBa = getClientUtil().createProcessor("TerminateFlowFile");
         final ProcessorEntity terminateCa = getClientUtil().createProcessor("TerminateFlowFile");
-        final ProcessorEntity terminateUnmatched = getClientUtil().createProcessor("TerminateFlowFile");
+        getClientUtil().createProcessor("TerminateFlowFile");
 
         // Configure Generate
         getClientUtil().updateProcessorSchedulingPeriod(generate, "10 mins");
@@ -97,11 +134,11 @@ public class ContentAccessIT extends NiFiSystemIT {
         final ConnectionEntity verifyToTerminateUnmatched = getClientUtil().createConnection(verify, terminateAa, "unmatched");
 
         // Run Generate processor, wait for its output
-        getNifiClient().getProcessorClient().startProcessor(generate);
+        getClientUtil().startProcessor(generate);
         waitForQueueCount(generateToSplit.getId(), 1);
 
         // Run split processor, wait for its output
-        getNifiClient().getProcessorClient().startProcessor(split);
+        getClientUtil().startProcessor(split);
         waitForQueueCount(splitToReverse.getId(), 3);
 
         // Verify output of the Split processor
@@ -122,7 +159,7 @@ public class ContentAccessIT extends NiFiSystemIT {
         assertTrue(splitContents.contains("{ a : c }"));
 
         // Start the reverse processor, wait for its output
-        getNifiClient().getProcessorClient().startProcessor(reverse);
+        getClientUtil().startProcessor(reverse);
         waitForQueueCount(reverseToVerify.getId(), 3);
 
         final String firstReversedContents = getClientUtil().getFlowFileContentAsUtf8(reverseToVerify.getId(), 0);
@@ -140,7 +177,7 @@ public class ContentAccessIT extends NiFiSystemIT {
 
         // Start verify processor. This is different than verify the contents above because doing so above is handled by making a REST call, which does not make use
         // of the ProcessSession. Using the VerifyContents processor ensures that the Processors see the same contents.
-        getNifiClient().getProcessorClient().startProcessor(verify);
+        getClientUtil().startProcessor(verify);
 
         waitForQueueCount(verifyToTerminateAa.getId(), 1);
         waitForQueueCount(verifyToTerminateBa.getId(), 1);

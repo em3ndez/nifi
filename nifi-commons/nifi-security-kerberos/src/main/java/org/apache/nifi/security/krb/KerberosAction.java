@@ -16,13 +16,12 @@
  */
 package org.apache.nifi.security.krb;
 
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.exception.ProcessException;
 
-import javax.security.auth.login.LoginException;
 import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
+import java.util.Objects;
 
 /**
  * Helper class for processors to perform an action as a KerberosUser.
@@ -32,16 +31,22 @@ public class KerberosAction<T> {
     private final KerberosUser kerberosUser;
     private final PrivilegedExceptionAction<T> action;
     private final ComponentLog logger;
+    private final ClassLoader contextClassLoader;
 
     public KerberosAction(final KerberosUser kerberosUser,
                           final PrivilegedExceptionAction<T> action,
                           final ComponentLog logger) {
-        this.kerberosUser = kerberosUser;
-        this.action = action;
-        this.logger = logger;
-        Validate.notNull(this.kerberosUser);
-        Validate.notNull(this.action);
-        Validate.notNull(this.logger);
+        this(kerberosUser, action, logger, null);
+    }
+
+    public KerberosAction(final KerberosUser kerberosUser,
+                          final PrivilegedExceptionAction<T> action,
+                          final ComponentLog logger,
+                          final ClassLoader contextClassLoader) {
+        this.kerberosUser = Objects.requireNonNull(kerberosUser);
+        this.action = Objects.requireNonNull(action);
+        this.logger = Objects.requireNonNull(logger);
+        this.contextClassLoader = contextClassLoader;
     }
 
     public T execute() {
@@ -50,8 +55,8 @@ public class KerberosAction<T> {
         if (!kerberosUser.isLoggedIn()) {
             try {
                 kerberosUser.login();
-                logger.info("Successful login for {}", new Object[]{kerberosUser.getPrincipal()});
-            } catch (LoginException e) {
+                logger.info("Successful login for {}", kerberosUser.getPrincipal());
+            } catch (final KerberosLoginException e) {
                 throw new ProcessException("Login failed due to: " + e.getMessage(), e);
             }
         }
@@ -59,14 +64,18 @@ public class KerberosAction<T> {
         // check if we need to re-login, will only happen if re-login window is reached (80% of TGT life)
         try {
             kerberosUser.checkTGTAndRelogin();
-        } catch (LoginException e) {
+        } catch (final KerberosLoginException e) {
             throw new ProcessException("Relogin check failed due to: " + e.getMessage(), e);
         }
 
         // attempt to execute the action, if an exception is caught attempt to logout/login and retry
         try {
-            result = kerberosUser.doAs(action);
-        } catch (SecurityException se) {
+            if (contextClassLoader == null) {
+                result = kerberosUser.doAs(action);
+            } else {
+                result = kerberosUser.doAs(action, contextClassLoader);
+            }
+        } catch (final SecurityException se) {
             logger.info("Privileged action failed, attempting relogin and retrying...");
             logger.debug("", se);
 
@@ -77,7 +86,7 @@ public class KerberosAction<T> {
             } catch (Exception e) {
                 throw new ProcessException("Retrying privileged action failed due to: " + e.getMessage(), e);
             }
-        } catch (PrivilegedActionException pae) {
+        } catch (final PrivilegedActionException pae) {
             final Exception cause = pae.getException();
             throw new ProcessException("Privileged action failed due to: " + cause.getMessage(), cause);
         }

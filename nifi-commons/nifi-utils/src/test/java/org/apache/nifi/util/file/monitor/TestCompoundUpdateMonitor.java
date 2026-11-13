@@ -16,18 +16,19 @@
  */
 package org.apache.nifi.util.file.monitor;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.UUID;
 
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestCompoundUpdateMonitor {
 
@@ -37,7 +38,7 @@ public class TestCompoundUpdateMonitor {
         final DigestUpdateMonitor updateMonitor = new DigestUpdateMonitor();
         final CompoundUpdateMonitor compound = new CompoundUpdateMonitor(lastModified, updateMonitor);
 
-        final File file = new File("target/" + UUID.randomUUID().toString());
+        final File file = new File("target/" + UUID.randomUUID());
         if (file.exists()) {
             assertTrue(file.delete());
         }
@@ -58,7 +59,7 @@ public class TestCompoundUpdateMonitor {
 
         final long lastModifiedDate = file.lastModified();
         try (final OutputStream out = new FileOutputStream(file)) {
-            out.write("Hello".getBytes("UTF-8"));
+            out.write("Hello".getBytes(StandardCharsets.UTF_8));
         }
 
         file.setLastModified(lastModifiedDate);

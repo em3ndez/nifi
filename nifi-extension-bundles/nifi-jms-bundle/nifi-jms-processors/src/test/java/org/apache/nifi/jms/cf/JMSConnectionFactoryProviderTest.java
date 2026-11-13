@@ -1,0 +1,828 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.jms.cf;
+
+import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.reporting.InitializationException;
+import org.apache.nifi.ssl.SSLContextService;
+import org.apache.nifi.util.MockComponentLog;
+import org.apache.nifi.util.MockConfigurationContext;
+import org.apache.nifi.util.NoOpProcessor;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.net.URISyntaxException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Map;
+import javax.net.ssl.SSLContext;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * Tests for {@link JMSConnectionFactoryProvider}
+ */
+public class JMSConnectionFactoryProviderTest {
+
+    private static final String HOSTNAME = "myhost";
+    private static final String PORT = "1234";
+
+    private static final String SINGLE_TEST_BROKER = HOSTNAME + ":" + PORT;
+    private static final String SINGLE_TEST_BROKER_WITH_SCHEME = "tcp://myhost:1234";
+    private static final String SINGLE_TEST_BROKER_WITH_SCHEME_AND_IP = "tcp://0.0.0.0:616161";
+    private static final String MULTIPLE_TEST_BROKERS = "myhost01:1234,myhost02:1234";
+    private static final String SINGLE_ACTIVEMQ_BROKER = "tcp://myhost:61616";
+    private static final String MULTIPLE_ACTIVEMQ_BROKERS = "failover:(tcp://myhost01:61616,tcp://myhost02:61616)?randomize=false";
+    private static final String SINGLE_TIBCO_BROKER = "tcp://myhost:7222";
+    private static final String MULTIPLE_TIBCO_BROKERS = "tcp://myhost01:7222,tcp://myhost02:7222";
+    private static final String SINGLE_IBM_MQ_BROKER = "myhost(1414)";
+    private static final String MULTIPLE_IBM_MQ_BROKERS = "myhost01(1414),myhost02(1414)";
+    private static final String MULTIPLE_IBM_MQ_MIXED_BROKERS = "myhost01:1414,myhost02(1414)";
+    private static final String MULTIPLE_IBM_MQ_COLON_PAIR_BROKERS = "myhost01:1414,myhost02:1414";
+    private static final String SINGLE_QPID_JMS_BROKER = "amqp://myhost:5672";
+
+    private static final String TEST_CONNECTION_FACTORY_IMPL = "org.apache.nifi.jms.testcflib.TestConnectionFactory";
+    private static final String ACTIVEMQ_CONNECTION_FACTORY_IMPL = "org.apache.activemq.ActiveMQConnectionFactory";
+    private static final String ARTEMIS_CONNECTION_FACTORY_IMPL = "org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory";
+    private static final String SINGLE_ARTEMIS_BROKER = "tcp://myhost:61616";
+    private static final String TIBCO_CONNECTION_FACTORY_IMPL = "com.tibco.tibjms.TibjmsConnectionFactory";
+    private static final String IBM_MQ_CONNECTION_FACTORY_IMPL = "com.ibm.mq.jms.MQConnectionFactory";
+    private static final String QPID_JMS_CONNECTION_FACTORY_IMPL = "org.apache.qpid.jms.JmsConnectionFactory";
+
+    private static final String CF_PROVIDER_SERVICE_ID = "cfProvider";
+    private static final String SSL_CONTEXT_SERVICE_ID = "sslContextService";
+
+    private static final String DUMMY_JAR_1 = "dummy-lib.jar";
+    private static final String DUMMY_JAR_2 = "dummy-lib-2.jar";
+    private static final String DUMMY_CONF = "dummy.conf";
+
+    private String dummyResource;
+    private String allDummyResources;
+    private TestRunner runner;
+
+    @BeforeEach
+    public void prepareTest() throws URISyntaxException {
+        dummyResource = this.getClass().getResource("/" + DUMMY_JAR_1).toURI().toString();
+        allDummyResources = this.getClass().getResource("/" + DUMMY_JAR_1).toURI() + "," +
+                this.getClass().getResource("/" + DUMMY_JAR_2).toURI() + "," +
+                this.getClass().getResource("/" + DUMMY_CONF).toURI() + ",";
+
+        runner = TestRunners.newTestRunner(NoOpProcessor.class);
+    }
+
+    @Test
+    public void validateNotValidForNonExistingLibPath() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, "foo");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.assertNotValid(cfProvider);
+    }
+
+    @Test
+    public void validateELExpression() throws InitializationException {
+        runner.setValidateExpressionUsage(true);
+
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setEnvironmentVariableValue("broker.uri", SINGLE_TEST_BROKER_WITH_SCHEME_AND_IP);
+        runner.setEnvironmentVariableValue("client.lib", dummyResource);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, "${broker.uri}");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, "${client.lib}");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void testClientLibResourcesLoaded() throws InitializationException {
+        runner.setValidateExpressionUsage(true);
+
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setEnvironmentVariableValue("broker.uri", SINGLE_TEST_BROKER_WITH_SCHEME_AND_IP);
+        runner.setEnvironmentVariableValue("client.lib", allDummyResources);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, "${broker.uri}");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, "${client.lib}");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+
+        ClassLoader loader = runner.getClass().getClassLoader();
+        assertNotNull(loader.getResource(DUMMY_CONF));
+        assertNotNull(loader.getResource(DUMMY_JAR_1));
+        assertNotNull(loader.getResource(DUMMY_JAR_2));
+    }
+
+    @Test
+    public void validateGetConnectionFactoryFailureIfServiceNotConfigured() {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider() {
+            @Override
+            protected ComponentLog getLogger() {
+                return new MockComponentLog("cfProvider", this);
+            }
+        };
+        cfProvider.onEnabled(new MockConfigurationContext(Collections.emptyMap(), null, null));
+        assertThrows(IllegalStateException.class, cfProvider::getConnectionFactory);
+    }
+
+    @Test
+    public void validWithSingleTestBroker() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithSingleTestBrokerWithScheme() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER_WITH_SCHEME);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithMultipleTestBrokers() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_TEST_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithSingleActiveMqBroker() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ACTIVEMQ_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ACTIVEMQ_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithMultipleActiveMqBrokers() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_ACTIVEMQ_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ACTIVEMQ_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithSingleTibcoBroker() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TIBCO_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TIBCO_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithMultipleTibcoBrokers() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_TIBCO_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TIBCO_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithSingleIbmMqBroker() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_IBM_MQ_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithMultipleIbmMqBrokers() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_IBM_MQ_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithMultipleIbmMqMixedBrokers() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_IBM_MQ_MIXED_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithMultipleIbmMqColorPairBrokers() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_IBM_MQ_COLON_PAIR_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWithSingleQpidJmsBroker() throws InitializationException {
+        JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_QPID_JMS_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, QPID_JMS_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void propertiesSetOnSingleTestBrokerConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("hostName", HOSTNAME, "port", PORT), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleTestBrokerWithSchemaConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER_WITH_SCHEME);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of(), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnMultipleTestBrokersConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_TEST_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("hostName", "myhost01", "port", "1234"), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleActiveMqBrokerConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ACTIVEMQ_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ACTIVEMQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("brokerURL", SINGLE_ACTIVEMQ_BROKER), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnMultipleActiveMqBrokersConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_ACTIVEMQ_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ACTIVEMQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("brokerURL", MULTIPLE_ACTIVEMQ_BROKERS), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleActiveMqBrokerWithSslConnectionFactory() throws Exception {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ACTIVEMQ_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ACTIVEMQ_CONNECTION_FACTORY_IMPL);
+
+        String trustStoreFile = "/path/to/truststore";
+        String trustStorePassword = "truststore_password";
+        String trustStoreType = "JKS";
+        String keyStoreFile = "/path/to/keystore";
+        String keyStorePassword = "keystore_password";
+        String keyPassword = "key_password";
+        String keyStoreType = "PKCS12";
+
+        SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.isTrustStoreConfigured()).thenReturn(true);
+        when(sslContextService.getTrustStoreFile()).thenReturn(trustStoreFile);
+        when(sslContextService.getTrustStorePassword()).thenReturn(trustStorePassword);
+        when(sslContextService.getTrustStoreType()).thenReturn(trustStoreType);
+        when(sslContextService.isKeyStoreConfigured()).thenReturn(true);
+        when(sslContextService.getKeyStoreFile()).thenReturn(keyStoreFile);
+        when(sslContextService.getKeyStorePassword()).thenReturn(keyStorePassword);
+        when(sslContextService.getKeyPassword()).thenReturn(keyPassword);
+        when(sslContextService.getKeyStoreType()).thenReturn(keyStoreType);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of(
+                        "brokerURL", SINGLE_ACTIVEMQ_BROKER,
+                        "trustStore", trustStoreFile,
+                        "trustStorePassword", trustStorePassword,
+                        "trustStoreType", trustStoreType,
+                        "keyStore", keyStoreFile,
+                        "keyStorePassword", keyStorePassword,
+                        "keyStoreKeyPassword", keyPassword,
+                        "keyStoreType", keyStoreType
+                        ),
+                cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnArtemisWithSslConnectionFactory() throws Exception {
+        final JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ARTEMIS_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final String trustStoreFile = "/path/to/truststore";
+        final String trustStorePassword = "truststore_password";
+        final String trustStoreType = "JKS";
+        final String keyStoreFile = "/path/to/keystore";
+        final String keyStorePassword = "keystore_password";
+        final String keyStoreType = "PKCS12";
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.createContext()).thenReturn(SSLContext.getDefault());
+        when(sslContextService.isTrustStoreConfigured()).thenReturn(true);
+        when(sslContextService.getTrustStoreFile()).thenReturn(trustStoreFile);
+        when(sslContextService.getTrustStorePassword()).thenReturn(trustStorePassword);
+        when(sslContextService.getTrustStoreType()).thenReturn(trustStoreType);
+        when(sslContextService.isKeyStoreConfigured()).thenReturn(true);
+        when(sslContextService.getKeyStoreFile()).thenReturn(keyStoreFile);
+        when(sslContextService.getKeyStorePassword()).thenReturn(keyStorePassword);
+        when(sslContextService.getKeyStoreType()).thenReturn(keyStoreType);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        final Map<String, Object> props = cfProvider.getConfiguredProperties();
+
+        final String expectedUrl = SINGLE_ARTEMIS_BROKER
+                + "?sslEnabled=true"
+                + "&trustStorePath=" + URLEncoder.encode(trustStoreFile, StandardCharsets.UTF_8)
+                + "&trustStorePassword=" + URLEncoder.encode(trustStorePassword, StandardCharsets.UTF_8)
+                + "&trustStoreType=" + URLEncoder.encode(trustStoreType, StandardCharsets.UTF_8)
+                + "&keyStorePath=" + URLEncoder.encode(keyStoreFile, StandardCharsets.UTF_8)
+                + "&keyStorePassword=" + URLEncoder.encode(keyStorePassword, StandardCharsets.UTF_8)
+                + "&keyStoreType=" + URLEncoder.encode(keyStoreType, StandardCharsets.UTF_8);
+
+        assertEquals(expectedUrl, props.get("brokerURL"));
+    }
+
+    @Test
+    public void propertiesSetOnArtemisWithSslPreservesExistingSslEnabled() throws Exception {
+        final JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        final String brokerWithSsl = SINGLE_ARTEMIS_BROKER + "?sslEnabled=true";
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, brokerWithSsl);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final String trustStoreFile = "/path/to/truststore";
+        final String trustStorePassword = "truststore_password";
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.createContext()).thenReturn(SSLContext.getDefault());
+        when(sslContextService.isTrustStoreConfigured()).thenReturn(true);
+        when(sslContextService.getTrustStoreFile()).thenReturn(trustStoreFile);
+        when(sslContextService.getTrustStorePassword()).thenReturn(trustStorePassword);
+        when(sslContextService.getTrustStoreType()).thenReturn(null);
+        when(sslContextService.isKeyStoreConfigured()).thenReturn(false);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        final Map<String, Object> props = cfProvider.getConfiguredProperties();
+        final String brokerURL = (String) props.get("brokerURL");
+
+        assertNotNull(brokerURL);
+        assertEquals(1, brokerURL.chars().filter(ch -> ch == '?').count(),
+                "Should not duplicate ? separator when sslEnabled already in URL");
+        assertEquals(brokerWithSsl
+                        + "&trustStorePath=" + URLEncoder.encode(trustStoreFile, StandardCharsets.UTF_8)
+                        + "&trustStorePassword=" + URLEncoder.encode(trustStorePassword, StandardCharsets.UTF_8),
+                brokerURL);
+    }
+
+    @Test
+    public void propertiesSetOnSingleTibcoBrokerConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TIBCO_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TIBCO_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("serverUrl", SINGLE_TIBCO_BROKER), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnMultipleTibcoBrokersConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_TIBCO_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TIBCO_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("serverUrl", MULTIPLE_TIBCO_BROKERS), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleIbmMqBrokerConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_IBM_MQ_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("connectionNameList", SINGLE_IBM_MQ_BROKER), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnMultipleIbmMqBrokersConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_IBM_MQ_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("connectionNameList", MULTIPLE_IBM_MQ_BROKERS), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnMultipleIbmMqMixedBrokersConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_IBM_MQ_MIXED_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("connectionNameList", MULTIPLE_IBM_MQ_BROKERS), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnMultipleIbmMqColonPairBrokersConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, MULTIPLE_IBM_MQ_COLON_PAIR_BROKERS);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("connectionNameList", MULTIPLE_IBM_MQ_BROKERS), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleIbmMqColonSeparatedPairBrokerConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, IBM_MQ_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("connectionNameList", HOSTNAME + "(" + PORT + ")"), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void dynamicPropertiesSetOnSingleTestBrokerConnectionFactory() throws InitializationException {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setEnvironmentVariableValue("test", "dynamicValue");
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_TEST_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, TEST_CONNECTION_FACTORY_IMPL);
+        runner.setProperty(cfProvider, "dynamicProperty", "${test}");
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("dynamicProperty", "dynamicValue", "hostName", HOSTNAME, "port", PORT), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleQpidJmsConnectionFactory() throws Exception {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_QPID_JMS_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, QPID_JMS_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("remoteURI", SINGLE_QPID_JMS_BROKER), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnSingleQpidJmsWithSslConnectionFactory() throws Exception {
+        JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_QPID_JMS_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, QPID_JMS_CONNECTION_FACTORY_IMPL);
+
+        SSLContext sslContext = SSLContext.getDefault();
+        SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.createContext()).thenReturn(sslContext);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("remoteURI", SINGLE_QPID_JMS_BROKER, "sslContext", sslContext), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void propertiesSetOnArtemisWithSslAndSpecialCharacters() throws Exception {
+        final JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ARTEMIS_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final String trustStoreFile = "/path/to/my trust store";
+        final String trustStorePassword = "p&ss=w?rd#1";
+        final String trustStoreType = "JKS";
+        final String keyStoreFile = "/path/to/keystore";
+        final String keyStorePassword = "key&store=pass";
+        final String keyStoreType = "PKCS12";
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.createContext()).thenReturn(SSLContext.getDefault());
+        when(sslContextService.isTrustStoreConfigured()).thenReturn(true);
+        when(sslContextService.getTrustStoreFile()).thenReturn(trustStoreFile);
+        when(sslContextService.getTrustStorePassword()).thenReturn(trustStorePassword);
+        when(sslContextService.getTrustStoreType()).thenReturn(trustStoreType);
+        when(sslContextService.isKeyStoreConfigured()).thenReturn(true);
+        when(sslContextService.getKeyStoreFile()).thenReturn(keyStoreFile);
+        when(sslContextService.getKeyStorePassword()).thenReturn(keyStorePassword);
+        when(sslContextService.getKeyStoreType()).thenReturn(keyStoreType);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        final Map<String, Object> props = cfProvider.getConfiguredProperties();
+        final String brokerURL = (String) props.get("brokerURL");
+
+        final String expectedUrl = SINGLE_ARTEMIS_BROKER
+                + "?sslEnabled=true"
+                + "&trustStorePath=" + URLEncoder.encode(trustStoreFile, StandardCharsets.UTF_8)
+                + "&trustStorePassword=" + URLEncoder.encode(trustStorePassword, StandardCharsets.UTF_8)
+                + "&trustStoreType=" + URLEncoder.encode(trustStoreType, StandardCharsets.UTF_8)
+                + "&keyStorePath=" + URLEncoder.encode(keyStoreFile, StandardCharsets.UTF_8)
+                + "&keyStorePassword=" + URLEncoder.encode(keyStorePassword, StandardCharsets.UTF_8)
+                + "&keyStoreType=" + URLEncoder.encode(keyStoreType, StandardCharsets.UTF_8);
+
+        assertEquals(expectedUrl, brokerURL);
+    }
+
+    @Test
+    public void propertiesSetOnArtemisWithSslAndNoBrokerUri() throws Exception {
+        final JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.createContext()).thenReturn(SSLContext.getDefault());
+        when(sslContextService.isTrustStoreConfigured()).thenReturn(true);
+        when(sslContextService.getTrustStoreFile()).thenReturn("/path/to/truststore");
+        when(sslContextService.getTrustStorePassword()).thenReturn("password");
+        when(sslContextService.isKeyStoreConfigured()).thenReturn(false);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        final Map<String, Object> props = cfProvider.getConfiguredProperties();
+        assertNotNull(props);
+        assertEquals(Map.of(), props);
+    }
+
+    @Test
+    public void propertiesSetOnSingleArtemisBrokerConnectionFactory() throws InitializationException {
+        final JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ARTEMIS_BROKER);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        runner.enableControllerService(cfProvider);
+
+        assertEquals(Map.of("brokerURL", SINGLE_ARTEMIS_BROKER), cfProvider.getConfiguredProperties());
+    }
+
+    @Test
+    public void invalidWhenArtemisWithSslAndSslEnabledFalse() throws InitializationException {
+        final JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ARTEMIS_BROKER + "?sslEnabled=false");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.assertNotValid(cfProvider);
+    }
+
+    @Test
+    public void validWhenArtemisWithSslAndSslEnabledTrue() throws InitializationException {
+        final JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ARTEMIS_BROKER + "?sslEnabled=true");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void validWhenArtemisWithSslEnabledFalseAndNoSsl() throws InitializationException {
+        final JMSConnectionFactoryProvider cfProvider = new JMSConnectionFactoryProvider();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, SINGLE_ARTEMIS_BROKER + "?sslEnabled=false");
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        runner.assertValid(cfProvider);
+    }
+
+    @Test
+    public void propertiesSetOnArtemisWithSslAndExistingQueryParams() throws Exception {
+        final JMSConnectionFactoryProviderForTest cfProvider = new JMSConnectionFactoryProviderForTest();
+        runner.addControllerService(CF_PROVIDER_SERVICE_ID, cfProvider);
+
+        final String brokerWithParams = SINGLE_ARTEMIS_BROKER + "?clientID=foo";
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_BROKER_URI, brokerWithParams);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CLIENT_LIBRARIES, dummyResource);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_CONNECTION_FACTORY_IMPL, ARTEMIS_CONNECTION_FACTORY_IMPL);
+
+        final String trustStoreFile = "/path/to/truststore";
+        final String trustStorePassword = "password";
+
+        final SSLContextService sslContextService = mock(SSLContextService.class);
+        when(sslContextService.getIdentifier()).thenReturn(SSL_CONTEXT_SERVICE_ID);
+        when(sslContextService.createContext()).thenReturn(SSLContext.getDefault());
+        when(sslContextService.isTrustStoreConfigured()).thenReturn(true);
+        when(sslContextService.getTrustStoreFile()).thenReturn(trustStoreFile);
+        when(sslContextService.getTrustStorePassword()).thenReturn(trustStorePassword);
+        when(sslContextService.getTrustStoreType()).thenReturn(null);
+        when(sslContextService.isKeyStoreConfigured()).thenReturn(false);
+
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
+        runner.setProperty(cfProvider, JMSConnectionFactoryProperties.JMS_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID);
+
+        runner.enableControllerService(cfProvider);
+
+        final Map<String, Object> props = cfProvider.getConfiguredProperties();
+        final String brokerURL = (String) props.get("brokerURL");
+
+        final String expectedUrl = brokerWithParams
+                + "&sslEnabled=true"
+                + "&trustStorePath=" + URLEncoder.encode(trustStoreFile, StandardCharsets.UTF_8)
+                + "&trustStorePassword=" + URLEncoder.encode(trustStorePassword, StandardCharsets.UTF_8);
+
+        assertEquals(expectedUrl, brokerURL);
+    }
+}

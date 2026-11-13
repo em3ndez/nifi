@@ -16,8 +16,11 @@
  */
 package org.apache.nifi.controller.queue;
 
+import org.apache.nifi.components.connector.DropFlowFileSummary;
 import org.apache.nifi.controller.repository.FlowFileRecord;
 import org.apache.nifi.controller.repository.SwapSummary;
+import org.apache.nifi.controller.status.FlowFileAvailability;
+import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.FlowFilePrioritizer;
 import org.apache.nifi.processor.FlowFileFilter;
 
@@ -26,6 +29,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 public interface FlowFileQueue {
 
@@ -70,13 +74,13 @@ public interface FlowFileQueue {
     /**
      * Establishes this queue's preferred maximum work load.
      *
-     * @param maxQueueSize the maximum number of flow files this processor
+     * @param maxQueueSize the maximum number of FlowFiles this processor
      *            recommends having in its work queue at any one time
      */
     void setBackPressureObjectThreshold(long maxQueueSize);
 
     /**
-     * @return maximum number of flow files that should be queued up at any one
+     * @return maximum number of FlowFiles that should be queued up at any one
      *         time
      */
     long getBackPressureObjectThreshold();
@@ -94,9 +98,39 @@ public interface FlowFileQueue {
     QueueSize size();
 
     /**
+     * Returns an atomic, point-in-time view of this queue's total {@link QueueSize} and the
+     * FlowFiles currently held in this node's active in-memory queue. Implementations freeze every
+     * partition that contributes to the {@link QueueSize} for the duration of the call, so the
+     * active list and the {@link QueueSize} are mutually consistent. When
+     * {@code snapshot.activeFlowFiles().size()} equals {@code snapshot.queueSize().getObjectCount()},
+     * the active list is exhaustive. Any difference is accounted for by FlowFiles that are swapped to
+     * disk, assigned to remote partitions (destined for other cluster nodes), or in the rebalancing
+     * partition (being redistributed).
+     *
+     * @return a non-null snapshot of the queue's size and active in-memory FlowFiles
+     */
+    FlowFileQueueSnapshot getQueueSnapshot();
+
+    /**
+     * @param fromTimestamp The timestamp in milliseconds from which to calculate durations. This will typically be the current timestamp.
+     * @return the sum in milliseconds of how long all FlowFiles within this queue have currently been in this queue.
+     */
+    long getTotalQueuedDuration(long fromTimestamp);
+
+    /**
+     * @return The minimum lastQueueDate in milliseconds of all FlowFiles currently enqueued. If no FlowFile is enqueued, this returns 0.
+     */
+    long getMinLastQueueDate();
+
+    /**
      * @return true if no items queue; false otherwise
      */
     boolean isEmpty();
+
+    /**
+     * @return the FlowFile Availability for this queue
+     */
+    FlowFileAvailability getFlowFileAvailability();
 
     /**
      * @return <code>true</code> if the queue is empty or contains only FlowFiles that already are being processed
@@ -128,6 +162,16 @@ public interface FlowFileQueue {
     void put(FlowFileRecord file);
 
     /**
+     * Places the given FlowFile onto the active portion of the queue, never onto the swap queue, even if the queue is
+     * currently swapping FlowFiles out. This is intended for FlowFiles that were previously polled from this queue and are
+     * being returned to it, such as on session rollback. Because such a FlowFile was polled from the active queue, it was
+     * ahead of any FlowFiles that are swapped out, and placing it back onto the active queue preserves that ordering.
+     *
+     * @param file the FlowFile to place onto the active queue
+     */
+    void putToActive(FlowFileRecord file);
+
+    /**
      * places the given files into the queue
      *
      * @param files to place into queue
@@ -136,23 +180,31 @@ public interface FlowFileQueue {
 
     /**
      * @param expiredRecords expired records
+     * @param pollStrategy strategy of polling
      * @return the next flow file on the queue; null if empty
      */
+    FlowFileRecord poll(Set<FlowFileRecord> expiredRecords, final PollStrategy pollStrategy);
+
     FlowFileRecord poll(Set<FlowFileRecord> expiredRecords);
 
     /**
      * @param maxResults limits how many results can be polled
      * @param expiredRecords for expired records
-     * @return the next flow files on the queue up to the max results; null if
+     * @param pollStrategy strategy of polling
+     * @return the next FlowFiles on the queue up to the max results; null if
      *         empty
      */
+    List<FlowFileRecord> poll(int maxResults, Set<FlowFileRecord> expiredRecords, final PollStrategy pollStrategy);
+
     List<FlowFileRecord> poll(int maxResults, Set<FlowFileRecord> expiredRecords);
+
+    List<FlowFileRecord> poll(FlowFileFilter filter, Set<FlowFileRecord> expiredRecords, final PollStrategy pollStrategy);
 
     List<FlowFileRecord> poll(FlowFileFilter filter, Set<FlowFileRecord> expiredRecords);
 
     String getFlowFileExpiration();
 
-    int getFlowFileExpiration(TimeUnit timeUnit);
+    long getFlowFileExpiration(TimeUnit timeUnit);
 
     void setFlowFileExpiration(String flowExpirationPeriod);
 
@@ -184,13 +236,25 @@ public interface FlowFileQueue {
     /**
      * Cancels the request to drop FlowFiles that has the given identifier. After this method is called, the request
      * will no longer be known by this queue, so subsequent calls to {@link #getDropFlowFileStatus(String)} or
-     * {@link #cancelDropFlowFileRequest(String)} will return <code>null</code>
+     * cancelDropFlowFileRequest(String) will return <code>null</code>
      *
      * @param requestIdentifier the identifier of the Drop FlowFile Request
      * @return the status for the request with the given identifier after it has been canceled, or <code>null</code> if no
      *         request status exists with that identifier
      */
     DropFlowFileStatus cancelDropFlowFileRequest(String requestIdentifier);
+
+    /**
+     * Synchronously drops all FlowFiles in this queue that match the given predicate. This method filters
+     * FlowFiles in the active queue, swap queue, and any swapped-out swap files. The FlowFile Repository
+     * and Provenance Repository are updated atomically after all matching FlowFiles have been identified.
+     *
+     * @param predicate the predicate used to determine which FlowFiles should be dropped; FlowFiles for which
+     *                  the predicate returns <code>true</code> will be dropped
+     * @return a summary of the FlowFiles that were dropped, including the count and total size in bytes
+     * @throws IOException if an error occurs while reading or writing swap files
+     */
+    DropFlowFileSummary dropFlowFiles(Predicate<FlowFile> predicate) throws IOException;
 
     /**
      * <p>
@@ -229,7 +293,7 @@ public interface FlowFileQueue {
     /**
      * Cancels the request to list FlowFiles that has the given identifier. After this method is called, the request
      * will no longer be known by this queue, so subsequent calls to {@link #getListFlowFileStatus(String)} or
-     * {@link #cancelListFlowFileRequest(String)} will return <code>null</code>
+     * cancelListFlowFileRequest(String) will return <code>null</code>
      *
      * @param requestIdentifier the identifier of the Drop FlowFile Request
      * @return the current status of the List FlowFile Request with the given identifier or <code>null</code> if no
@@ -268,14 +332,14 @@ public interface FlowFileQueue {
     void setLoadBalanceStrategy(LoadBalanceStrategy strategy, String partitioningAttribute);
 
     /**
-     * Offloads the flowfiles in the queue to other nodes.  This disables the queue from partition flowfiles locally.
+     * Offloads the FlowFiles in the queue to other nodes.  This disables the queue from partition FlowFiles locally.
      * <p>
      * This operation is a no-op if the node that contains this queue is not in a cluster.
      */
     void offloadQueue();
 
     /**
-     * Resets a queue that has previously been offloaded.  This allows the queue to partition flowfiles locally, and
+     * Resets a queue that has previously been offloaded.  This allows the queue to partition FlowFiles locally, and
      * has no other effect on processors or remote process groups.
      * <p>
      * This operation is a no-op if the queue is not currently offloaded or the node that contains this queue is not

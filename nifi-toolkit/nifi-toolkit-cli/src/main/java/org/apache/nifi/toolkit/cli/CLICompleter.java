@@ -77,6 +77,8 @@ public class CLICompleter implements Completer {
      */
     private final Map<String, List<String>> commandOptionsMap;
 
+    private final Completer fileNameCompleter = new Completers.FileNameCompleter();
+
     /**
      * Initializes the completer based on the top-level commands and command groups.
      *
@@ -84,7 +86,7 @@ public class CLICompleter implements Completer {
      * @param commandGroups all command groups like "nifi" and "nifi-reg"
      */
     public CLICompleter(final Collection<Command> topLevelCommands, final Collection<CommandGroup> commandGroups) {
-        final Map<String,List<String>> topLevel = new TreeMap<>();
+        final Map<String, List<String>> topLevel = new TreeMap<>();
 
         // add top-level commands like "exit" to the topLevel map with an empty list of sub-commands
         for (final Command topLevelCommand : topLevelCommands) {
@@ -101,7 +103,7 @@ public class CLICompleter implements Completer {
         this.topLevelCommandMap = Collections.unmodifiableMap(topLevel);
 
         // map second-level commands to their available options
-        final Map<String,List<String>> commandOptions = new TreeMap<>();
+        final Map<String, List<String>> commandOptions = new TreeMap<>();
 
         // map each command to its possible options
         for (final CommandGroup commandGroup : commandGroups) {
@@ -185,7 +187,6 @@ public class CLICompleter implements Completer {
                     final String currWord = line.word();
                     final String prevWord = line.words().get(line.wordIndex() - 1);
                     if (FILE_COMPLETION_VARS.contains(prevWord)) {
-                        final Completers.FileNameCompleter fileNameCompleter = new Completers.FileNameCompleter();
                         fileNameCompleter.complete(reader, new ArgumentCompleter.ArgumentLine(currWord, currWord.length()), candidates);
                     }
                 }
@@ -196,7 +197,6 @@ public class CLICompleter implements Completer {
 
                 // determine if the word before the current is an arg that needs file completion, otherwise return all args
                 if (FILE_COMPLETION_ARGS.contains(prevWord)) {
-                    final Completers.FileNameCompleter fileNameCompleter = new Completers.FileNameCompleter();
                     fileNameCompleter.complete(reader, new ArgumentCompleter.ArgumentLine(currWord, currWord.length()), candidates);
                 } else {
                     final List<String> options = commandOptionsMap.get(secondLevel);

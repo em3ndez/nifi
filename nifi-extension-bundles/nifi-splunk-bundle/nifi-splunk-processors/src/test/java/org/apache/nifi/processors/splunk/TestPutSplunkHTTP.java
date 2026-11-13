@@ -1,0 +1,296 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.processors.splunk;
+
+import com.splunk.RequestMessage;
+import com.splunk.ResponseMessage;
+import com.splunk.Service;
+import com.splunk.ServiceArgs;
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.util.PropertyMigrationResult;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import javax.net.ssl.SSLSocketFactory;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@ExtendWith(MockitoExtension.class)
+public class TestPutSplunkHTTP {
+    private static final String ACK_ID = "1234";
+    private static final String EVENT = "{\"a\"=\"á\",\"c\"=\"ő\",\"e\"=\"'ű'\"}"; // Intentionally uses UTF-8 character
+    private static final String SUCCESS_RESPONSE =
+            "{\n" +
+            "    \"text\": \"Success\",\n" +
+            "    \"code\": 0,\n" +
+            "    \"ackId\": " + ACK_ID + "\n" +
+            "}";
+    private static final String FAILURE_RESPONSE = """
+            {
+                "text": "Failure",
+                "code": 13
+            }""";
+
+    @Mock
+    private Service service;
+
+    @Mock
+    private ResponseMessage response;
+
+    @Captor
+    private ArgumentCaptor<String> path;
+
+    @Captor
+    private ArgumentCaptor<RequestMessage> request;
+
+    private MockedPutSplunkHTTP processor;
+    private TestRunner testRunner;
+    private SSLSocketFactory splunkSocketFactory;
+
+    @BeforeEach
+    public void captureSplunkTlsConfiguration() {
+        splunkSocketFactory = Service.getSSLSocketFactory();
+    }
+
+    @AfterEach
+    public void restoreSplunkTlsConfiguration() {
+        Service.setSSLSocketFactory(splunkSocketFactory);
+    }
+
+    public void setUpMocks() {
+        processor = new MockedPutSplunkHTTP(service);
+        testRunner = TestRunners.newTestRunner(processor);
+        testRunner.setProperty(SplunkAPICall.SCHEME, "http");
+        testRunner.setProperty(SplunkAPICall.TOKEN, "Splunk 888c5a81-8777-49a0-a3af-f76e050ab5d9");
+        testRunner.setProperty(SplunkAPICall.REQUEST_CHANNEL, "22bd7414-0d77-4c73-936d-c8f5d1b21862");
+
+        Mockito.when(service.send(path.capture(), request.capture())).thenReturn(response);
+    }
+
+    @Test
+    public void testRunSuccess() {
+        setUpMocks();
+        givenSplunkReturnsWithSuccess();
+
+        testRunner.enqueue(givenFlowFile());
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PutSplunkHTTP.RELATIONSHIP_SUCCESS, 1);
+        final MockFlowFile outgoingFlowFile = testRunner.getFlowFilesForRelationship(PutSplunkHTTP.RELATIONSHIP_SUCCESS).getFirst();
+
+        assertEquals(EVENT, outgoingFlowFile.getContent());
+        assertEquals(ACK_ID, outgoingFlowFile.getAttribute("splunk.acknowledgement.id"));
+        assertNotNull(outgoingFlowFile.getAttribute("splunk.responded.at"));
+        assertEquals("200", outgoingFlowFile.getAttribute("splunk.status.code"));
+        assertEquals("application/json", request.getValue().getHeader().get("Content-Type"));
+    }
+
+    @Test
+    public void testHappyPathWithCustomQueryParameters() {
+        setUpMocks();
+        testRunner.setProperty(PutSplunkHTTP.SOURCE, "test_source");
+        testRunner.setProperty(PutSplunkHTTP.SOURCE_TYPE, "test?source?type");
+        givenSplunkReturnsWithSuccess();
+
+        testRunner.enqueue(EVENT);
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PutSplunkHTTP.RELATIONSHIP_SUCCESS, 1);
+        assertTrue(path.getValue().startsWith("/services/collector/raw"));
+    }
+
+    @Test
+    public void testHappyPathWithCustomQueryParametersFromFlowFile() {
+        setUpMocks();
+        testRunner.setProperty(PutSplunkHTTP.SOURCE, "${ff_source}");
+        testRunner.setProperty(PutSplunkHTTP.SOURCE_TYPE, "${ff_source_type}");
+        testRunner.setProperty(PutSplunkHTTP.HOST, "${ff_host}");
+        testRunner.setProperty(PutSplunkHTTP.INDEX, "${ff_index}");
+        testRunner.setProperty(PutSplunkHTTP.CHARSET, "${ff_charset}");
+        testRunner.setProperty(PutSplunkHTTP.CONTENT_TYPE, "${ff_content_type}");
+        givenSplunkReturnsWithSuccess();
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("ff_source", "test_source");
+        attributes.put("ff_source_type", "test?source?type");
+        attributes.put("ff_host", "test_host");
+        attributes.put("ff_index", "test_index");
+        attributes.put("ff_charset", "UTF-8");
+        attributes.put("ff_content_type", "test_content_type");
+
+        final MockFlowFile incomingFlowFile = new MockFlowFile(1);
+        incomingFlowFile.putAttributes(attributes);
+        incomingFlowFile.setData(EVENT.getBytes(StandardCharsets.UTF_8));
+
+        testRunner.enqueue(incomingFlowFile);
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PutSplunkHTTP.RELATIONSHIP_SUCCESS, 1);
+        assertTrue(path.getValue().startsWith("/services/collector/raw"));
+
+        assertEquals(EVENT, processor.getLastContent());
+        assertEquals(attributes.get("ff_content_type"), processor.getLastContentType());
+    }
+
+    @Test
+    public void testHappyPathWithContentType() {
+        setUpMocks();
+        testRunner.setProperty(PutSplunkHTTP.CONTENT_TYPE, "text/xml");
+        givenSplunkReturnsWithSuccess();
+
+
+        testRunner.enqueue(givenFlowFile());
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PutSplunkHTTP.RELATIONSHIP_SUCCESS, 1);
+        assertEquals("text/xml", request.getValue().getHeader().get("Content-Type"));
+    }
+
+    @Test
+    public void testSplunkCallFailure() {
+        setUpMocks();
+        givenSplunkReturnsWithFailure();
+
+        testRunner.enqueue(givenFlowFile());
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PutSplunkHTTP.RELATIONSHIP_FAILURE, 1);
+        final MockFlowFile outgoingFlowFile = testRunner.getFlowFilesForRelationship(PutSplunkHTTP.RELATIONSHIP_FAILURE).getFirst();
+
+        assertEquals(EVENT, outgoingFlowFile.getContent());
+        assertNull(outgoingFlowFile.getAttribute("splunk.acknowledgement.id"));
+        assertNull(outgoingFlowFile.getAttribute("splunk.responded.at"));
+        assertEquals("200", outgoingFlowFile.getAttribute("splunk.status.code"));
+        assertEquals("13", outgoingFlowFile.getAttribute("splunk.response.code"));
+    }
+
+    @Test
+    public void testSplunkApplicationFailure() {
+        setUpMocks();
+        givenSplunkReturnsWithApplicationFailure(403);
+
+        testRunner.enqueue(givenFlowFile());
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PutSplunkHTTP.RELATIONSHIP_FAILURE, 1);
+        final MockFlowFile outgoingFlowFile = testRunner.getFlowFilesForRelationship(PutSplunkHTTP.RELATIONSHIP_FAILURE).getFirst();
+
+        assertEquals(EVENT, outgoingFlowFile.getContent());
+        assertNull(outgoingFlowFile.getAttribute("splunk.acknowledgement.id"));
+        assertNull(outgoingFlowFile.getAttribute("splunk.responded.at"));
+        assertNull(outgoingFlowFile.getAttribute("splunk.response.code"));
+        assertEquals("403", outgoingFlowFile.getAttribute("splunk.status.code"));
+    }
+
+    @Test
+    void testMigrateProperties() {
+        TestRunner testRunner = TestRunners.newTestRunner(PutSplunkHTTP.class);
+        final Map<String, String> expectedRenamed = Map.ofEntries(
+                Map.entry("source", PutSplunkHTTP.SOURCE.getName()),
+                Map.entry("source-type", PutSplunkHTTP.SOURCE_TYPE.getName()),
+                Map.entry("host", PutSplunkHTTP.HOST.getName()),
+                Map.entry("index", PutSplunkHTTP.INDEX.getName()),
+                Map.entry("character-set", PutSplunkHTTP.CHARSET.getName()),
+                Map.entry("content-type", PutSplunkHTTP.CONTENT_TYPE.getName()),
+                Map.entry("Port", SplunkAPICall.PORT.getName()),
+                Map.entry("Token", SplunkAPICall.TOKEN.getName()),
+                Map.entry("request-channel", SplunkAPICall.REQUEST_CHANNEL.getName())
+        );
+
+        final PropertyMigrationResult propertyMigrationResult = testRunner.migrateProperties();
+        assertEquals(expectedRenamed, propertyMigrationResult.getPropertiesRenamed());
+        assertEquals(Set.of("Security Protocol"), propertyMigrationResult.getPropertiesRemoved());
+    }
+
+    private MockFlowFile givenFlowFile() {
+        final MockFlowFile result = new MockFlowFile(System.currentTimeMillis());
+        result.setData(EVENT.getBytes(StandardCharsets.UTF_8));
+        result.putAttributes(Collections.singletonMap("mime.type", "application/json"));
+        return result;
+    }
+
+    private void givenSplunkReturnsWithSuccess() {
+        final InputStream inputStream = new ByteArrayInputStream(SUCCESS_RESPONSE.getBytes(StandardCharsets.UTF_8));
+        Mockito.when(response.getStatus()).thenReturn(200);
+        Mockito.when(response.getContent()).thenReturn(inputStream);
+    }
+
+    private void givenSplunkReturnsWithFailure() {
+        final InputStream inputStream = new ByteArrayInputStream(FAILURE_RESPONSE.getBytes(StandardCharsets.UTF_8));
+        Mockito.when(response.getStatus()).thenReturn(200);
+        Mockito.when(response.getContent()).thenReturn(inputStream);
+    }
+
+    private void givenSplunkReturnsWithApplicationFailure(int code) {
+        final InputStream inputStream = new ByteArrayInputStream("non-json-content".getBytes(StandardCharsets.UTF_8));
+        Mockito.when(response.getStatus()).thenReturn(code);
+        Mockito.when(response.getContent()).thenReturn(inputStream);
+    }
+
+    public static class MockedPutSplunkHTTP extends PutSplunkHTTP {
+        final Service serviceMock;
+        Object lastContent = null;
+        String lastContentType = null;
+
+        public MockedPutSplunkHTTP(final Service serviceMock) {
+            this.serviceMock = serviceMock;
+        }
+
+        @Override
+        protected Service getSplunkService(final ServiceArgs splunkServiceArguments) {
+            return serviceMock;
+        }
+
+        @Override
+        protected RequestMessage createRequestMessage(final ProcessSession session, final FlowFile flowFile, final ProcessContext context) {
+            final RequestMessage requestMessage = super.createRequestMessage(session, flowFile, context);
+            lastContent = requestMessage.getContent();
+            lastContentType = requestMessage.getHeader().get("Content-Type");
+            return requestMessage;
+        }
+
+        public Object getLastContent() {
+            return lastContent;
+        }
+
+        public String getLastContentType() {
+            return lastContentType;
+        }
+    }
+}

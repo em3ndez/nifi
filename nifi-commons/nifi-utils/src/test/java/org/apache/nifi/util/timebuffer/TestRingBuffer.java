@@ -16,17 +16,16 @@
  */
 package org.apache.nifi.util.timebuffer;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import org.apache.nifi.util.RingBuffer;
+import org.apache.nifi.util.RingBuffer.ForEachEvaluator;
+import org.apache.nifi.util.RingBuffer.IterationDirection;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.nifi.util.RingBuffer;
-import org.apache.nifi.util.RingBuffer.ForEachEvaluator;
-import org.apache.nifi.util.RingBuffer.IterationDirection;
-
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  *
@@ -81,7 +80,7 @@ public class TestRingBuffer {
         }
 
         final AtomicInteger countHolder = new AtomicInteger(0);
-        ringBuffer.forEach(new ForEachEvaluator<Integer>() {
+        ringBuffer.forEach(new ForEachEvaluator<>() {
             int counter = 0;
 
             @Override
@@ -110,7 +109,7 @@ public class TestRingBuffer {
             ringBuffer.add(v);
         }
 
-        ringBuffer.forEach(new ForEachEvaluator<Integer>() {
+        ringBuffer.forEach(new ForEachEvaluator<>() {
             int counter = 0;
 
             @Override
@@ -139,7 +138,7 @@ public class TestRingBuffer {
         }
 
         final AtomicInteger countHolder = new AtomicInteger(0);
-        ringBuffer.forEach(new ForEachEvaluator<Integer>() {
+        ringBuffer.forEach(new ForEachEvaluator<>() {
             int counter = 0;
 
             @Override
@@ -171,7 +170,7 @@ public class TestRingBuffer {
             ringBuffer.add(v);
         }
 
-        ringBuffer.forEach(new ForEachEvaluator<Integer>() {
+        ringBuffer.forEach(new ForEachEvaluator<>() {
             int counter = 0;
 
             @Override

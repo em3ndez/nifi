@@ -17,6 +17,7 @@
 
 package org.apache.nifi.serialization.record;
 
+import java.util.List;
 import java.util.Objects;
 
 public class DataType {
@@ -36,6 +37,14 @@ public class DataType {
         return fieldType;
     }
 
+    public void removePath(final RecordFieldRemovalPath path) {
+        // intentionally blank - to be overridden by concrete DataTypes
+    }
+
+    public boolean isRecursive(final List<RecordSchema> schemas) {
+        return false;
+    }
+
     @Override
     public int hashCode() {
         return 31 + 41 * getFieldType().hashCode() + 41 * (getFormat() == null ? 0 : getFormat().hashCode());
@@ -49,11 +58,10 @@ public class DataType {
         if (obj == null) {
             return false;
         }
-        if (!(obj instanceof DataType)) {
+        if (!(obj instanceof final DataType other)) {
             return false;
         }
 
-        final DataType other = (DataType) obj;
         return getFieldType().equals(other.getFieldType()) && Objects.equals(getFormat(), other.getFormat());
     }
 

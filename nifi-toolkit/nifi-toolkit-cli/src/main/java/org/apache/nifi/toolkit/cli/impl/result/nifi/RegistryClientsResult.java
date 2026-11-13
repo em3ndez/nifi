@@ -16,61 +16,63 @@
  */
 package org.apache.nifi.toolkit.cli.impl.result.nifi;
 
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.ResultType;
 import org.apache.nifi.toolkit.cli.impl.result.AbstractWritableResult;
 import org.apache.nifi.toolkit.cli.impl.result.writer.DynamicTableWriter;
 import org.apache.nifi.toolkit.cli.impl.result.writer.Table;
 import org.apache.nifi.toolkit.cli.impl.result.writer.TableWriter;
-import org.apache.nifi.web.api.dto.RegistryDTO;
-import org.apache.nifi.web.api.entity.RegistryClientEntity;
-import org.apache.nifi.web.api.entity.RegistryClientsEntity;
+import org.apache.nifi.web.api.dto.FlowRegistryClientDTO;
+import org.apache.nifi.web.api.entity.FlowRegistryClientEntity;
+import org.apache.nifi.web.api.entity.FlowRegistryClientsEntity;
 
 import java.io.PrintStream;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Result for a RegistryClientsEntity.
  */
-public class RegistryClientsResult extends AbstractWritableResult<RegistryClientsEntity> {
+public class RegistryClientsResult extends AbstractWritableResult<FlowRegistryClientsEntity> {
 
-    final RegistryClientsEntity registryClients;
+    final FlowRegistryClientsEntity registryClients;
 
-    public RegistryClientsResult(final ResultType resultType, final RegistryClientsEntity registryClients) {
+    public RegistryClientsResult(final ResultType resultType, final FlowRegistryClientsEntity registryClients) {
         super(resultType);
-        this.registryClients = registryClients;
-        Validate.notNull(this.registryClients);
+        this.registryClients = Objects.requireNonNull(registryClients);
     }
 
     @Override
-    public RegistryClientsEntity getResult() {
+    public FlowRegistryClientsEntity getResult() {
         return this.registryClients;
     }
 
     @Override
     protected void writeSimpleResult(final PrintStream output) {
-        final Set<RegistryClientEntity> clients = registryClients.getRegistries();
+        final Set<FlowRegistryClientEntity> clients = registryClients.getRegistries();
         if (clients == null || clients.isEmpty()) {
             return;
         }
 
-        final List<RegistryDTO> registries = clients.stream().map(RegistryClientEntity::getComponent)
-                .sorted(Comparator.comparing(RegistryDTO::getName))
-                .collect(Collectors.toList());
+        final List<FlowRegistryClientDTO> registries = clients.stream()
+            .map(FlowRegistryClientEntity::getComponent)
+            .sorted(Comparator.comparing(FlowRegistryClientDTO::getName))
+            .toList();
 
         final Table table = new Table.Builder()
                 .column("#", 3, 3, false)
                 .column("Name", 20, 36, true)
+                .column("Type", 20, 120, true)
                 .column("Id", 36, 36, false)
-                .column("Uri", 3, Integer.MAX_VALUE, false)
+                .column("Properties", 3, Integer.MAX_VALUE, false)
                 .build();
 
         for (int i = 0; i < registries.size(); i++) {
-            RegistryDTO r = registries.get(i);
-            table.addRow("" + (i+1), r.getName(), r.getId(), r.getUri());
+            FlowRegistryClientDTO clientDto = registries.get(i);
+            final Map<String, String> properties = clientDto.getProperties();
+            table.addRow("" + (i + 1), clientDto.getName(), clientDto.getType(), clientDto.getId(), properties == null ? "" : properties.toString());
         }
 
         final TableWriter tableWriter = new DynamicTableWriter();

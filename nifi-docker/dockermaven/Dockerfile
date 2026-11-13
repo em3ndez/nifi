@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements. See the NOTICE file
 # distributed with this work for additional information
@@ -15,16 +16,17 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-
-ARG IMAGE_NAME=openjdk
-ARG IMAGE_TAG=8-jre
+ARG IMAGE_NAME
+ARG IMAGE_TAG
 FROM ${IMAGE_NAME}:${IMAGE_TAG} AS artifactbase
 ARG MAINTAINER="Apache NiFi <dev@nifi.apache.org>"
 LABEL maintainer="${MAINTAINER}"
+LABEL site="https://nifi.apache.org"
 
 ARG NIFI_VERSION
 ARG NIFI_BINARY
 ARG NIFI_TOOLKIT_BINARY
+ARG NIFI_SCRIPTS
 
 ENV NIFI_BASE_DIR /opt/nifi
 ENV NIFI_HOME ${NIFI_BASE_DIR}/nifi-current
@@ -32,8 +34,13 @@ ENV NIFI_TOOLKIT_HOME ${NIFI_BASE_DIR}/nifi-toolkit-current
 ENV NIFI_PID_DIR=${NIFI_HOME}/run
 ENV NIFI_LOG_DIR=${NIFI_HOME}/logs
 
-ADD sh/ ${NIFI_BASE_DIR}/scripts/
-RUN chmod -R +x ${NIFI_BASE_DIR}/scripts/*.sh
+ADD ${NIFI_SCRIPTS} ${NIFI_BASE_DIR}/scripts/
+RUN chmod -R +x ${NIFI_BASE_DIR}/scripts/*.sh \
+   && apt-get update \
+   && apt-get install -y unzip \
+   && apt-get -y autoremove \
+   && apt-get clean autoclean \
+   && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 COPY $NIFI_BINARY $NIFI_BASE_DIR
 RUN unzip ${NIFI_BASE_DIR}/nifi-${NIFI_VERSION}-bin.zip -d ${NIFI_BASE_DIR} \
@@ -53,16 +60,18 @@ RUN mkdir -p ${NIFI_HOME}/conf \
     && mkdir -p ${NIFI_HOME}/flowfile_repository \
     && mkdir -p ${NIFI_HOME}/content_repository \
     && mkdir -p ${NIFI_HOME}/provenance_repository \
+    && mkdir -p ${NIFI_HOME}/python_extensions \
+    && mkdir -p ${NIFI_HOME}/nar_extensions \
     && mkdir -p ${NIFI_HOME}/state \
     && mkdir -p ${NIFI_LOG_DIR}
 
 FROM ${IMAGE_NAME}:${IMAGE_TAG}
 ARG MAINTAINER="Apache NiFi <dev@nifi.apache.org>"
 LABEL maintainer="${MAINTAINER}"
-
+#
 ARG UID=1000
 ARG GID=1000
-
+#
 ENV NIFI_BASE_DIR /opt/nifi
 ENV NIFI_HOME ${NIFI_BASE_DIR}/nifi-current
 ENV NIFI_TOOLKIT_HOME ${NIFI_BASE_DIR}/nifi-toolkit-current
@@ -73,7 +82,12 @@ ENV NIFI_LOG_DIR=${NIFI_HOME}/logs
 RUN groupadd -g ${GID} nifi || groupmod -n nifi `getent group ${GID} | cut -d: -f1` \
     && useradd --shell /bin/bash -u ${UID} -g ${GID} -m nifi \
     && apt-get update \
-    && apt-get install -y jq xmlstarlet procps
+    && apt-get install -y jq xmlstarlet procps \
+    && apt-get install -y python3 \
+    && apt-get install -y python3-venv \
+    && apt-get -y autoremove \
+    && apt-get clean autoclean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 COPY --chown=nifi:nifi --from=artifactbase $NIFI_BASE_DIR $NIFI_BASE_DIR
 
@@ -83,15 +97,19 @@ VOLUME ${NIFI_LOG_DIR} \
        ${NIFI_HOME}/flowfile_repository \
        ${NIFI_HOME}/content_repository \
        ${NIFI_HOME}/provenance_repository \
+       ${NIFI_HOME}/python_extensions \
+       ${NIFI_HOME}/nar_extensions \
        ${NIFI_HOME}/state
 
 USER nifi
 
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Clear nifi-env.sh in favour of configuring all environment variables in the Dockerfile
-RUN echo "#!/bin/sh\n" > $NIFI_HOME/bin/nifi-env.sh
+RUN echo "#!/bin/sh\n" > "${NIFI_HOME}/bin/nifi-env.sh"
 
 # Web HTTP(s) & Socket Site-to-Site Ports
-EXPOSE 8080 8443 10000 8000
+EXPOSE 8443/tcp 10000/tcp 8000/tcp
 
 WORKDIR ${NIFI_HOME}
 

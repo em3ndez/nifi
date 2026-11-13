@@ -17,10 +17,10 @@
 
 package org.apache.nifi.controller.repository;
 
-import java.util.List;
-
 import org.apache.nifi.controller.queue.QueueSize;
 import org.apache.nifi.controller.repository.claim.ResourceClaim;
+
+import java.util.List;
 
 /**
  * <p>
@@ -47,4 +47,14 @@ public interface SwapSummary {
      * @return a List of all ResourceClaims that are referenced by the FlowFiles in the swap file
      */
     List<ResourceClaim> getResourceClaims();
+
+    /**
+     * @return The minimum lastQueueDate of all FlowFiles that are currently stored in this queue.
+     */
+    Long getMinLastQueueDate();
+
+    /**
+     * @return The sum of all the lastQueueDates of all FlowFiles that are currently stored in this queue.
+     */
+    Long getTotalLastQueueDate();
 }

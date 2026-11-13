@@ -16,14 +16,14 @@
  */
 package org.apache.nifi.record.path.util;
 
+import org.apache.nifi.record.path.ArrayIndexFieldValue;
+import org.apache.nifi.record.path.FieldValue;
+import org.apache.nifi.record.path.MapEntryFieldValue;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-
-import org.apache.nifi.record.path.ArrayIndexFieldValue;
-import org.apache.nifi.record.path.FieldValue;
-import org.apache.nifi.record.path.MapEntryFieldValue;
 
 public class FieldValueLogicalPathBuilder {
 
@@ -43,9 +43,6 @@ public class FieldValueLogicalPathBuilder {
         private CharSequence keyRight = DEFAULT_KEY_INDEX_WRAPPER_RIGHT;
         private CharSequence indexLeft = DEFAULT_KEY_INDEX_WRAPPER_LEFT;
         private CharSequence indexRight = DEFAULT_KEY_INDEX_WRAPPER_RIGHT;
-
-        public Builder() {
-        }
 
         public Builder withPathDelimiter(CharSequence delimiter) {
             Objects.requireNonNull(delimiter, "delimiter cannot be null");
@@ -105,8 +102,8 @@ public class FieldValueLogicalPathBuilder {
         final List<CharSequence> paths = new ArrayList<>();
         FieldValueWalker.walk(fieldValue, (thisFieldValue) -> {
             int index = -1;
-            if (thisFieldValue instanceof ArrayIndexFieldValue) {
-                index = ((ArrayIndexFieldValue) thisFieldValue).getArrayIndex();
+            if (thisFieldValue instanceof final ArrayIndexFieldValue arrayIndexFieldValue) {
+                index = arrayIndexFieldValue.getArrayIndex();
                 paths.add(keyRight);
                 paths.add(String.valueOf(index));
                 paths.add(keyLeft);
@@ -122,7 +119,7 @@ public class FieldValueLogicalPathBuilder {
             }
         });
         Collections.reverse(paths);
-        return String.join("",paths);
+        return String.join("", paths);
     }
 
 }

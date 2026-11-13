@@ -1,0 +1,786 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { Injectable, inject } from '@angular/core';
+import { Actions, createEffect, ofType } from '@ngrx/effects';
+import { concatLatestFrom } from '@ngrx/operators';
+import * as ParameterContextListingActions from './parameter-context-listing.actions';
+import * as ErrorActions from '../../../../state/error/error.actions';
+import {
+    asyncScheduler,
+    catchError,
+    filter,
+    from,
+    interval,
+    map,
+    Observable,
+    of,
+    switchMap,
+    take,
+    takeUntil,
+    tap
+} from 'rxjs';
+import { MatDialog, MatDialogRef } from '@angular/material/dialog';
+import { Store } from '@ngrx/store';
+import { NiFiState } from '../../../../state';
+import { Router } from '@angular/router';
+import { ParameterContextService } from '../../service/parameter-contexts.service';
+import { Parameter, YesNoDialog } from '@nifi/shared';
+import {
+    selectParameterContextLoadedTimestamp,
+    selectParameterContexts,
+    selectSaving,
+    selectUpdateRequest,
+    selectUpdateRequestParameterContextId,
+    selectDeleteUpdateRequestInitiated,
+    selectHasPendingPostUpdateNavigation,
+    selectPostUpdateNavigation,
+    selectPostUpdateNavigationBoundary,
+    selectPostUpdateNavigationState
+} from './parameter-context-listing.selectors';
+import {
+    EditParameterRequest,
+    EditParameterResponse,
+    ParameterContextUpdateRequest,
+    PostUpdateNavigationState
+} from '../../../../state/shared';
+import { EditParameterDialog } from '../../../../ui/common/edit-parameter-dialog/edit-parameter-dialog.component';
+import { OkDialog } from '../../../../ui/common/ok-dialog/ok-dialog.component';
+import { ErrorHelper } from '../../../../service/error-helper.service';
+import { HttpErrorResponse } from '@angular/common/http';
+import { initialState } from './parameter-context-listing.reducer';
+import { BackNavigation } from '../../../../state/navigation';
+import { isDefinedAndNotNull, MEDIUM_DIALOG, SMALL_DIALOG, XL_DIALOG, NiFiCommon, Storage } from '@nifi/shared';
+import { ErrorContextKey } from '../../../../state/error';
+import { EditParameterContext } from '../../../../ui/common/parameter-context/edit-parameter-context/edit-parameter-context.component';
+import { SaveParameterContextChangesDialog } from '../../../../ui/common/parameter-context/save-parameter-context-changes-dialog/save-parameter-context-changes-dialog.component';
+import { EditParameterContextUpdate } from '../../../../ui/common/parameter-context';
+
+@Injectable()
+export class ParameterContextListingEffects {
+    private actions$ = inject(Actions);
+    private store = inject<Store<NiFiState>>(Store);
+    private storage = inject(Storage);
+    private parameterContextService = inject(ParameterContextService);
+    private dialog = inject(MatDialog);
+    private router = inject(Router);
+    private errorHelper = inject(ErrorHelper);
+
+    loadParameterContexts$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.loadParameterContexts),
+            concatLatestFrom(() => this.store.select(selectParameterContextLoadedTimestamp)),
+            switchMap(([, loadedTimestamp]) =>
+                from(this.parameterContextService.getParameterContexts()).pipe(
+                    map((response) =>
+                        ParameterContextListingActions.loadParameterContextsSuccess({
+                            response: {
+                                parameterContexts: response.parameterContexts,
+                                loadedTimestamp: response.currentTime
+                            }
+                        })
+                    ),
+                    catchError((errorResponse: HttpErrorResponse) =>
+                        of(
+                            ParameterContextListingActions.loadParameterContextsError({
+                                errorResponse,
+                                loadedTimestamp,
+                                status: loadedTimestamp !== initialState.loadedTimestamp ? 'success' : 'pending'
+                            })
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    loadParameterContextsError$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.loadParameterContextsError),
+            map((action) =>
+                this.errorHelper.handleLoadingError(
+                    action.loadedTimestamp !== initialState.loadedTimestamp,
+                    action.errorResponse
+                )
+            )
+        )
+    );
+
+    openNewParameterContextDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.openNewParameterContextDialog),
+                tap(() => {
+                    this.storage.setItem<number>(NiFiCommon.EDIT_PARAMETER_CONTEXT_DIALOG_ID, 0);
+
+                    const dialogReference = this.dialog.open(EditParameterContext, {
+                        ...XL_DIALOG,
+                        data: {}
+                    });
+
+                    dialogReference.componentInstance.availableParameterContexts$ =
+                        this.store.select(selectParameterContexts);
+                    dialogReference.componentInstance.saving$ = this.store.select(selectSaving);
+
+                    dialogReference.componentInstance.createNewParameter = (
+                        existingParameters: string[]
+                    ): Observable<EditParameterResponse> => {
+                        const dialogRequest: EditParameterRequest = { existingParameters, isNewParameterContext: true };
+                        const newParameterDialogReference = this.dialog.open(EditParameterDialog, {
+                            ...MEDIUM_DIALOG,
+                            data: dialogRequest
+                        });
+
+                        newParameterDialogReference.componentInstance.saving$ = of(false);
+
+                        return newParameterDialogReference.componentInstance.editParameter.pipe(
+                            take(1),
+                            map((dialogResponse: EditParameterResponse) => {
+                                newParameterDialogReference.close();
+
+                                return {
+                                    ...dialogResponse
+                                };
+                            })
+                        );
+                    };
+
+                    dialogReference.componentInstance.editParameter = (
+                        parameter: Parameter
+                    ): Observable<EditParameterResponse> => {
+                        const dialogRequest: EditParameterRequest = {
+                            parameter: {
+                                ...parameter
+                            },
+                            isNewParameterContext: true
+                        };
+                        const editParameterDialogReference = this.dialog.open(EditParameterDialog, {
+                            ...MEDIUM_DIALOG,
+                            data: dialogRequest
+                        });
+
+                        editParameterDialogReference.componentInstance.saving$ = of(false);
+
+                        return editParameterDialogReference.componentInstance.editParameter.pipe(
+                            take(1),
+                            map((dialogResponse: EditParameterResponse) => {
+                                editParameterDialogReference.close();
+
+                                return {
+                                    ...dialogResponse
+                                };
+                            })
+                        );
+                    };
+
+                    dialogReference.componentInstance.addParameterContext
+                        .pipe(takeUntil(dialogReference.afterClosed()))
+                        .subscribe((payload: any) => {
+                            this.store.dispatch(
+                                ParameterContextListingActions.createParameterContext({
+                                    request: { payload }
+                                })
+                            );
+                        });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    createParameterContext$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.createParameterContext),
+            map((action) => action.request),
+            switchMap((request) =>
+                from(this.parameterContextService.createParameterContext(request)).pipe(
+                    map((response) =>
+                        ParameterContextListingActions.createParameterContextSuccess({
+                            response: {
+                                parameterContext: response
+                            }
+                        })
+                    ),
+                    catchError((errorResponse: HttpErrorResponse) => {
+                        if (this.errorHelper.showErrorInContext(errorResponse.status)) {
+                            return of(
+                                ParameterContextListingActions.parameterContextListingBannerApiError({
+                                    error: this.errorHelper.getErrorString(errorResponse)
+                                })
+                            );
+                        } else {
+                            this.dialog.closeAll();
+                            return of(this.errorHelper.fullScreenError(errorResponse));
+                        }
+                    })
+                )
+            )
+        )
+    );
+
+    createParameterContextSuccess$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.createParameterContextSuccess),
+                tap(() => {
+                    this.dialog.closeAll();
+                })
+            ),
+        { dispatch: false }
+    );
+
+    parameterContextListingBannerApiError$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.parameterContextListingBannerApiError),
+            map((action) => action.error),
+            switchMap((error) =>
+                of(
+                    ErrorActions.addBannerError({
+                        errorContext: { errors: [error], context: ErrorContextKey.PARAMETER_CONTEXTS }
+                    })
+                )
+            )
+        )
+    );
+
+    parameterContextListingSnackbarApiError$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.parameterContextListingSnackbarApiError),
+            map((action) => action.error),
+            switchMap((error) => of(ErrorActions.snackBarError({ error })))
+        )
+    );
+
+    navigateToManageComponentPolicies$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.navigateToManageComponentPolicies),
+                map((action) => action.id),
+                tap((id) => {
+                    const routeBoundary: string[] = ['/access-policies'];
+                    this.router.navigate([...routeBoundary, 'read', 'component', 'parameter-contexts', id], {
+                        state: {
+                            backNavigation: {
+                                route: ['/parameter-contexts', id],
+                                routeBoundary,
+                                context: 'Parameter Context'
+                            } as BackNavigation
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    navigateToEditParameterContext$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.navigateToEditParameterContext),
+                map((action) => action.id),
+                tap((id) => {
+                    this.router.navigate(['/parameter-contexts', id, 'edit']);
+                })
+            ),
+        { dispatch: false }
+    );
+
+    getEffectiveParameterContextAndOpenDialog$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.getEffectiveParameterContextAndOpenDialog),
+            map((action) => action.request),
+            switchMap((request) =>
+                from(this.parameterContextService.getParameterContext(request.id, true)).pipe(
+                    map((response) =>
+                        ParameterContextListingActions.openParameterContextDialog({
+                            request: {
+                                parameterContext: response,
+                                highlightedParameterName: request.highlightedParameterName
+                            }
+                        })
+                    ),
+                    catchError((errorResponse: HttpErrorResponse) => {
+                        this.router.navigate(['/parameter-contexts']);
+                        return of(
+                            ParameterContextListingActions.parameterContextListingSnackbarApiError({
+                                error: this.errorHelper.getErrorString(errorResponse)
+                            })
+                        );
+                    })
+                )
+            )
+        )
+    );
+
+    openParameterContextDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.openParameterContextDialog),
+                map((action) => action.request),
+                tap((request) => {
+                    // @ts-ignore
+                    const parameterContextId: string = request.parameterContext.id;
+
+                    this.storage.setItem<number>(NiFiCommon.EDIT_PARAMETER_CONTEXT_DIALOG_ID, 1);
+
+                    const editDialogReference = this.dialog.open(EditParameterContext, {
+                        ...XL_DIALOG,
+                        data: {
+                            parameterContext: request.parameterContext,
+                            highlightedParameterName: request.highlightedParameterName
+                        }
+                    });
+
+                    editDialogReference.componentInstance.updateRequest = this.store.select(selectUpdateRequest);
+
+                    editDialogReference.componentInstance.availableParameterContexts$ = this.store
+                        .select(selectParameterContexts)
+                        .pipe(
+                            map((parameterContexts) => parameterContexts.filter((pc) => pc.id != parameterContextId))
+                        );
+                    editDialogReference.componentInstance.saving$ = this.store.select(selectSaving);
+                    editDialogReference.componentInstance.hasPendingPostUpdateNavigation$ = this.store.select(
+                        selectHasPendingPostUpdateNavigation
+                    );
+
+                    editDialogReference.componentInstance.goToParameter = (
+                        inheritedParameterContextId: string,
+                        parameterName: string
+                    ) => {
+                        const commandBoundary: string[] = ['/parameter-contexts'];
+                        const commands: string[] = [...commandBoundary, inheritedParameterContextId, 'edit'];
+                        this.goToInheritedParameter(
+                            editDialogReference,
+                            parameterContextId,
+                            commands,
+                            commandBoundary,
+                            'Parameter',
+                            {
+                                highlightedParameterName: parameterName
+                            }
+                        );
+                    };
+
+                    editDialogReference.componentInstance.createNewParameter = (
+                        existingParameters: string[]
+                    ): Observable<EditParameterResponse> => {
+                        const dialogRequest: EditParameterRequest = {
+                            existingParameters,
+                            isNewParameterContext: false
+                        };
+                        const newParameterDialogReference = this.dialog.open(EditParameterDialog, {
+                            ...MEDIUM_DIALOG,
+                            data: dialogRequest
+                        });
+
+                        newParameterDialogReference.componentInstance.saving$ = of(false);
+
+                        return newParameterDialogReference.componentInstance.editParameter.pipe(
+                            take(1),
+                            map((dialogResponse: EditParameterResponse) => {
+                                newParameterDialogReference.close();
+                                return {
+                                    ...dialogResponse
+                                };
+                            })
+                        );
+                    };
+
+                    editDialogReference.componentInstance.editParameter = (
+                        parameter: Parameter
+                    ): Observable<EditParameterResponse> => {
+                        const dialogRequest: EditParameterRequest = {
+                            parameter: {
+                                ...parameter
+                            },
+                            isNewParameterContext: false
+                        };
+                        const editParameterDialogReference = this.dialog.open(EditParameterDialog, {
+                            ...MEDIUM_DIALOG,
+                            data: dialogRequest
+                        });
+
+                        editParameterDialogReference.componentInstance.saving$ = of(false);
+
+                        return editParameterDialogReference.componentInstance.editParameter.pipe(
+                            take(1),
+                            map((dialogResponse: EditParameterResponse) => {
+                                editParameterDialogReference.close();
+                                return {
+                                    ...dialogResponse
+                                };
+                            })
+                        );
+                    };
+
+                    editDialogReference.componentInstance.editParameterContext
+                        .pipe(takeUntil(editDialogReference.afterClosed()))
+                        .subscribe((updateRequest: EditParameterContextUpdate) => {
+                            this.store.dispatch(
+                                ParameterContextListingActions.submitParameterContextUpdateRequest({
+                                    request: {
+                                        id: parameterContextId,
+                                        payload: updateRequest.payload,
+                                        postUpdateNavigation: updateRequest.postUpdateNavigation,
+                                        postUpdateNavigationBoundary: updateRequest.postUpdateNavigationBoundary,
+                                        postUpdateNavigationState: updateRequest.postUpdateNavigationState
+                                    }
+                                })
+                            );
+                        });
+
+                    editDialogReference.componentInstance.continuePostUpdateNavigation
+                        .pipe(
+                            takeUntil(editDialogReference.afterClosed()),
+                            switchMap(() =>
+                                this.store.select(selectPostUpdateNavigation).pipe(
+                                    take(1),
+                                    concatLatestFrom(() => [
+                                        this.store.select(selectPostUpdateNavigationBoundary),
+                                        this.store.select(selectPostUpdateNavigationState)
+                                    ])
+                                )
+                            )
+                        )
+                        .subscribe(
+                            ([postUpdateNavigation, postUpdateNavigationBoundary, postUpdateNavigationState]) => {
+                                if (postUpdateNavigation) {
+                                    this.navigateToInheritedParameter(
+                                        parameterContextId,
+                                        postUpdateNavigation,
+                                        postUpdateNavigationBoundary ?? ['/parameter-contexts'],
+                                        postUpdateNavigationState ?? undefined
+                                    );
+                                }
+                            }
+                        );
+
+                    editDialogReference.componentInstance.cancelUpdateRequest
+                        .pipe(takeUntil(editDialogReference.afterClosed()))
+                        .subscribe(() => {
+                            this.store.dispatch(
+                                ParameterContextListingActions.stopPollingParameterContextUpdateRequest()
+                            );
+                        });
+
+                    editDialogReference.afterClosed().subscribe((response) => {
+                        if (response != 'ROUTED') {
+                            this.store.dispatch(
+                                ParameterContextListingActions.selectParameterContext({
+                                    request: {
+                                        id: parameterContextId
+                                    }
+                                })
+                            );
+                        }
+                        this.store.dispatch(ParameterContextListingActions.editParameterContextComplete());
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    submitParameterContextUpdateRequest$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.submitParameterContextUpdateRequest),
+            map((action) => action.request),
+            switchMap((request) =>
+                from(this.parameterContextService.submitParameterContextUpdate(request)).pipe(
+                    map((response) =>
+                        ParameterContextListingActions.submitParameterContextUpdateRequestSuccess({
+                            response: {
+                                requestEntity: response
+                            }
+                        })
+                    ),
+                    catchError((errorResponse: HttpErrorResponse) => {
+                        if (this.errorHelper.showErrorInContext(errorResponse.status)) {
+                            return of(
+                                ParameterContextListingActions.parameterContextListingBannerApiError({
+                                    error: this.errorHelper.getErrorString(errorResponse)
+                                })
+                            );
+                        } else {
+                            this.dialog.closeAll();
+                            return of(this.errorHelper.fullScreenError(errorResponse));
+                        }
+                    })
+                )
+            )
+        )
+    );
+
+    submitParameterContextUpdateRequestSuccess$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.submitParameterContextUpdateRequestSuccess),
+            map((action) => action.response),
+            switchMap((response) => {
+                const updateRequest: ParameterContextUpdateRequest = response.requestEntity.request;
+                if (updateRequest.complete) {
+                    return of(ParameterContextListingActions.deleteParameterContextUpdateRequest());
+                } else {
+                    return of(ParameterContextListingActions.startPollingParameterContextUpdateRequest());
+                }
+            })
+        )
+    );
+
+    startPollingParameterContextUpdateRequest$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.startPollingParameterContextUpdateRequest),
+            switchMap(() =>
+                interval(2000, asyncScheduler).pipe(
+                    takeUntil(
+                        this.actions$.pipe(
+                            ofType(ParameterContextListingActions.stopPollingParameterContextUpdateRequest)
+                        )
+                    )
+                )
+            ),
+            switchMap(() => of(ParameterContextListingActions.pollParameterContextUpdateRequest()))
+        )
+    );
+
+    pollParameterContextUpdateRequest$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.pollParameterContextUpdateRequest),
+            concatLatestFrom(() => [
+                this.store.select(selectUpdateRequestParameterContextId).pipe(isDefinedAndNotNull()),
+                this.store.select(selectUpdateRequest).pipe(isDefinedAndNotNull())
+            ]),
+            switchMap(([, parameterContextId, updateRequest]) =>
+                from(
+                    this.parameterContextService.pollParameterContextUpdate(
+                        parameterContextId,
+                        updateRequest.request.requestId
+                    )
+                ).pipe(
+                    map((response) =>
+                        ParameterContextListingActions.pollParameterContextUpdateRequestSuccess({
+                            response: {
+                                requestEntity: response
+                            }
+                        })
+                    ),
+                    catchError((errorResponse: HttpErrorResponse) => {
+                        this.store.dispatch(ParameterContextListingActions.stopPollingParameterContextUpdateRequest());
+
+                        if (this.errorHelper.showErrorInContext(errorResponse.status)) {
+                            return of(
+                                ParameterContextListingActions.parameterContextListingBannerApiError({
+                                    error: this.errorHelper.getErrorString(errorResponse)
+                                })
+                            );
+                        } else {
+                            return of(this.errorHelper.fullScreenError(errorResponse));
+                        }
+                    })
+                )
+            )
+        )
+    );
+
+    pollParameterContextUpdateRequestSuccess$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.pollParameterContextUpdateRequestSuccess),
+            map((action) => action.response),
+            filter((response) => response.requestEntity.request.complete),
+            switchMap(() => of(ParameterContextListingActions.stopPollingParameterContextUpdateRequest()))
+        )
+    );
+
+    stopPollingParameterContextUpdateRequest$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.stopPollingParameterContextUpdateRequest),
+            concatLatestFrom(() => this.store.select(selectDeleteUpdateRequestInitiated)),
+            filter(([, deleteUpdateRequestInitiated]) => !deleteUpdateRequestInitiated),
+            switchMap(() => of(ParameterContextListingActions.deleteParameterContextUpdateRequest()))
+        )
+    );
+
+    deleteParameterContextUpdateRequest$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.deleteParameterContextUpdateRequest),
+                concatLatestFrom(() => [
+                    this.store.select(selectUpdateRequestParameterContextId).pipe(isDefinedAndNotNull()),
+                    this.store.select(selectUpdateRequest).pipe(isDefinedAndNotNull())
+                ]),
+                tap(([, parameterContextId, updateRequest]) => {
+                    this.parameterContextService
+                        .deleteParameterContextUpdate(parameterContextId, updateRequest.request.requestId)
+                        .subscribe((response) => {
+                            this.store.dispatch(
+                                ParameterContextListingActions.deleteParameterContextUpdateRequestSuccess({
+                                    response: {
+                                        requestEntity: response
+                                    }
+                                })
+                            );
+                        });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    promptParameterContextDeletion$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.promptParameterContextDeletion),
+                map((action) => action.request),
+                tap((request) => {
+                    // @ts-ignore - component will be defined since the user has permissions to delete the context, but it is optional as defined by the type
+                    const name = request.parameterContext.component.name;
+
+                    const dialogReference = this.dialog.open(YesNoDialog, {
+                        ...SMALL_DIALOG,
+                        data: {
+                            title: 'Delete Parameter Context',
+                            message: `Delete parameter context ${name}?`
+                        }
+                    });
+
+                    dialogReference.componentInstance.yes.pipe(take(1)).subscribe(() => {
+                        this.store.dispatch(
+                            ParameterContextListingActions.deleteParameterContext({
+                                request
+                            })
+                        );
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    deleteParameterContext$ = createEffect(() =>
+        this.actions$.pipe(
+            ofType(ParameterContextListingActions.deleteParameterContext),
+            map((action) => action.request),
+            switchMap((request) =>
+                from(this.parameterContextService.deleteParameterContext(request)).pipe(
+                    map((response) =>
+                        ParameterContextListingActions.deleteParameterContextSuccess({
+                            response: {
+                                parameterContext: response
+                            }
+                        })
+                    ),
+                    catchError((errorResponse: HttpErrorResponse) =>
+                        of(
+                            ParameterContextListingActions.parameterContextListingSnackbarApiError({
+                                error: this.errorHelper.getErrorString(errorResponse)
+                            })
+                        )
+                    )
+                )
+            )
+        )
+    );
+
+    selectParameterContext$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.selectParameterContext),
+                map((action) => action.request),
+                tap((request) => {
+                    this.router.navigate(['/parameter-contexts', request.id]);
+                })
+            ),
+        { dispatch: false }
+    );
+
+    showOkDialog$ = createEffect(
+        () =>
+            this.actions$.pipe(
+                ofType(ParameterContextListingActions.showOkDialog),
+                tap((request) => {
+                    this.dialog.open(OkDialog, {
+                        ...MEDIUM_DIALOG,
+                        data: {
+                            title: request.title,
+                            message: request.message
+                        }
+                    });
+                })
+            ),
+        { dispatch: false }
+    );
+
+    /**
+     * Navigates to the supplied route, recording back navigation to the Parameter Context that was being edited.
+     */
+    private navigateToInheritedParameter(
+        sourceParameterContextId: string,
+        commands: string[],
+        commandBoundary: string[],
+        navigationState?: PostUpdateNavigationState
+    ): void {
+        this.router.navigate(commands, {
+            state: {
+                backNavigation: {
+                    route: ['/parameter-contexts', sourceParameterContextId, 'edit'],
+                    routeBoundary: commandBoundary,
+                    context: 'Parameter Context'
+                } as BackNavigation,
+                ...navigationState
+            }
+        });
+    }
+
+    /**
+     * Navigates to an inherited Parameter. When the Parameter Context edit form has unsaved changes the user is
+     * prompted to save or discard them first. Saving defers the navigation until the update request completes and
+     * the user opts to continue.
+     */
+    private goToInheritedParameter(
+        editDialogReference: MatDialogRef<EditParameterContext>,
+        sourceParameterContextId: string,
+        commands: string[],
+        commandBoundary: string[],
+        destination: string,
+        navigationState?: PostUpdateNavigationState
+    ): void {
+        const editParameterContextForm = editDialogReference.componentInstance.editParameterContextForm;
+
+        if (!editParameterContextForm.dirty) {
+            this.navigateToInheritedParameter(sourceParameterContextId, commands, commandBoundary, navigationState);
+            return;
+        }
+
+        const saveChangesDialogReference = this.dialog.open(SaveParameterContextChangesDialog, {
+            ...SMALL_DIALOG,
+            data: {
+                destination,
+                canSave: editParameterContextForm.valid
+            }
+        });
+
+        // Defense in depth: Save is disabled when invalid, but still guard before submit.
+        saveChangesDialogReference.componentInstance.save
+            .pipe(takeUntil(saveChangesDialogReference.afterClosed()), take(1))
+            .subscribe(() => {
+                if (!editParameterContextForm.valid) {
+                    return;
+                }
+                editDialogReference.componentInstance.submitForm(commands, commandBoundary, navigationState);
+            });
+
+        saveChangesDialogReference.componentInstance.discard
+            .pipe(takeUntil(saveChangesDialogReference.afterClosed()), take(1))
+            .subscribe(() => {
+                this.navigateToInheritedParameter(sourceParameterContextId, commands, commandBoundary, navigationState);
+            });
+    }
+}

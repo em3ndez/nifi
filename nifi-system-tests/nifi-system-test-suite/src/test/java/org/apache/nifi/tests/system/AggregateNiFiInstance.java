@@ -21,7 +21,10 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.CopyOnWriteArrayList;
+import javax.net.ssl.SSLContext;
 
 public class AggregateNiFiInstance implements NiFiInstance {
     private final List<NiFiInstance> instances;
@@ -33,10 +36,17 @@ public class AggregateNiFiInstance implements NiFiInstance {
     @Override
     public void start(boolean waitForCompletion) {
         final Map<Thread, NiFiInstance> startupThreads = new HashMap<>();
+        final List<RuntimeException> startupFailures = new CopyOnWriteArrayList<>();
 
         for (final NiFiInstance instance : instances) {
             if (instance.isAutoStart()) {
-                final Thread t = new Thread(() -> instance.start(waitForCompletion));
+                final Thread t = new Thread(() -> {
+                    try {
+                        instance.start(waitForCompletion);
+                    } catch (final RuntimeException e) {
+                        startupFailures.add(e);
+                    }
+                });
                 t.start();
                 startupThreads.put(t, instance);
             }
@@ -50,6 +60,12 @@ public class AggregateNiFiInstance implements NiFiInstance {
             } catch (final InterruptedException ie) {
                 throw new RuntimeException("Interrupted while waiting for instance " + entry.getValue() + " to finish starting");
             }
+        }
+
+        if (!startupFailures.isEmpty()) {
+            final RuntimeException startupFailure = new RuntimeException("Failed to start %d NiFi instance(s)".formatted(startupFailures.size()), startupFailures.getFirst());
+            startupFailures.stream().skip(1).forEach(startupFailure::addSuppressed);
+            throw startupFailure;
         }
     }
 
@@ -66,7 +82,7 @@ public class AggregateNiFiInstance implements NiFiInstance {
 
         // Shut down in the opposite order that they were brought up. We do this because only the first instance is going to be running ZooKeeper, and we don't
         // want to kill that before the other instances are shutdown.
-        for (int i=instances.size() - 1; i >= 0; i--) {
+        for (int i = instances.size() - 1; i >= 0; i--) {
             final NiFiInstance instance = instances.get(i);
 
             try {
@@ -80,7 +96,6 @@ public class AggregateNiFiInstance implements NiFiInstance {
             throw (RuntimeException) thrown;
         }
     }
-
 
     @Override
     public boolean isClustered() {
@@ -113,6 +128,12 @@ public class AggregateNiFiInstance implements NiFiInstance {
     }
 
     @Override
+    public Optional<SSLContext> getSslContext() {
+        final NiFiInstance firstInstance = instances.getFirst();
+        return firstInstance.getSslContext();
+    }
+
+    @Override
     public Properties getProperties() {
         return null;
     }
@@ -135,16 +156,29 @@ public class AggregateNiFiInstance implements NiFiInstance {
     }
 
     @Override
-    public void setFlowXmlGz(final File flowXmlGz) throws IOException {
-        for (final NiFiInstance instance : instances) {
-            instance.setFlowXmlGz(flowXmlGz);
-        }
-    }
-
-    @Override
     public void setProperties(final Map<String, String> properties) throws IOException {
         for (final NiFiInstance instance : instances) {
             instance.setProperties(properties);
         }
+    }
+
+    @Override
+    public void quarantineTroubleshootingInfo(final File directory, final Throwable cause) throws IOException {
+        int i = 0;
+        for (final NiFiInstance instance : instances) {
+            final File nodeDirectory = new File(directory, "node-" + (++i));
+            instance.quarantineTroubleshootingInfo(nodeDirectory, cause);
+        }
+    }
+
+    @Override
+    public boolean isAccessible() {
+        for (final NiFiInstance instance : instances) {
+            if (!instance.isAccessible()) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

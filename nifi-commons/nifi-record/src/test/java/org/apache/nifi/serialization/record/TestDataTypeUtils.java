@@ -18,18 +18,23 @@
 package org.apache.nifi.serialization.record;
 
 import org.apache.nifi.serialization.SimpleRecordSchema;
+import org.apache.nifi.serialization.record.type.ArrayDataType;
 import org.apache.nifi.serialization.record.type.ChoiceDataType;
 import org.apache.nifi.serialization.record.type.RecordDataType;
 import org.apache.nifi.serialization.record.util.DataTypeUtils;
 import org.apache.nifi.serialization.record.util.IllegalTypeConversionException;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Date;
-import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -38,81 +43,279 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.DoubleAdder;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestDataTypeUtils {
-    /**
-     * This is a unit test to verify conversion java Date objects to Timestamps. Support for this was
-     * required in order to help the MongoDB packages handle date/time logical types in the Record API.
-     */
+    private static final String ISO_8601_YEAR_MONTH_DAY = "2000-01-01";
+
+    private static final String CUSTOM_MONTH_DAY_YEAR = "01-01-2000";
+
+    private static final String CUSTOM_MONTH_DAY_YEAR_PATTERN = "MM-dd-yyyy";
+
+    private static final String DATE_FIELD = "date";
+
     @Test
-    public void testDateToTimestamp() {
-        java.util.Date date = new java.util.Date();
-        Timestamp ts = DataTypeUtils.toTimestamp(date, null, null);
-
-        assertNotNull(ts);
-        assertEquals("Times didn't match", ts.getTime(), date.getTime());
-
-        java.sql.Date sDate = new java.sql.Date(date.getTime());
-        ts = DataTypeUtils.toTimestamp(date, null, null);
-        assertNotNull(ts);
-        assertEquals("Times didn't match", ts.getTime(), sDate.getTime());
+    public void testIntDoubleWiderType() {
+        assertEquals(Optional.of(RecordFieldType.DOUBLE.getDataType()), DataTypeUtils.getWiderType(RecordFieldType.INT.getDataType(), RecordFieldType.DOUBLE.getDataType()));
+        assertEquals(Optional.of(RecordFieldType.DOUBLE.getDataType()), DataTypeUtils.getWiderType(RecordFieldType.DOUBLE.getDataType(), RecordFieldType.INT.getDataType()));
     }
 
-    /*
-     * This was a bug in NiFi 1.8 where converting from a Timestamp to a Date with the record path API
-     * would throw an exception.
-     */
     @Test
-    public void testTimestampToDate() {
-        java.util.Date date = new java.util.Date();
-        Timestamp ts = DataTypeUtils.toTimestamp(date, null, null);
-        assertNotNull(ts);
+    public void testWiderRecordWhenEqual() {
+        final Record smallRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "age", 30), "");
 
-        java.sql.Date output = DataTypeUtils.toDate(ts, null, null);
-        assertNotNull(output);
-        assertEquals("Timestamps didn't match", output.getTime(), ts.getTime());
+        final Record duplicateRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "age", 30), "");
+
+        final Optional<DataType> widerType = DataTypeUtils.getWiderType(RecordFieldType.RECORD.getRecordDataType(smallRecord.getSchema()),
+            RecordFieldType.RECORD.getRecordDataType(duplicateRecord.getSchema()));
+        assertTrue(widerType.isPresent());
+        assertEquals(((RecordDataType) widerType.get()).getChildSchema(), smallRecord.getSchema());
+    }
+
+    @Test
+    public void testWiderRecordWhenAllFieldsContainedWithin() {
+        final Record smallRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "age", 30), "");
+
+        final Record widerRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "fullName", "John Doe",
+                "age", 30), "");
+
+        final Optional<DataType> widerType = DataTypeUtils.getWiderType(RecordFieldType.RECORD.getRecordDataType(smallRecord.getSchema()),
+            RecordFieldType.RECORD.getRecordDataType(widerRecord.getSchema()));
+        assertTrue(widerType.isPresent());
+        assertEquals(((RecordDataType) widerType.get()).getChildSchema(), widerRecord.getSchema());
+    }
+
+    @Test
+    public void testWiderRecordWhenChildRecordHasAllFieldsContainedWithin() {
+        final Record jane = DataTypeUtils.toRecord(Map.of(
+                "name", "Jane"
+        ), "");
+
+        final Record smallRecord = DataTypeUtils.toRecord(Map.of(
+            "firstName", "John",
+            "lastName", "Doe",
+            "child", jane,
+            "age", 30), "");
+
+        final Record janeWithAge = DataTypeUtils.toRecord(Map.of(
+            "name", "Jane",
+            "age", 2
+        ), "");
+
+        final Record widerRecord = DataTypeUtils.toRecord(Map.of(
+            "firstName", "John",
+            "lastName", "Doe",
+            "fullName", "John Doe",
+            "child", janeWithAge,
+            "age", 30), "");
+
+        final Optional<DataType> widerType = DataTypeUtils.getWiderType(RecordFieldType.RECORD.getRecordDataType(smallRecord.getSchema()),
+            RecordFieldType.RECORD.getRecordDataType(widerRecord.getSchema()));
+        assertTrue(widerType.isPresent());
+        assertEquals(((RecordDataType) widerType.get()).getChildSchema(), widerRecord.getSchema());
+    }
+
+    @Test
+    public void testIsRecordWiderWithExtraField() {
+        final Record jane = DataTypeUtils.toRecord(Map.of(
+        ), "");
+
+        final Record smallRecord = DataTypeUtils.toRecord(Map.of(
+            "firstName", "John",
+            "lastName", "Doe",
+            "child", jane,
+            "age", 30), "");
+
+        final Record janeWithAge = DataTypeUtils.toRecord(Map.of(
+            "name", "Jane",
+            "age", 2
+        ), "");
+
+        final Record widerRecord = DataTypeUtils.toRecord(Map.of(
+            "firstName", "John",
+            "lastName", "Doe",
+            "fullName", "John Doe",
+            "child", janeWithAge,
+            "age", 30), "");
+
+        assertFalse(DataTypeUtils.isRecordWider(smallRecord.getSchema(), widerRecord.getSchema()));
+        assertTrue(DataTypeUtils.isRecordWider(widerRecord.getSchema(), smallRecord.getSchema()));
+
+        assertFalse(DataTypeUtils.isRecordWider(jane.getSchema(), janeWithAge.getSchema()));
+        assertTrue(DataTypeUtils.isRecordWider(janeWithAge.getSchema(), jane.getSchema()));
+    }
+
+    @Test
+    public void testWiderRecordDifferingFields() {
+        final Record firstRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "address", "123 Main Street",
+                "age", 30), "");
+
+        final Record secondRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "fullName", "John Doe",
+                "age", 30), "");
+
+        final Optional<DataType> widerType = DataTypeUtils.getWiderType(RecordFieldType.RECORD.getRecordDataType(firstRecord.getSchema()),
+            RecordFieldType.RECORD.getRecordDataType(secondRecord.getSchema()));
+        assertFalse(widerType.isPresent());
+    }
+
+    @Test
+    public void testWiderRecordSameFieldNamesConflictingTypes() {
+        final Record firstRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "address", "123 Main Street",
+                "age", 30), "");
+
+        final Record secondRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "address", Map.of(
+                    "street", "123 Main Street",
+                    "city", "Main City",
+                    "state", "MS",
+                    "zip", 12345
+                    ),
+                "age", 30), "");
+
+        final Optional<DataType> widerType = DataTypeUtils.getWiderType(RecordFieldType.RECORD.getRecordDataType(firstRecord.getSchema()),
+            RecordFieldType.RECORD.getRecordDataType(secondRecord.getSchema()));
+        assertFalse(widerType.isPresent());
+    }
+
+    @Test
+    public void testWiderRecordArray() {
+        final Record smallRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "age", 30), "");
+
+        final Record widerRecord = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "fullName", "John Doe",
+                "age", 30), "");
+
+        final DataType smallRecordArray = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(smallRecord.getSchema()));
+        final DataType widerRecordArray = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(widerRecord.getSchema()));
+
+        final Optional<DataType> widerType = DataTypeUtils.getWiderType(smallRecordArray, widerRecordArray);
+        assertTrue(widerType.isPresent());
+
+        final ArrayDataType widerArrayType = (ArrayDataType) widerType.get();
+        final DataType elementType = widerArrayType.getElementType();
+        assertEquals(RecordFieldType.RECORD, elementType.getFieldType());
+        assertEquals(widerRecord.getSchema(), ((RecordDataType) elementType).getChildSchema());
     }
 
     @Test
     public void testConvertRecordMapToJavaMap() {
         assertNull(DataTypeUtils.convertRecordMapToJavaMap(null, null));
         assertNull(DataTypeUtils.convertRecordMapToJavaMap(null, RecordFieldType.MAP.getDataType()));
-        Map<String,Object> resultMap = DataTypeUtils.convertRecordMapToJavaMap(new HashMap<>(), RecordFieldType.MAP.getDataType());
+        Map<String, Object> resultMap = DataTypeUtils.convertRecordMapToJavaMap(new HashMap<>(), RecordFieldType.MAP.getDataType());
         assertNotNull(resultMap);
         assertTrue(resultMap.isEmpty());
 
-        int[] intArray = {3,2,1};
+        int[] intArray = {3, 2, 1};
 
-        Map<String,Object> inputMap = new HashMap<String,Object>() {{
-            put("field1", "hello");
-            put("field2", 1);
-            put("field3", intArray);
-        }};
+        Map<String, Object> inputMap = Map.of("field1", "hello", "field2", 1, "field3", intArray);
 
         resultMap = DataTypeUtils.convertRecordMapToJavaMap(inputMap, RecordFieldType.STRING.getDataType());
         assertNotNull(resultMap);
         assertFalse(resultMap.isEmpty());
         assertEquals("hello", resultMap.get("field1"));
         assertEquals(1, resultMap.get("field2"));
-        assertTrue(resultMap.get("field3") instanceof int[]);
+        assertInstanceOf(int[].class, resultMap.get("field3"));
         assertNull(resultMap.get("field4"));
 
+    }
+
+    @Test
+    public void testUUIDStringToUUIDObject() {
+        UUID generated = UUID.randomUUID();
+        String uuidString = generated.toString();
+
+        Object result = DataTypeUtils.convertType(uuidString, RecordFieldType.UUID.getDataType(), "uuid_test");
+        assertInstanceOf(UUID.class, result);
+        assertEquals(generated, result);
+    }
+
+    @Test
+    public void testUUIDObjectToUUIDString() {
+        UUID generated = UUID.randomUUID();
+        String uuid = generated.toString();
+
+        Object result = DataTypeUtils.convertType(generated, RecordFieldType.STRING.getDataType(), "uuid_test");
+        assertInstanceOf(String.class, result);
+        assertEquals(uuid, result);
+    }
+
+    @Test
+    public void testUUIDToByteArray() {
+        UUID generated = UUID.randomUUID();
+        ByteBuffer buffer = ByteBuffer.allocate(16);
+        buffer.putLong(generated.getMostSignificantBits());
+        buffer.putLong(generated.getLeastSignificantBits());
+        byte[] expected = buffer.array();
+
+        Object result = DataTypeUtils.convertType(expected, RecordFieldType.UUID.getDataType(), "uuid_test");
+        assertInstanceOf(UUID.class, result);
+        assertEquals(generated, result);
+    }
+
+    @Test
+    public void testByteArrayToUUID() {
+        UUID generated = UUID.randomUUID();
+        ByteBuffer buffer = ByteBuffer.allocate(16);
+        buffer.putLong(generated.getMostSignificantBits());
+        buffer.putLong(generated.getLeastSignificantBits());
+        byte[] expected = buffer.array();
+
+        Object result = DataTypeUtils.convertType(expected, RecordFieldType.ARRAY.getDataType(), "uuid_test");
+        assertInstanceOf(Byte[].class, result);
+        assertEquals(16, ((Byte[]) result).length);
+        Byte[] bytes = (Byte[]) result;
+        for (int x = 0; x < bytes.length; x++) {
+            byte current = bytes[x];
+            assertEquals(expected[x], current);
+        }
     }
 
     @Test
@@ -122,8 +325,8 @@ public class TestDataTypeUtils {
         String[] stringArray = {"Hello", "World!"};
         Object[] resultArray = DataTypeUtils.convertRecordArrayToJavaArray(stringArray, RecordFieldType.STRING.getDataType());
         assertNotNull(resultArray);
-        for(Object o : resultArray) {
-            assertTrue(o instanceof String);
+        for (Object o : resultArray) {
+            assertInstanceOf(String.class, o);
         }
     }
 
@@ -148,11 +351,35 @@ public class TestDataTypeUtils {
         Object[] recordArray = {inputRecord1, inputRecord2};
         Object resultObj = DataTypeUtils.convertRecordFieldtoObject(recordArray, RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(schema)));
         assertNotNull(resultObj);
-        assertTrue(resultObj instanceof Object[]);
+        assertInstanceOf(Object[].class, resultObj);
         Object[] resultArray = (Object[]) resultObj;
-        for(Object o : resultArray) {
-            assertTrue(o instanceof Map);
+        for (Object o : resultArray) {
+            assertInstanceOf(Map.class, o);
         }
+    }
+
+    @Test
+    void testConvertRecordFieldToObjectWithNestedRecord() {
+        final Record record = DataTypeUtils.toRecord(Map.of(
+                "firstName", "John",
+                "age", 30,
+                "addresses", new Object[] {"some string", DataTypeUtils.toRecord(Map.of("address_1", "123 Fake Street"), "addresses")}
+        ), "");
+
+        final Object obj = DataTypeUtils.convertRecordFieldtoObject(record, RecordFieldType.RECORD.getDataType());
+        assertInstanceOf(Map.class, obj);
+        final Map<String, Object> map = (Map<String, Object>) obj;
+        assertEquals("John", map.get("firstName"));
+        assertEquals(30, map.get("age"));
+
+        assertInstanceOf(Object[].class, map.get("addresses"));
+        final Object[] objArray = (Object[]) map.get("addresses");
+        assertEquals(2, objArray.length);
+        assertEquals("some string", objArray[0]);
+
+        assertInstanceOf(Map.class, objArray[1]);
+        final Map<String, Object> addressMap = (Map<String, Object>) objArray[1];
+        assertEquals("123 Fake Street", addressMap.get("address_1"));
     }
 
     @Test
@@ -166,12 +393,18 @@ public class TestDataTypeUtils {
         fields.add(new RecordField("noDefault", RecordFieldType.CHOICE.getChoiceDataType(RecordFieldType.STRING.getDataType())));
         fields.add(new RecordField("intField", RecordFieldType.INT.getDataType()));
         fields.add(new RecordField("intArray", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.INT.getDataType())));
+        fields.add(new RecordField("objArray", RecordFieldType.ARRAY.getArrayDataType(
+                RecordFieldType.CHOICE.getChoiceDataType(RecordFieldType.STRING.getDataType(), RecordFieldType.INT.getDataType())
+        )));
+        fields.add(new RecordField("choiceArray", RecordFieldType.ARRAY.getArrayDataType(
+                RecordFieldType.CHOICE.getChoiceDataType(RecordFieldType.STRING.getDataType(), RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType()))
+        )));
 
         // Map of Records with Arrays
-        List<RecordField> nestedRecordFields = new ArrayList<>();
+        final List<RecordField> nestedRecordFields = new ArrayList<>();
         nestedRecordFields.add(new RecordField("a", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.INT.getDataType())));
         nestedRecordFields.add(new RecordField("b", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType())));
-        RecordSchema nestedRecordSchema = new SimpleRecordSchema(nestedRecordFields);
+        final RecordSchema nestedRecordSchema = new SimpleRecordSchema(nestedRecordFields);
 
         fields.add(new RecordField("complex", RecordFieldType.MAP.getMapDataType(RecordFieldType.RECORD.getRecordDataType(nestedRecordSchema))));
 
@@ -179,16 +412,19 @@ public class TestDataTypeUtils {
         final Map<String, Object> values = new HashMap<>();
         values.put("noDefault", "world");
         values.put("intField", 5);
-        values.put("intArray", new Integer[] {3,2,1});
+        values.put("intArray", new Integer[] {3, 2, 1});
+        values.put("objArray", new Object[] {3, "2", "abc", 1});
+        values.put("noChoiceArray", new Object[] {"foo", "BAR"});
+        values.put("choiceArray", new Object[] {"foo", new Object[]{"bar", "baz"}});
         final Map<String, Object> complexValues = new HashMap<>();
 
         final Map<String, Object> complexValueRecord1 = new HashMap<>();
-        complexValueRecord1.put("a",new Integer[] {3,2,1});
-        complexValueRecord1.put("b",new Integer[] {5,4,3});
+        complexValueRecord1.put("a", new Integer[] {3, 2, 1});
+        complexValueRecord1.put("b", new Integer[] {5, 4, 3});
 
         final Map<String, Object> complexValueRecord2 = new HashMap<>();
-        complexValueRecord2.put("a",new String[] {"hello","world!"});
-        complexValueRecord2.put("b",new String[] {"5","4","3"});
+        complexValueRecord2.put("a", new String[] {"hello", "world!"});
+        complexValueRecord2.put("b", new String[] {"5", "4", "3"});
 
         complexValues.put("complex1", DataTypeUtils.toRecord(complexValueRecord1, nestedRecordSchema, "complex1", StandardCharsets.UTF_8));
         complexValues.put("complex2", DataTypeUtils.toRecord(complexValueRecord2, nestedRecordSchema, "complex2", StandardCharsets.UTF_8));
@@ -197,39 +433,54 @@ public class TestDataTypeUtils {
         final Record inputRecord = new MapRecord(schema, values);
 
         Object o = DataTypeUtils.convertRecordFieldtoObject(inputRecord, RecordFieldType.RECORD.getRecordDataType(schema));
-        assertTrue(o instanceof Map);
-        Map<String,Object> outputMap = (Map<String,Object>) o;
+        assertInstanceOf(Map.class, o);
+        final Map<String, Object> outputMap = (Map<String, Object>) o;
         assertEquals("hello", outputMap.get("defaultOfHello"));
         assertEquals("world", outputMap.get("noDefault"));
         o = outputMap.get("intField");
-        assertEquals(5,o);
+        assertEquals(5, o);
         o = outputMap.get("intArray");
-        assertTrue(o instanceof Integer[]);
-        Integer[] intArray = (Integer[])o;
+        assertInstanceOf(Integer[].class, o);
+        final Integer[] intArray = (Integer[]) o;
         assertEquals(3, intArray.length);
-        assertEquals((Integer)3, intArray[0]);
+        assertEquals((Integer) 3, intArray[0]);
+        o = outputMap.get("objArray");
+        assertInstanceOf(Object[].class, o);
+        final Object[] objArray = (Object[]) o;
+        assertEquals(4, objArray.length);
+        assertEquals(3, objArray[0]);
+        assertEquals("2", objArray[1]);
+        o = outputMap.get("choiceArray");
+        assertInstanceOf(Object[].class, o);
+        final Object[] choiceArray = (Object[]) o;
+        assertEquals(2, choiceArray.length);
+        assertEquals("foo", choiceArray[0]);
+        assertInstanceOf(Object[].class, choiceArray[1]);
+        final Object[] strArray = (Object[]) choiceArray[1];
+        assertEquals(2, strArray.length);
+        assertEquals("bar", strArray[0]);
+        assertEquals("baz", strArray[1]);
         o = outputMap.get("complex");
-        assertTrue(o instanceof Map);
-        Map<String,Object> nestedOutputMap = (Map<String,Object>)o;
+        assertInstanceOf(Map.class, o);
+        final Map<String, Object> nestedOutputMap = (Map<String, Object>) o;
         o = nestedOutputMap.get("complex1");
-        assertTrue(o instanceof Map);
-        Map<String,Object> complex1 = (Map<String,Object>)o;
+        assertInstanceOf(Map.class, o);
+        final Map<String, Object> complex1 = (Map<String, Object>) o;
         o = complex1.get("a");
-        assertTrue(o instanceof Integer[]);
-        assertEquals((Integer)2, ((Integer[])o)[1]);
+        assertInstanceOf(Integer[].class, o);
+        assertEquals((Integer) 2, ((Integer[]) o)[1]);
         o = complex1.get("b");
-        assertTrue(o instanceof Integer[]);
-        assertEquals((Integer)3, ((Integer[])o)[2]);
+        assertInstanceOf(Integer[].class, o);
+        assertEquals((Integer) 3, ((Integer[]) o)[2]);
         o = nestedOutputMap.get("complex2");
-        assertTrue(o instanceof Map);
-        Map<String,Object> complex2 = (Map<String,Object>)o;
+        assertInstanceOf(Map.class, o);
+        final Map<String, Object> complex2 = (Map<String, Object>) o;
         o = complex2.get("a");
-        assertTrue(o instanceof String[]);
-        assertEquals("hello", ((String[])o)[0]);
+        assertInstanceOf(String[].class, o);
+        assertEquals("hello", ((String[]) o)[0]);
         o = complex2.get("b");
-        assertTrue(o instanceof String[]);
-        assertEquals("4", ((String[])o)[1]);
-
+        assertInstanceOf(String[].class, o);
+        assertEquals("4", ((String[]) o)[1]);
     }
 
     @Test
@@ -246,31 +497,31 @@ public class TestDataTypeUtils {
 
     @Test
     public void testStringToBytes() {
-        Object bytes = DataTypeUtils.convertType("Hello", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType()),null, StandardCharsets.UTF_8);
-        assertTrue(bytes instanceof Byte[]);
+        Object bytes = DataTypeUtils.convertType("Hello", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType()), null, StandardCharsets.UTF_8);
+        assertInstanceOf(Byte[].class, bytes);
         assertNotNull(bytes);
         Byte[] b = (Byte[]) bytes;
-        assertEquals("Conversion from String to byte[] failed", (long) 72, (long) b[0] );  // H
-        assertEquals("Conversion from String to byte[] failed", (long) 101, (long) b[1] ); // e
-        assertEquals("Conversion from String to byte[] failed", (long) 108, (long) b[2] ); // l
-        assertEquals("Conversion from String to byte[] failed", (long) 108, (long) b[3] ); // l
-        assertEquals("Conversion from String to byte[] failed", (long) 111, (long) b[4] ); // o
+        assertEquals(72, (long) b[0], "Conversion from String to byte[] failed");  // H
+        assertEquals(101, (long) b[1], "Conversion from String to byte[] failed"); // e
+        assertEquals(108, (long) b[2], "Conversion from String to byte[] failed"); // l
+        assertEquals(108, (long) b[3], "Conversion from String to byte[] failed"); // l
+        assertEquals(111, (long) b[4], "Conversion from String to byte[] failed"); // o
     }
 
     @Test
     public void testBytesToString() {
-        Object s = DataTypeUtils.convertType("Hello".getBytes(StandardCharsets.UTF_16), RecordFieldType.STRING.getDataType(),null, StandardCharsets.UTF_16);
+        Object s = DataTypeUtils.convertType("Hello".getBytes(StandardCharsets.UTF_16), RecordFieldType.STRING.getDataType(), null, StandardCharsets.UTF_16);
         assertNotNull(s);
-        assertTrue(s instanceof String);
-        assertEquals("Conversion from byte[] to String failed", "Hello", s);
+        assertInstanceOf(String.class, s);
+        assertEquals("Hello", s, "Conversion from byte[] to String failed");
     }
 
     @Test
     public void testBytesToBytes() {
-        Object b = DataTypeUtils.convertType("Hello".getBytes(StandardCharsets.UTF_16), RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType()),null, StandardCharsets.UTF_16);
+        Object b = DataTypeUtils.convertType("Hello".getBytes(StandardCharsets.UTF_16), RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType()), null, StandardCharsets.UTF_16);
         assertNotNull(b);
-        assertTrue(b instanceof Byte[]);
-        assertEquals("Conversion from byte[] to String failed at char 0", (Object) "Hello".getBytes(StandardCharsets.UTF_16)[0], ((Byte[]) b)[0]);
+        assertInstanceOf(Byte[].class, b);
+        assertEquals((Object) "Hello".getBytes(StandardCharsets.UTF_16)[0], ((Byte[]) b)[0], "Conversion from byte[] to String failed at char 0");
     }
 
     @Test
@@ -298,19 +549,22 @@ public class TestDataTypeUtils {
         assertNull(DataTypeUtils.convertType(null, RecordFieldType.DECIMAL.getDecimalDataType(30, 10), null, StandardCharsets.UTF_8));
     }
 
-    @Test(expected = IllegalTypeConversionException.class)
+    @Test
     public void testConvertToBigDecimalWhenInputStringIsInvalid() {
-        DataTypeUtils.convertType("test", RecordFieldType.DECIMAL.getDecimalDataType(30, 10), null, StandardCharsets.UTF_8);
+        assertThrows(IllegalTypeConversionException.class, () -> DataTypeUtils.convertType("test", RecordFieldType.DECIMAL.getDecimalDataType(30, 10),
+                null, StandardCharsets.UTF_8));
     }
 
-    @Test(expected = IllegalTypeConversionException.class)
+    @Test
     public void testConvertToBigDecimalWhenUnsupportedType() {
-        DataTypeUtils.convertType(new ArrayList<Double>(), RecordFieldType.DECIMAL.getDecimalDataType(30, 10), null, StandardCharsets.UTF_8);
+        assertThrows(IllegalTypeConversionException.class, () -> DataTypeUtils.convertType(new ArrayList<>(), RecordFieldType.DECIMAL.getDecimalDataType(30, 10),
+                null, StandardCharsets.UTF_8));
     }
 
-    @Test(expected = IllegalTypeConversionException.class)
+    @Test
     public void testConvertToBigDecimalWhenUnsupportedNumberType() {
-        DataTypeUtils.convertType(new DoubleAdder(), RecordFieldType.DECIMAL.getDecimalDataType(30, 10), null, StandardCharsets.UTF_8);
+        assertThrows(IllegalTypeConversionException.class, () -> DataTypeUtils.convertType(new DoubleAdder(), RecordFieldType.DECIMAL.getDecimalDataType(30, 10),
+                null, StandardCharsets.UTF_8));
     }
 
     @Test
@@ -337,29 +591,48 @@ public class TestDataTypeUtils {
         assertEquals(RecordFieldType.DECIMAL.getDecimalDataType(3, 1), DataTypeUtils.inferDataType(BigDecimal.valueOf(12.3D), null));
     }
 
-    @Test
-    public void testIsBigDecimalTypeCompatible() {
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible((byte) 13));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible((short) 13));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible(12));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible(12L));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible(BigInteger.valueOf(12L)));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible(12.123F));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible(12.123D));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible(BigDecimal.valueOf(12.123D)));
-        assertTrue(DataTypeUtils.isDecimalTypeCompatible("123"));
+    @ParameterizedTest
+    @MethodSource("decimalTypeCompatibleData")
+    public void testIsBigDecimalTypeCompatible(Object value, boolean compatible) {
+        if (compatible) {
+            assertTrue(DataTypeUtils.isDecimalTypeCompatible(value));
+        } else {
+            assertFalse(DataTypeUtils.isDecimalTypeCompatible(value));
+        }
+    }
 
-        assertFalse(DataTypeUtils.isDecimalTypeCompatible(null));
-        assertFalse(DataTypeUtils.isDecimalTypeCompatible("test"));
-        assertFalse(DataTypeUtils.isDecimalTypeCompatible(new ArrayList<>()));
-        // Decimal handling does not support NaN and Infinity as the underlying BigDecimal is unable to parse
-        assertFalse(DataTypeUtils.isDecimalTypeCompatible("NaN"));
-        assertFalse(DataTypeUtils.isDecimalTypeCompatible("Infinity"));
+    private static Stream<Arguments> decimalTypeCompatibleData() {
+        return Stream.of(
+                Arguments.argumentSet("byte", (byte) 13, true),
+                Arguments.argumentSet("short", (short) 13, true),
+                Arguments.argumentSet("int", 12, true),
+                Arguments.argumentSet("long", 12L, true),
+                Arguments.argumentSet("BigInteger", BigInteger.valueOf(12L), true),
+                Arguments.argumentSet("float", 12.123F, true),
+                Arguments.argumentSet("double", 12.123D, true),
+                Arguments.argumentSet("BigDecimal", BigDecimal.valueOf(12.123D), true),
+                Arguments.argumentSet("integer String", "123", true),
+                Arguments.argumentSet("double as byte array", "12.00".getBytes(StandardCharsets.UTF_8), true),
+                Arguments.argumentSet("null", null, false),
+                Arguments.argumentSet("non number String", "test", false),
+                Arguments.argumentSet("ArrayList", new ArrayList<>(), false),
+                // Decimal handling does not support NaN and Infinity as the underlying BigDecimal is unable to parse
+                Arguments.argumentSet("Nan", "NaN", false),
+                Arguments.argumentSet("Infinity", "Infinity", false)
+        );
     }
 
     @Test
     public void testGetSQLTypeValueWithBigDecimal() {
         assertEquals(Types.NUMERIC, DataTypeUtils.getSQLTypeValue(RecordFieldType.DECIMAL.getDecimalDataType(30, 10)));
+    }
+
+    @Test
+    public void testGetDataTypeFromSQLTypeValue() {
+        assertEquals(RecordFieldType.STRING.getDataType(), DataTypeUtils.getDataTypeFromSQLTypeValue(Types.CLOB));
+        assertEquals(RecordFieldType.INT.getDataType(), DataTypeUtils.getDataTypeFromSQLTypeValue(Types.BIT));
+        assertEquals(RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType()), DataTypeUtils.getDataTypeFromSQLTypeValue(Types.BLOB));
+        assertEquals(RecordFieldType.STRING.getDataType(), DataTypeUtils.getDataTypeFromSQLTypeValue(Types.CHAR));
     }
 
     @Test
@@ -390,16 +663,16 @@ public class TestDataTypeUtils {
             for (final String decimal : decimals) {
                 for (final String exp : exponents) {
                     String toTest = prefix + "100" + decimal + exp;
-                    assertTrue(toTest + " not valid float", DataTypeUtils.isFloatTypeCompatible(toTest));
-                    assertTrue(toTest + " not valid double", DataTypeUtils.isDoubleTypeCompatible(toTest));
+                    assertTrue(DataTypeUtils.isFloatTypeCompatible(toTest), toTest + " not valid float");
+                    assertTrue(DataTypeUtils.isDoubleTypeCompatible(toTest), toTest + " not valid double");
 
                     Double.parseDouble(toTest); // ensure we can actually parse it
                     Float.parseFloat(toTest);
 
                     if (decimal.length() > 1) {
                         toTest = prefix + decimal + exp;
-                        assertTrue(toTest + " not valid float", DataTypeUtils.isFloatTypeCompatible(toTest));
-                        assertTrue(toTest + " not valid double", DataTypeUtils.isDoubleTypeCompatible(toTest));
+                        assertTrue(DataTypeUtils.isFloatTypeCompatible(toTest), toTest + " not valid float");
+                        assertTrue(DataTypeUtils.isDoubleTypeCompatible(toTest), toTest + " not valid double");
                         Double.parseDouble(toTest); // ensure we can actually parse it
                         Float.parseFloat(toTest);
                     }
@@ -410,7 +683,7 @@ public class TestDataTypeUtils {
 
     @Test
     public void testIsCompatibleDataTypeMap() {
-        Map<String,Object> testMap = new HashMap<>();
+        Map<String, Object> testMap = new HashMap<>();
         testMap.put("Hello", "World");
         assertTrue(DataTypeUtils.isCompatibleDataType(testMap, RecordFieldType.RECORD.getDataType()));
     }
@@ -432,7 +705,7 @@ public class TestDataTypeUtils {
     @Test
     public void testIsCompatibleDataTypeInteger() {
         final DataType dataType = RecordFieldType.INT.getDataType();
-        assertTrue(DataTypeUtils.isCompatibleDataType(new Integer("1234567"), dataType));
+        assertTrue(DataTypeUtils.isCompatibleDataType(Integer.valueOf("1234567"), dataType));
         assertTrue(DataTypeUtils.isCompatibleDataType("1234567", dataType));
         assertFalse(DataTypeUtils.isCompatibleDataType(new BigInteger("12345678901234567890"), dataType));
         assertFalse(DataTypeUtils.isCompatibleDataType(1234567890123456789L, dataType));
@@ -458,8 +731,8 @@ public class TestDataTypeUtils {
         final Function<Object, BigInteger> toBigInteger = v -> (BigInteger) DataTypeUtils.convertType(v, RecordFieldType.BIGINT.getDataType(), "field");
         assertEquals(new BigInteger("12345678901234567890"), toBigInteger.apply(new BigInteger("12345678901234567890")));
         assertEquals(new BigInteger("1234567890123456789"), toBigInteger.apply(1234567890123456789L));
-        assertEquals(new BigInteger("1"), toBigInteger.apply(1));
-        assertEquals(new BigInteger("1"), toBigInteger.apply((short) 1));
+        assertEquals(BigInteger.ONE, toBigInteger.apply(1));
+        assertEquals(BigInteger.ONE, toBigInteger.apply((short) 1));
         // Decimals are truncated.
         assertEquals(new BigInteger("3"), toBigInteger.apply(3.4f));
         assertEquals(new BigInteger("3"), toBigInteger.apply(3.9f));
@@ -498,7 +771,7 @@ public class TestDataTypeUtils {
                     @Override
                     public String getFormat() {
                         exceptionThrown.set(true);
-                        throw new RuntimeException("maching error");
+                        throw new RuntimeException("matching error");
                     }
                 };
             } else if (type.equals(matchingType)) {
@@ -509,7 +782,7 @@ public class TestDataTypeUtils {
         };
 
         Optional<String> actual = DataTypeUtils.findMostSuitableTypeByStringValue(valueAsString, types, dataTypeMapper);
-        assertTrue("Exception not thrown during test as intended.", exceptionThrown.get());
+        assertTrue(exceptionThrown.get(), "Exception not thrown during test as intended.");
         assertEquals(expected, actual);
     }
 
@@ -565,7 +838,7 @@ public class TestDataTypeUtils {
         testChooseDataTypeAlsoReverseTypes(value, dataTypes, expected);
     }
 
-    private <E> void testChooseDataTypeAlsoReverseTypes(Object value, List<DataType> dataTypes, DataType expected) {
+    private void testChooseDataTypeAlsoReverseTypes(Object value, List<DataType> dataTypes, DataType expected) {
         testChooseDataType(dataTypes, value, expected);
         Collections.reverse(dataTypes);
         testChooseDataType(dataTypes, value, expected);
@@ -584,11 +857,11 @@ public class TestDataTypeUtils {
 
     @Test
     public void testInferTypeWithMapStringKeys() {
-        Map<String, String> map = new HashMap<>();
+        Map<String, String> map = new LinkedHashMap<>();
         map.put("a", "Hello");
         map.put("b", "World");
 
-        RecordDataType expected = (RecordDataType)RecordFieldType.RECORD.getRecordDataType(new SimpleRecordSchema(Arrays.asList(
+        RecordDataType expected = (RecordDataType) RecordFieldType.RECORD.getRecordDataType(new SimpleRecordSchema(Arrays.asList(
                 new RecordField("a", RecordFieldType.STRING.getDataType()),
                 new RecordField("b", RecordFieldType.STRING.getDataType())
         )));
@@ -599,11 +872,11 @@ public class TestDataTypeUtils {
 
     @Test
     public void testInferTypeWithMapNonStringKeys() {
-        Map<Integer, String> map = new HashMap<>();
+        Map<Integer, String> map = new LinkedHashMap<>();
         map.put(1, "Hello");
         map.put(2, "World");
 
-        RecordDataType expected = (RecordDataType)RecordFieldType.RECORD.getRecordDataType(new SimpleRecordSchema(Arrays.asList(
+        RecordDataType expected = (RecordDataType) RecordFieldType.RECORD.getRecordDataType(new SimpleRecordSchema(Arrays.asList(
                 new RecordField("1", RecordFieldType.STRING.getDataType()),
                 new RecordField("2", RecordFieldType.STRING.getDataType())
         )));
@@ -619,12 +892,12 @@ public class TestDataTypeUtils {
 
     @Test
     public void testFindMostSuitableTypeWithByte() {
-        testFindMostSuitableType(Byte.valueOf((byte) 123), RecordFieldType.BYTE.getDataType());
+        testFindMostSuitableType((byte) 123, RecordFieldType.BYTE.getDataType());
     }
 
     @Test
     public void testFindMostSuitableTypeWithShort() {
-        testFindMostSuitableType(Short.valueOf((short) 123), RecordFieldType.SHORT.getDataType());
+        testFindMostSuitableType((short) 123, RecordFieldType.SHORT.getDataType());
     }
 
     @Test
@@ -693,7 +966,7 @@ public class TestDataTypeUtils {
     }
 
     private void testFindMostSuitableType(Object value, DataType expected, DataType... filtered) {
-        List<DataType> filteredOutDataTypes = Arrays.stream(filtered).collect(Collectors.toList());
+        List<DataType> filteredOutDataTypes = Arrays.stream(filtered).toList();
 
         // GIVEN
         List<DataType> unexpectedTypes = Arrays.stream(RecordFieldType.values())
@@ -710,7 +983,7 @@ public class TestDataTypeUtils {
                 })
                 .filter(dataType -> !dataType.equals(expected))
                 .filter(dataType -> !filteredOutDataTypes.contains(dataType))
-                .collect(Collectors.toList());
+                .toList();
 
         IntStream.rangeClosed(0, unexpectedTypes.size()).forEach(insertIndex -> {
             List<DataType> allTypes = new LinkedList<>(unexpectedTypes);
@@ -730,11 +1003,11 @@ public class TestDataTypeUtils {
         final BigDecimal indirectResult = whenExpectingValidConversion(expectedValue, incomingValue, RecordFieldType.DECIMAL.getDecimalDataType(30, 10));
         // In some cases, direct equality check comes with false negative as the changing representation brings in
         // insignificant changes what might break the comparison. For example 12F will be represented as "12.0"
-        assertEquals(failureMessage + "indirect", 0, expectedValue.compareTo(indirectResult));
+        assertEquals(0, expectedValue.compareTo(indirectResult), failureMessage + "indirect");
 
         // Checking direct conversion
         final BigDecimal directResult = DataTypeUtils.toBigDecimal(incomingValue, "field");
-        assertEquals(failureMessage + "direct", 0, expectedValue.compareTo(directResult));
+        assertEquals(0, expectedValue.compareTo(directResult), failureMessage + "direct");
 
     }
 
@@ -840,47 +1113,46 @@ public class TestDataTypeUtils {
         assertTrue(DataTypeUtils.isDoubleWithinFloatInterval((double) -1 * Float.MAX_VALUE));
         assertTrue(DataTypeUtils.isDoubleWithinFloatInterval((double) -1 * Float.MIN_VALUE));
 
-
         assertFalse(DataTypeUtils.isDoubleWithinFloatInterval("test"));
         assertFalse(DataTypeUtils.isDoubleWithinFloatInterval(9));
         assertFalse(DataTypeUtils.isDoubleWithinFloatInterval(9.0F));
         assertFalse(DataTypeUtils.isDoubleWithinFloatInterval(Double.MAX_VALUE));
-        assertFalse(DataTypeUtils.isDoubleWithinFloatInterval((double) -1 * Double.MAX_VALUE));
+        assertFalse(DataTypeUtils.isDoubleWithinFloatInterval(-1 * Double.MAX_VALUE));
     }
 
     @Test
     public void testIsFittingNumberType() {
         // Byte
         assertTrue(DataTypeUtils.isFittingNumberType((byte) 9, RecordFieldType.BYTE));
-        assertFalse(DataTypeUtils.isFittingNumberType((short)9, RecordFieldType.BYTE));
+        assertFalse(DataTypeUtils.isFittingNumberType((short) 9, RecordFieldType.BYTE));
         assertFalse(DataTypeUtils.isFittingNumberType(9, RecordFieldType.BYTE));
         assertFalse(DataTypeUtils.isFittingNumberType(9L, RecordFieldType.BYTE));
         assertFalse(DataTypeUtils.isFittingNumberType(BigInteger.valueOf(9L), RecordFieldType.BYTE));
 
         // Short
         assertTrue(DataTypeUtils.isFittingNumberType((byte) 9, RecordFieldType.SHORT));
-        assertTrue(DataTypeUtils.isFittingNumberType((short)9, RecordFieldType.SHORT));
+        assertTrue(DataTypeUtils.isFittingNumberType((short) 9, RecordFieldType.SHORT));
         assertFalse(DataTypeUtils.isFittingNumberType(9, RecordFieldType.SHORT));
         assertFalse(DataTypeUtils.isFittingNumberType(9L, RecordFieldType.SHORT));
         assertFalse(DataTypeUtils.isFittingNumberType(BigInteger.valueOf(9L), RecordFieldType.SHORT));
 
         // Integer
         assertTrue(DataTypeUtils.isFittingNumberType((byte) 9, RecordFieldType.INT));
-        assertTrue(DataTypeUtils.isFittingNumberType((short)9, RecordFieldType.INT));
+        assertTrue(DataTypeUtils.isFittingNumberType((short) 9, RecordFieldType.INT));
         assertTrue(DataTypeUtils.isFittingNumberType(9, RecordFieldType.INT));
         assertFalse(DataTypeUtils.isFittingNumberType(9L, RecordFieldType.INT));
         assertFalse(DataTypeUtils.isFittingNumberType(BigInteger.valueOf(9L), RecordFieldType.INT));
 
         // Long
         assertTrue(DataTypeUtils.isFittingNumberType((byte) 9, RecordFieldType.LONG));
-        assertTrue(DataTypeUtils.isFittingNumberType((short)9, RecordFieldType.LONG));
+        assertTrue(DataTypeUtils.isFittingNumberType((short) 9, RecordFieldType.LONG));
         assertTrue(DataTypeUtils.isFittingNumberType(9, RecordFieldType.LONG));
         assertTrue(DataTypeUtils.isFittingNumberType(9L, RecordFieldType.LONG));
         assertFalse(DataTypeUtils.isFittingNumberType(BigInteger.valueOf(9L), RecordFieldType.LONG));
 
         // Bigint
         assertTrue(DataTypeUtils.isFittingNumberType((byte) 9, RecordFieldType.BIGINT));
-        assertTrue(DataTypeUtils.isFittingNumberType((short)9, RecordFieldType.BIGINT));
+        assertTrue(DataTypeUtils.isFittingNumberType((short) 9, RecordFieldType.BIGINT));
         assertTrue(DataTypeUtils.isFittingNumberType(9, RecordFieldType.BIGINT));
         assertTrue(DataTypeUtils.isFittingNumberType(9L, RecordFieldType.BIGINT));
         assertTrue(DataTypeUtils.isFittingNumberType(BigInteger.valueOf(9L), RecordFieldType.BIGINT));
@@ -902,7 +1174,7 @@ public class TestDataTypeUtils {
         int month = 1;
         int dayOfMonth = 25;
 
-        Date dateLocalTZ = new Date(ZonedDateTime.of(LocalDateTime.of(year, month, dayOfMonth,0,0,0), ZoneId.systemDefault()).toInstant().toEpochMilli());
+        Date dateLocalTZ = new Date(ZonedDateTime.of(LocalDateTime.of(year, month, dayOfMonth, 0, 0, 0), ZoneId.systemDefault()).toInstant().toEpochMilli());
 
         Date dateUTC = DataTypeUtils.convertDateToUTC(dateLocalTZ);
 
@@ -916,23 +1188,555 @@ public class TestDataTypeUtils {
         assertEquals(0, zdt.getNano());
     }
 
+    /**
+     * Convert String to java.sql.Date using implicit default DateFormat with GMT Time Zone
+     *
+     * Running this method on a system with a time zone other than GMT should return the same year-month-day
+     */
     @Test
-    public void testConvertDateToLocalTZ() {
-        int year = 2021;
-        int month = 1;
-        int dayOfMonth = 25;
+    public void testConvertTypeStringToDateDefaultTimeZoneFormat() {
+        final Object converted = DataTypeUtils.convertType(ISO_8601_YEAR_MONTH_DAY, RecordFieldType.DATE.getDataType(), DATE_FIELD);
+        assertInstanceOf(Date.class, converted, "Converted value is not java.sql.Date");
+        assertEquals(ISO_8601_YEAR_MONTH_DAY, converted.toString());
+    }
 
-        Date dateUTC = new Date(ZonedDateTime.of(LocalDateTime.of(year, month, dayOfMonth,0,0,0), ZoneId.of("UTC")).toInstant().toEpochMilli());
+    /**
+     * Convert String to java.sql.Date using custom pattern DateFormat with system default Time Zone
+     */
+    @Test
+    public void testConvertTypeStringToDateConfiguredSystemDefaultTimeZoneFormat() {
+        final Object converted = DataTypeUtils.convertType(
+                CUSTOM_MONTH_DAY_YEAR, RecordFieldType.DATE.getDataType(), Optional.of(CUSTOM_MONTH_DAY_YEAR_PATTERN), Optional.empty(), Optional.empty(), "date"
+        );
+        assertInstanceOf(Date.class, converted, "Converted value is not java.sql.Date");
+        assertEquals(ISO_8601_YEAR_MONTH_DAY, converted.toString());
+    }
 
-        Date dateLocalTZ = DataTypeUtils.convertDateToLocalTZ(dateUTC);
+    @Test
+    void testNumberParsingWhereStringBlank() {
+        final String fieldName = "someField";
+        assertNull(DataTypeUtils.toBigDecimal("", fieldName));
+        assertNull(DataTypeUtils.toBigInt("", fieldName));
+        assertNull(DataTypeUtils.toDouble("", fieldName));
+        assertNull(DataTypeUtils.toFloat("", fieldName));
+        assertNull(DataTypeUtils.toInteger("", fieldName));
+        assertNull(DataTypeUtils.toLong("", fieldName));
+        assertNull(DataTypeUtils.toShort("", fieldName));
+    }
 
-        ZonedDateTime zdt = ZonedDateTime.ofInstant(Instant.ofEpochMilli(dateLocalTZ.getTime()), ZoneId.systemDefault());
-        assertEquals(year, zdt.getYear());
-        assertEquals(month, zdt.getMonthValue());
-        assertEquals(dayOfMonth, zdt.getDayOfMonth());
-        assertEquals(0, zdt.getHour());
-        assertEquals(0, zdt.getMinute());
-        assertEquals(0, zdt.getSecond());
-        assertEquals(0, zdt.getNano());
+    @Test
+    void testUuidCompatibilityAcrossSupportedRepresentations() {
+        final UUID uuid = UUID.randomUUID();
+        assertTrue(DataTypeUtils.isUUIDTypeCompatible(uuid));
+        assertTrue(DataTypeUtils.isUUIDTypeCompatible(uuid.toString()));
+        assertTrue(DataTypeUtils.isUUIDTypeCompatible(" " + uuid + " "));
+
+        final byte[] uuidBytes = new byte[16];
+        Arrays.fill(uuidBytes, (byte) 1);
+        assertTrue(DataTypeUtils.isUUIDTypeCompatible(uuidBytes));
+
+        final Byte[] boxedBytes = new Byte[16];
+        Arrays.fill(boxedBytes, (byte) 2);
+        assertTrue(DataTypeUtils.isUUIDTypeCompatible(boxedBytes));
+
+        assertFalse(DataTypeUtils.isUUIDTypeCompatible(null));
+        assertFalse(DataTypeUtils.isUUIDTypeCompatible(new byte[15]));
+        assertFalse(DataTypeUtils.isUUIDTypeCompatible(new Byte[15]));
+        assertFalse(DataTypeUtils.isUUIDTypeCompatible("not-a-uuid"));
+        assertFalse(DataTypeUtils.isUUIDTypeCompatible(""));
+    }
+
+    @Test
+    void testIsArrayTypeCompatibleWithNullElements() {
+        final DataType intType = RecordFieldType.INT.getDataType();
+        final RecordSchema recordSchema = new SimpleRecordSchema(List.of(
+                new RecordField("db", RecordFieldType.RECORD.getRecordDataType(
+                        new SimpleRecordSchema(List.of(new RecordField("host", RecordFieldType.STRING.getDataType())))
+                ))
+        ));
+        final DataType recordType = RecordFieldType.RECORD.getRecordDataType(recordSchema);
+
+        assertTrue(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, 42}, intType));
+        assertTrue(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, 42}, intType, true));
+        assertFalse(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, 42}, recordType));
+        assertFalse(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, 42}, recordType, true));
+
+        final MapRecord record = new MapRecord(recordSchema, Map.of("db",
+                new MapRecord(new SimpleRecordSchema(List.of(new RecordField("host", RecordFieldType.STRING.getDataType()))),
+                        Map.of("host", "localhost"))));
+        assertTrue(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, record}, recordType));
+        assertTrue(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, record}, recordType, true));
+        assertFalse(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, record}, intType));
+
+        assertTrue(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, null}, intType));
+        assertTrue(DataTypeUtils.isArrayTypeCompatible(new Object[]{null, null}, recordType));
+        assertFalse(DataTypeUtils.isArrayTypeCompatible(null, intType));
+    }
+
+    @Test
+    void testChooseDataTypeForArrayWithNullElementsInChoice() {
+        final RecordSchema recordSchema = new SimpleRecordSchema(List.of(
+                new RecordField("db", RecordFieldType.RECORD.getRecordDataType(
+                        new SimpleRecordSchema(List.of(new RecordField("host", RecordFieldType.STRING.getDataType())))
+                ))
+        ));
+        final DataType arrayOfRecord = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(recordSchema));
+        final DataType arrayOfInt = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.INT.getDataType());
+        final ChoiceDataType choiceType = (ChoiceDataType) RecordFieldType.CHOICE.getChoiceDataType(arrayOfRecord, arrayOfInt);
+
+        final DataType chosen = DataTypeUtils.chooseDataType(new Object[]{null, 42}, choiceType);
+        assertNotNull(chosen);
+        assertEquals(RecordFieldType.ARRAY, chosen.getFieldType());
+        assertEquals(RecordFieldType.INT, ((ArrayDataType) chosen).getElementType().getFieldType());
+
+        final MapRecord record = new MapRecord(recordSchema, Map.of("db",
+                new MapRecord(new SimpleRecordSchema(List.of(new RecordField("host", RecordFieldType.STRING.getDataType()))),
+                        Map.of("host", "localhost"))));
+        final DataType chosenRecord = DataTypeUtils.chooseDataType(new Object[]{null, record}, choiceType);
+        assertNotNull(chosenRecord);
+        assertEquals(RecordFieldType.ARRAY, chosenRecord.getFieldType());
+        assertEquals(RecordFieldType.RECORD, ((ArrayDataType) chosenRecord).getElementType().getFieldType());
+    }
+
+    @Test
+    void testChooseDataTypeForNestedArraysInChoice() {
+        final RecordSchema entrySchema = new SimpleRecordSchema(List.of(
+                new RecordField("key", RecordFieldType.STRING.getDataType()),
+                new RecordField("value", RecordFieldType.STRING.getDataType())));
+        final MapRecord entry = new MapRecord(entrySchema, Map.of("key", "a", "value", "b"));
+
+        final DataType stringArray = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType());
+        final DataType recordArray = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(entrySchema));
+        final DataType twoLevelRecordArray = RecordFieldType.ARRAY.getArrayDataType(recordArray);
+        final DataType threeLevelRecordArray = RecordFieldType.ARRAY.getArrayDataType(twoLevelRecordArray);
+        final List<DataType> choices = Arrays.asList(stringArray, threeLevelRecordArray);
+
+        final Object[] emptyBranch = new Object[] {new Object[0]};
+        final Object[] entries = new Object[] {entry};
+        final Object[] populatedBranch = new Object[] {entries};
+
+        final Object[] emptyAndPopulatedBranches = new Object[] {emptyBranch, populatedBranch};
+        testChooseDataTypeAlsoReverseTypes(emptyAndPopulatedBranches, choices, threeLevelRecordArray);
+
+        final Object[] onlyEmptyBranches = new Object[] {emptyBranch};
+        testChooseDataTypeAlsoReverseTypes(onlyEmptyBranches, choices, threeLevelRecordArray);
+
+        final Object[] strings = new Object[] {"a", "b"};
+        testChooseDataTypeAlsoReverseTypes(strings, choices, stringArray);
+    }
+
+    @Test
+    public void testMergeDataTypesMergesRecordSchemasInsteadOfCreatingChoice() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("firstName", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("lastName", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("address", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("firstName", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("lastName", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("age", RecordFieldType.INT.getDataType(), false)));
+
+        final DataType recordTypeA = RecordFieldType.RECORD.getRecordDataType(schemaA);
+        final DataType recordTypeB = RecordFieldType.RECORD.getRecordDataType(schemaB);
+
+        final DataType merged = DataTypeUtils.mergeDataTypes(recordTypeA, recordTypeB);
+        assertEquals(RecordFieldType.RECORD, merged.getFieldType());
+
+        final RecordSchema mergedSchema = ((RecordDataType) merged).getChildSchema();
+        assertEquals(4, mergedSchema.getFieldCount());
+        assertTrue(mergedSchema.getField("firstName").isPresent());
+        assertTrue(mergedSchema.getField("lastName").isPresent());
+        assertTrue(mergedSchema.getField("address").isPresent());
+        assertTrue(mergedSchema.getField("age").isPresent());
+        assertFalse(mergedSchema.getField("firstName").orElseThrow().isNullable());
+        assertFalse(mergedSchema.getField("lastName").orElseThrow().isNullable());
+        assertTrue(mergedSchema.getField("address").orElseThrow().isNullable());
+        assertTrue(mergedSchema.getField("age").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeDataTypesMergesRecordSchemasWithWiderFieldTypes() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.INT.getDataType()),
+            new RecordField("name", RecordFieldType.STRING.getDataType())));
+
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.LONG.getDataType()),
+            new RecordField("name", RecordFieldType.STRING.getDataType())));
+
+        final DataType recordTypeA = RecordFieldType.RECORD.getRecordDataType(schemaA);
+        final DataType recordTypeB = RecordFieldType.RECORD.getRecordDataType(schemaB);
+
+        final DataType merged = DataTypeUtils.mergeDataTypes(recordTypeA, recordTypeB);
+        assertEquals(RecordFieldType.RECORD, merged.getFieldType());
+
+        final RecordSchema mergedSchema = ((RecordDataType) merged).getChildSchema();
+        assertEquals(2, mergedSchema.getFieldCount());
+        assertEquals(RecordFieldType.LONG, mergedSchema.getField("id").get().getDataType().getFieldType());
+    }
+
+    @Test
+    public void testMergeDataTypesMergesArraysOfRecordElements() {
+        final RecordSchema innerSchemaA = new SimpleRecordSchema(List.of(
+            new RecordField("x", RecordFieldType.INT.getDataType())));
+        final RecordSchema innerSchemaB = new SimpleRecordSchema(List.of(
+            new RecordField("y", RecordFieldType.STRING.getDataType())));
+
+        final DataType arrayA = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(innerSchemaA));
+        final DataType arrayB = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(innerSchemaB));
+
+        final DataType merged = DataTypeUtils.mergeDataTypes(arrayA, arrayB);
+        assertEquals(RecordFieldType.ARRAY, merged.getFieldType());
+
+        final DataType elementType = ((ArrayDataType) merged).getElementType();
+        assertEquals(RecordFieldType.RECORD, elementType.getFieldType());
+        final RecordSchema mergedElementSchema = ((RecordDataType) elementType).getChildSchema();
+        assertEquals(2, mergedElementSchema.getFieldCount());
+        assertTrue(mergedElementSchema.getField("x").isPresent());
+        assertTrue(mergedElementSchema.getField("y").isPresent());
+    }
+
+    @Test
+    public void testMergeDataTypesCreatesChoiceForArraysWithDifferentPrimitiveElements() {
+        final DataType arrayOfInts = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.INT.getDataType());
+        final DataType arrayOfStrings = RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType());
+
+        final DataType merged = DataTypeUtils.mergeDataTypes(arrayOfInts, arrayOfStrings);
+        assertEquals(RecordFieldType.CHOICE, merged.getFieldType());
+    }
+
+    @Test
+    public void testMergeDataTypesWithManyDistinctRecordSchemasCompletesQuickly() {
+        DataType accumulated = null;
+        for (int i = 0; i < 5000; i++) {
+            final List<RecordField> fields = new ArrayList<>();
+            fields.add(new RecordField("commonField", RecordFieldType.STRING.getDataType()));
+            fields.add(new RecordField("field_" + i, RecordFieldType.INT.getDataType()));
+            final RecordSchema schema = new SimpleRecordSchema(fields);
+            final DataType recordType = RecordFieldType.RECORD.getRecordDataType(schema);
+
+            accumulated = DataTypeUtils.mergeDataTypes(accumulated, recordType);
+        }
+
+        assertEquals(RecordFieldType.RECORD, accumulated.getFieldType());
+        final RecordSchema finalSchema = ((RecordDataType) accumulated).getChildSchema();
+        assertEquals(5001, finalSchema.getFieldCount());
+        assertTrue(finalSchema.getField("commonField").isPresent());
+        assertTrue(finalSchema.getField("field_0").isPresent());
+        assertTrue(finalSchema.getField("field_4999").isPresent());
+    }
+
+    @Test
+    public void testMergeSchemasMakesSingleSideFieldsNullable() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("name", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(2, merged.getFieldCount());
+        assertTrue(merged.getField("id").orElseThrow().isNullable());
+        assertTrue(merged.getField("name").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasWhenOneSchemaIsStrictSubset() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("x", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("shared", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("shared", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(2, merged.getFieldCount());
+        assertTrue(merged.getField("x").orElseThrow().isNullable());
+        assertFalse(merged.getField("shared").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasKeepsSharedNonNullableFieldNonNullable() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(1, merged.getFieldCount());
+        assertFalse(merged.getField("id").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasPreservesNullableWhenLeftIsNullable() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), true)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertTrue(merged.getField("id").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasPreservesNullableWhenRightIsNullable() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), true)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertTrue(merged.getField("id").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasWidensTypesAndNullifiesSingleSideFields() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.INT.getDataType(), false),
+            new RecordField("onlyA", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.LONG.getDataType(), true),
+            new RecordField("onlyB", RecordFieldType.STRING.getDataType(), Set.of("bAlias"), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(3, merged.getFieldCount());
+        final RecordField idField = merged.getField("id").orElseThrow();
+        assertEquals(RecordFieldType.LONG, idField.getDataType().getFieldType());
+        assertTrue(idField.isNullable());
+        assertTrue(merged.getField("onlyA").orElseThrow().isNullable());
+        assertTrue(merged.getField("onlyB").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasIdenticalSchemasRetainNullability() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("required", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("optional", RecordFieldType.INT.getDataType(), true)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("required", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("optional", RecordFieldType.INT.getDataType(), true)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(2, merged.getFieldCount());
+        assertFalse(merged.getField("required").orElseThrow().isNullable());
+        assertTrue(merged.getField("optional").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasMakesNestedSingleSideFieldsNullable() {
+        final RecordSchema nestedA = new SimpleRecordSchema(List.of(
+            new RecordField("street", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("city", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema nestedB = new SimpleRecordSchema(List.of(
+            new RecordField("street", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("zip", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("address", RecordFieldType.RECORD.getRecordDataType(nestedA), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("address", RecordFieldType.RECORD.getRecordDataType(nestedB), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+        final RecordField addressField = merged.getField("address").orElseThrow();
+        assertFalse(addressField.isNullable());
+
+        final RecordSchema nestedMerged = ((RecordDataType) addressField.getDataType()).getChildSchema();
+        assertEquals(3, nestedMerged.getFieldCount());
+        assertFalse(nestedMerged.getField("street").orElseThrow().isNullable());
+        assertTrue(nestedMerged.getField("city").orElseThrow().isNullable());
+        assertTrue(nestedMerged.getField("zip").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasMakesArrayOfRecordSingleSideFieldsNullable() {
+        final RecordSchema elementA = new SimpleRecordSchema(List.of(
+            new RecordField("x", RecordFieldType.INT.getDataType(), false),
+            new RecordField("shared", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema elementB = new SimpleRecordSchema(List.of(
+            new RecordField("y", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("shared", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("items", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(elementA)), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("items", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(elementB)), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+        final RecordField itemsField = merged.getField("items").orElseThrow();
+        assertFalse(itemsField.isNullable());
+
+        final DataType elementType = ((ArrayDataType) itemsField.getDataType()).getElementType();
+        final RecordSchema elementMerged = ((RecordDataType) elementType).getChildSchema();
+        assertEquals(3, elementMerged.getFieldCount());
+        assertFalse(elementMerged.getField("shared").orElseThrow().isNullable());
+        assertTrue(elementMerged.getField("x").orElseThrow().isNullable());
+        assertTrue(elementMerged.getField("y").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasNullifiesTopLevelRecordFieldPresentOnOnlyOneSide() {
+        final RecordSchema nested = new SimpleRecordSchema(List.of(
+            new RecordField("value", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("details", RecordFieldType.RECORD.getRecordDataType(nested), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertFalse(merged.getField("id").orElseThrow().isNullable());
+        assertTrue(merged.getField("details").orElseThrow().isNullable());
+        final RecordSchema detailsSchema = ((RecordDataType) merged.getField("details").orElseThrow().getDataType()).getChildSchema();
+        assertFalse(detailsSchema.getField("value").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasMakesDeeplyNestedSingleSideFieldsNullable() {
+        final RecordSchema leafA = new SimpleRecordSchema(List.of(
+            new RecordField("aOnly", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("common", RecordFieldType.INT.getDataType(), false)));
+        final RecordSchema leafB = new SimpleRecordSchema(List.of(
+            new RecordField("bOnly", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("common", RecordFieldType.INT.getDataType(), false)));
+
+        final RecordSchema midA = new SimpleRecordSchema(List.of(
+            new RecordField("leaf", RecordFieldType.RECORD.getRecordDataType(leafA), false)));
+        final RecordSchema midB = new SimpleRecordSchema(List.of(
+            new RecordField("leaf", RecordFieldType.RECORD.getRecordDataType(leafB), false)));
+
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("mid", RecordFieldType.RECORD.getRecordDataType(midA), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("mid", RecordFieldType.RECORD.getRecordDataType(midB), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+        final RecordSchema midMerged = ((RecordDataType) merged.getField("mid").orElseThrow().getDataType()).getChildSchema();
+        final RecordSchema leafMerged = ((RecordDataType) midMerged.getField("leaf").orElseThrow().getDataType()).getChildSchema();
+
+        assertFalse(leafMerged.getField("common").orElseThrow().isNullable());
+        assertTrue(leafMerged.getField("aOnly").orElseThrow().isNullable());
+        assertTrue(leafMerged.getField("bOnly").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasMatchesFieldsByAliasWithoutNullifying() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), Set.of("identifier"), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(1, merged.getFieldCount());
+        final RecordField mergedField = merged.getField("id").orElseThrow();
+        assertFalse(mergedField.isNullable());
+        assertTrue(mergedField.getAliases().contains("identifier"));
+    }
+
+    @Test
+    public void testMergeSchemasWithEmptySchemaMakesOtherFieldsNullable() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema empty = new SimpleRecordSchema(List.of());
+
+        final RecordSchema mergedWithEmptyOther = DataTypeUtils.merge(schemaA, empty);
+        final RecordSchema mergedWithEmptyThis = DataTypeUtils.merge(empty, schemaA);
+
+        assertEquals(1, mergedWithEmptyOther.getFieldCount());
+        assertTrue(mergedWithEmptyOther.getField("id").orElseThrow().isNullable());
+        assertEquals(1, mergedWithEmptyThis.getFieldCount());
+        assertTrue(mergedWithEmptyThis.getField("id").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasPreservesDefaultValueWhenNullifyingSingleSideField() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("onlyA", RecordFieldType.STRING.getDataType(), "keep-me", false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("onlyB", RecordFieldType.STRING.getDataType(), "also-keep", false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertTrue(merged.getField("onlyA").orElseThrow().isNullable());
+        assertEquals("keep-me", merged.getField("onlyA").orElseThrow().getDefaultValue());
+        assertTrue(merged.getField("onlyB").orElseThrow().isNullable());
+        assertEquals("also-keep", merged.getField("onlyB").orElseThrow().getDefaultValue());
+    }
+
+    @Test
+    public void testMergeSchemasMatchesFieldUsingLeftAlias() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("identifier", RecordFieldType.STRING.getDataType(), Set.of("id"), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(1, merged.getFieldCount());
+        final RecordField mergedField = merged.getField("identifier").orElseThrow();
+        assertFalse(mergedField.isNullable());
+        assertTrue(mergedField.getAliases().contains("id"));
+    }
+
+    @Test
+    public void testMergeSchemasPreservesLeftFieldOrderThenAppendsRightOnlyFields() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("b", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("a", RecordFieldType.STRING.getDataType(), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("c", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("a", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertEquals(List.of("b", "a", "c"), merged.getFieldNames());
+        assertTrue(merged.getField("b").orElseThrow().isNullable());
+        assertFalse(merged.getField("a").orElseThrow().isNullable());
+        assertTrue(merged.getField("c").orElseThrow().isNullable());
+    }
+
+    @Test
+    public void testMergeSchemasSingleSideNestedArrayFieldBecomesNullable() {
+        final RecordSchema schemaA = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false),
+            new RecordField("tags", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType(), false), false)));
+        final RecordSchema schemaB = new SimpleRecordSchema(List.of(
+            new RecordField("id", RecordFieldType.STRING.getDataType(), false)));
+
+        final RecordSchema merged = DataTypeUtils.merge(schemaA, schemaB);
+
+        assertFalse(merged.getField("id").orElseThrow().isNullable());
+        assertTrue(merged.getField("tags").orElseThrow().isNullable());
+        assertFalse(((ArrayDataType) merged.getField("tags").orElseThrow().getDataType()).isElementsNullable());
+    }
+
+    @Test
+    public void testMergeDataTypesWithDeeplyNestedNonWiderRecordsCompletesQuickly() {
+        final DataType merged = assertTimeoutPreemptively(Duration.ofSeconds(10),
+            () -> DataTypeUtils.mergeDataTypes(createNestedRecordType(40, "a"), createNestedRecordType(40, "b")));
+
+        final RecordSchema mergedSchema = ((RecordDataType) merged).getChildSchema();
+        assertEquals(List.of("content", "a", "b"), mergedSchema.getFieldNames());
+    }
+
+    private DataType createNestedRecordType(final int depth, final String... fieldNames) {
+        DataType dataType = RecordFieldType.STRING.getDataType();
+        for (int i = 0; i < depth; i++) {
+            final List<RecordField> fields = new ArrayList<>();
+            fields.add(new RecordField("content", RecordFieldType.ARRAY.getArrayDataType(dataType)));
+            for (final String fieldName : fieldNames) {
+                fields.add(new RecordField(fieldName, RecordFieldType.STRING.getDataType()));
+            }
+            dataType = RecordFieldType.RECORD.getRecordDataType(new SimpleRecordSchema(fields));
+        }
+        return dataType;
     }
 }

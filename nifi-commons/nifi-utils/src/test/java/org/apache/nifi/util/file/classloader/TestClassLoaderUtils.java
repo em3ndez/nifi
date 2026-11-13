@@ -16,55 +16,45 @@
  */
 package org.apache.nifi.util.file.classloader;
 
+import org.junit.jupiter.api.Test;
+
 import java.io.FilenameFilter;
 import java.net.MalformedURLException;
-import java.net.URISyntaxException;
+import java.net.URI;
 import java.net.URL;
 import java.nio.file.Paths;
 import java.util.HashSet;
 import java.util.Set;
 
-import org.junit.Test;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class TestClassLoaderUtils {
 
     @Test
-    public void testGetCustomClassLoader() throws MalformedURLException,ClassNotFoundException{
+    public void testGetCustomClassLoader() throws MalformedURLException, ClassNotFoundException {
         final String jarFilePath = "src/test/resources/TestClassLoaderUtils";
-        ClassLoader customClassLoader =  ClassLoaderUtils.getCustomClassLoader(jarFilePath ,this.getClass().getClassLoader(), getJarFilenameFilter());
-        assertTrue(customClassLoader != null);
-        assertTrue(customClassLoader.loadClass("TestSuccess") != null);
+        ClassLoader customClassLoader =  ClassLoaderUtils.getCustomClassLoader(jarFilePath, this.getClass().getClassLoader(), getJarFilenameFilter());
+        assertNotNull(customClassLoader);
+        assertNotNull(customClassLoader.loadClass("TestSuccess"));
     }
 
     @Test
-    public void testGetCustomClassLoaderNoPathSpecified() throws MalformedURLException{
+    public void testGetCustomClassLoaderNoPathSpecified() throws MalformedURLException {
         final ClassLoader originalClassLoader = this.getClass().getClassLoader();
-        ClassLoader customClassLoader =  ClassLoaderUtils.getCustomClassLoader(null,originalClassLoader, getJarFilenameFilter());
-        assertTrue(customClassLoader != null);
-        try{
-            customClassLoader.loadClass("TestSuccess");
-        }catch (ClassNotFoundException cex){
-            assertTrue(cex.getLocalizedMessage().equals("TestSuccess"));
-            return;
-        }
-        fail("exception did not occur, class should not be found");
+        ClassLoader customClassLoader =  ClassLoaderUtils.getCustomClassLoader(null, originalClassLoader, getJarFilenameFilter());
+        assertNotNull(customClassLoader);
+        ClassNotFoundException cex = assertThrows(ClassNotFoundException.class, () -> customClassLoader.loadClass("TestSuccess"));
+        assertEquals("TestSuccess", cex.getLocalizedMessage());
     }
 
     @Test
     public void testGetCustomClassLoaderWithInvalidPath() {
         final String jarFilePath = "src/test/resources/FakeTestClassLoaderUtils/TestSuccess.jar";
-        try {
-            ClassLoaderUtils.getCustomClassLoader(jarFilePath, this.getClass().getClassLoader(), getJarFilenameFilter());
-        }catch(MalformedURLException mex){
-            assertTrue(mex.getLocalizedMessage().equals("Path specified does not exist"));
-            return;
-        }
-        fail("exception did not occur, path should not exist");
+        MalformedURLException mex = assertThrows(MalformedURLException.class,
+                () -> ClassLoaderUtils.getCustomClassLoader(jarFilePath, this.getClass().getClassLoader(), getJarFilenameFilter()));
+        assertEquals("Path specified does not exist", mex.getLocalizedMessage());
     }
 
     @Test
@@ -99,10 +89,10 @@ public class TestClassLoaderUtils {
         assertEquals(1, urls.length);
     }
 
-    @Test(expected = MalformedURLException.class)
-    public void testGetURLsForClasspathWithSomeNonExistentAndNoSuppression() throws MalformedURLException {
+    @Test
+    public void testGetURLsForClasspathWithSomeNonExistentAndNoSuppression() {
         final String jarFilePath = "src/test/resources/TestClassLoaderUtils/TestSuccess.jar,src/test/resources/TestClassLoaderUtils/FakeTest.jar";
-        ClassLoaderUtils.getURLsForClasspath(jarFilePath, null, false);
+        assertThrows(MalformedURLException.class, () -> ClassLoaderUtils.getURLsForClasspath(jarFilePath, null, false));
     }
 
     @Test
@@ -123,15 +113,24 @@ public class TestClassLoaderUtils {
     }
 
     @Test
-    public void testGenerateAdditionalUrlsFingerprint() throws MalformedURLException, URISyntaxException {
+    public void testGenerateAdditionalUrlsFingerprintForFileUrl() throws MalformedURLException {
         final Set<URL> urls = new HashSet<>();
         URL testUrl = Paths.get("src/test/resources/TestClassLoaderUtils/TestSuccess.jar").toUri().toURL();
         urls.add(testUrl);
-        String testFingerprint = ClassLoaderUtils.generateAdditionalUrlsFingerprint(urls);
+        String testFingerprint = ClassLoaderUtils.generateAdditionalUrlsFingerprint(urls, null);
         assertNotNull(testFingerprint);
     }
 
-    protected FilenameFilter getJarFilenameFilter(){
+    @Test
+    public void testGenerateAdditionalUrlsFingerprintForHttpUrl() throws MalformedURLException {
+        final Set<URL> urls = new HashSet<>();
+        URL testUrl = URI.create("http://myhost/TestSuccess.jar").toURL();
+        urls.add(testUrl);
+        String testFingerprint = ClassLoaderUtils.generateAdditionalUrlsFingerprint(urls, null);
+        assertNotNull(testFingerprint);
+    }
+
+    protected FilenameFilter getJarFilenameFilter() {
         return  (dir, name) -> name != null && name.endsWith(".jar");
     }
 }

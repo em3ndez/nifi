@@ -17,19 +17,19 @@
 
 package org.apache.nifi.record.path.functions;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.record.path.paths.RecordPathSegment;
-import org.apache.nifi.util.StringUtils;
 
 public class PadRight extends Padding {
 
-    public PadRight( final RecordPathSegment inputStringPath,
+    public PadRight(final RecordPathSegment inputStringPath,
                      final RecordPathSegment desiredLengthPath,
                      final RecordPathSegment paddingStringPath,
                      final boolean absolute) {
         super("padRight", null, inputStringPath, desiredLengthPath, paddingStringPath, absolute);
     }
 
-    public PadRight( final RecordPathSegment inputStringPath,
+    public PadRight(final RecordPathSegment inputStringPath,
                      final RecordPathSegment desiredLengthPath,
                      final boolean absolute) {
         super("padRight", null, inputStringPath, desiredLengthPath, null, absolute);

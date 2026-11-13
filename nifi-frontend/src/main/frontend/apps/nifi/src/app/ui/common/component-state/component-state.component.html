@@ -1,0 +1,172 @@
+<!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one or more
+  ~ contributor license agreements.  See the NOTICE file distributed with
+  ~ this work for additional information regarding copyright ownership.
+  ~ The ASF licenses this file to You under the Apache License, Version 2.0
+  ~ (the "License"); you may not use this file except in compliance with
+  ~ the License.  You may obtain a copy of the License at
+  ~
+  ~     http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+
+<div class="component-state-dialog">
+    <h2 mat-dialog-title>Component State</h2>
+    <context-error-banner [context]="ErrorContextKey.COMPONENT_STATE"></context-error-banner>
+    <mat-dialog-content>
+        <div class="dialog-content flex flex-col justify-between gap-y-5">
+            @if (componentName$ | async; as componentName) {
+                <div class="flex flex-col">
+                    <div>Name</div>
+                    <div class="tertiary-color font-medium">{{ componentName }}</div>
+                </div>
+            }
+            <div class="flex flex-col">
+                <div>Description</div>
+                <div class="tertiary-color font-medium">
+                    {{ stateDescription }}
+                </div>
+            </div>
+            <div class="flex flex-col">
+                <div>
+                    State Deletion Policy
+                    <i
+                        class="fa fa-info-circle"
+                        nifiTooltip
+                        [tooltipComponentType]="TextTip"
+                        tooltipInputData="In order to clear state this component must be stopped or disabled."></i>
+                </div>
+                <div class="tertiary-color font-medium">
+                    @if (dropStateKeySupported()) {
+                        When clearing state this component supports deleting the entire state or individual entries.
+                    } @else {
+                        When clearing state this component only supports deleting the entire state.
+                    }
+                </div>
+            </div>
+            <div class="flex flex-1 flex-col">
+                @let isClearing = clearing();
+                <div>
+                    <form [formGroup]="filterForm" class="flex flex-col my-2">
+                        <div class="flex justify-between items-center">
+                            <mat-form-field subscriptSizing="dynamic">
+                                <mat-label>Filter</mat-label>
+                                <input matInput type="text" class="small" formControlName="filterTerm" />
+                            </mat-form-field>
+                            @if (canClear() && totalEntries > 0) {
+                                <button type="button" [disabled]="isClearing" (click)="clearState()" mat-button>
+                                    <span *nifiSpinner="isClearing">Clear state</span>
+                                </button>
+                            }
+                        </div>
+                    </form>
+                    <div class="my-2 tertiary-color leading-none font-medium">
+                        Displaying {{ filteredEntries }} of {{ totalEntries }}
+                    </div>
+                    <!--
+                        mat-table does not support virtual scrolling and this component requires
+                        virtual scrolling support. we moved away from mat-table in favor of a native
+                        html table with cdk virtual scrolling. styles are still applied with mat-table
+                        classes. in order for those styles to be added to this component a mat-table
+                        instance is required. this is an empty hidden table on this page to get the
+                        necessary styles on the page for our native virtual scrolling table to inherit
+                        and use the existing global styles.
+                    -->
+                    <table mat-table class="hidden">
+                        <tr mat-header-row *matHeaderRowDef="[]; sticky: true"></tr>
+                        <tr mat-row *matRowDef="let row; columns: []"></tr>
+                    </table>
+                </div>
+                <div class="listing-table flex-1 relative">
+                    <div class="absolute inset-0 table-container">
+                        <div class="header-wrapper">
+                            <table class="mat-mdc-table mdc-data-table__table cdk-table-virtual">
+                                <thead>
+                                    <tr
+                                        class="mat-mdc-header-row mdc-data-table__header-row"
+                                        matSort
+                                        matSortDisableClear
+                                        (matSortChange)="sortData($event)"
+                                        [matSortActive]="currentSortColumn"
+                                        [matSortDirection]="currentSortDirection">
+                                        <th
+                                            class="mat-mdc-header-cell mdc-data-table__header-cell"
+                                            mat-sort-header="key">
+                                            Key
+                                        </th>
+                                        <th
+                                            class="mat-mdc-header-cell mdc-data-table__header-cell"
+                                            mat-sort-header="value">
+                                            Value
+                                        </th>
+                                        @if (displayedColumns.includes('scope')) {
+                                            <th
+                                                class="mat-mdc-header-cell mdc-data-table__header-cell"
+                                                mat-sort-header="scope">
+                                                Scope
+                                            </th>
+                                        }
+                                        @if (displayedColumns.includes('actions')) {
+                                            <th
+                                                class="mat-mdc-header-cell mdc-data-table__header-cell action-column"></th>
+                                        }
+                                    </tr>
+                                </thead>
+                            </table>
+                        </div>
+                        <cdk-virtual-scroll-viewport [itemSize]="ROW_HEIGHT" class="table-body-viewport">
+                            <table class="mat-mdc-table mdc-data-table__table cdk-table-virtual">
+                                <tbody>
+                                    <tr
+                                        *cdkVirtualFor="let item of dataSource; let i = index; trackBy: trackByKey"
+                                        class="mat-mdc-row mdc-data-table__row data-row"
+                                        [class.even]="i % 2 === 0"
+                                        [class.odd]="i % 2 !== 0">
+                                        <td class="mat-mdc-cell mdc-data-table__cell">{{ item.key }}</td>
+                                        <td class="mat-mdc-cell mdc-data-table__cell" [title]="item.value">
+                                            {{ item.value }}
+                                        </td>
+                                        @if (displayedColumns.includes('scope')) {
+                                            <td class="mat-mdc-cell mdc-data-table__cell" [title]="item.scope">
+                                                {{ item.scope }}
+                                            </td>
+                                        }
+                                        @if (displayedColumns.includes('actions')) {
+                                            <td class="mat-mdc-cell mdc-data-table__cell action-column">
+                                                <button
+                                                    [disabled]="clearing()"
+                                                    data-qa="component-state-clear-entry"
+                                                    mat-icon-button
+                                                    color="primary"
+                                                    (click)="clearComponentStateEntry(item)"
+                                                    [title]="'Clear state entry: ' + item.key">
+                                                    <i class="fa fa-trash"></i>
+                                                </button>
+                                            </td>
+                                        }
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </cdk-virtual-scroll-viewport>
+                    </div>
+                </div>
+            </div>
+            @if (partialResults) {
+                <div class="-mt-3" data-qa="component-state-partial-results-message">
+                    Showing partial results.
+                    @if (dropStateKeySupported()) {
+                        Individual entries cannot be cleared while only partial results are shown.
+                    }
+                </div>
+            }
+        </div>
+    </mat-dialog-content>
+    <mat-dialog-actions align="end">
+        <button mat-button mat-dialog-close>Close</button>
+    </mat-dialog-actions>
+</div>

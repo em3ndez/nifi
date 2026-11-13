@@ -16,7 +16,6 @@
  */
 package org.apache.nifi.util;
 
-import org.apache.nifi.components.validation.AbstractValidationContext;
 import org.apache.nifi.attribute.expression.language.Query;
 import org.apache.nifi.attribute.expression.language.Query.Range;
 import org.apache.nifi.attribute.expression.language.StandardExpressionLanguageCompiler;
@@ -26,7 +25,6 @@ import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.state.StateManager;
 import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.controller.ControllerServiceLookup;
-import org.apache.nifi.controller.PropertyConfiguration;
 import org.apache.nifi.expression.ExpressionLanguageCompiler;
 import org.apache.nifi.parameter.ExpressionLanguageAgnosticParameterParser;
 import org.apache.nifi.parameter.ExpressionLanguageAwareParameterParser;
@@ -34,8 +32,6 @@ import org.apache.nifi.parameter.ParameterLookup;
 import org.apache.nifi.parameter.ParameterParser;
 import org.apache.nifi.parameter.ParameterReference;
 import org.apache.nifi.parameter.ParameterTokenList;
-import org.apache.nifi.parameter.StandardParameterTokenList;
-import org.apache.nifi.registry.VariableRegistry;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -44,48 +40,34 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
-public class MockValidationContext extends MockControllerServiceLookup implements ValidationContext, ControllerServiceLookup {
+public class MockValidationContext extends MockControllerServiceLookup implements ValidationContext {
 
     private final MockProcessContext context;
     private final Map<String, Boolean> expressionLanguageSupported;
     private final StateManager stateManager;
-    private final VariableRegistry variableRegistry;
-    private final Map<PropertyDescriptor, PropertyConfiguration> properties;
+    private final ParameterLookup parameterLookup;
     private volatile boolean validateExpressions = true;
 
     public MockValidationContext(final MockProcessContext processContext) {
-        this(processContext, null, VariableRegistry.EMPTY_REGISTRY);
+        this(processContext, null);
     }
 
-    public MockValidationContext(final MockProcessContext processContext, final StateManager stateManager, final VariableRegistry variableRegistry) {
+    public MockValidationContext(final MockProcessContext processContext, final StateManager stateManager) {
+        this(processContext, stateManager, ParameterLookup.EMPTY);
+    }
+
+    public MockValidationContext(final MockProcessContext processContext, final StateManager stateManager, final ParameterLookup parameterLookup) {
         this.context = processContext;
         this.stateManager = stateManager;
-        this.variableRegistry = variableRegistry;
+        this.parameterLookup = parameterLookup != null ? parameterLookup : processContext.getParameterLookup();
 
         final Map<PropertyDescriptor, String> properties = processContext.getProperties();
         expressionLanguageSupported = new HashMap<>(properties.size());
         for (final PropertyDescriptor descriptor : properties.keySet()) {
             expressionLanguageSupported.put(descriptor.getName(), descriptor.isExpressionLanguageSupported());
         }
-
-        this.properties = createPropertyConfigurationMap(processContext);
-    }
-
-    private static Map<PropertyDescriptor, PropertyConfiguration> createPropertyConfigurationMap(final MockProcessContext processContext) {
-        final Map<PropertyDescriptor, PropertyConfiguration> configurationMap = new HashMap<>();
-
-        for (final Map.Entry<String, String> entry : processContext.getAllProperties().entrySet()) {
-            final PropertyDescriptor descriptor = processContext.getPropertyDescriptor(entry.getKey());
-            final ParameterTokenList tokenList = new StandardParameterTokenList(entry.getValue(), Collections.emptyList());
-            final List<ParameterReference> parameterReferences = Collections.emptyList();
-            final PropertyConfiguration configuration = new PropertyConfiguration(entry.getValue(), tokenList, parameterReferences);
-            configurationMap.put(descriptor, configuration);
-        }
-
-        return configurationMap;
     }
 
     public void setValidateExpressions(final boolean validate) {
@@ -99,35 +81,50 @@ public class MockValidationContext extends MockControllerServiceLookup implement
 
     @Override
     public PropertyValue newPropertyValue(final String rawValue) {
-        return new MockPropertyValue(rawValue, this, null, true, variableRegistry);
+        return new MockPropertyValue(rawValue, this, null, true, context.getEnvironmentVariables(), parameterLookup);
     }
 
     @Override
     public ExpressionLanguageCompiler newExpressionLanguageCompiler() {
-        return new StandardExpressionLanguageCompiler(variableRegistry, ParameterLookup.EMPTY);
+        return new StandardExpressionLanguageCompiler(parameterLookup);
     }
 
     @Override
     public ValidationContext getControllerServiceValidationContext(final ControllerService controllerService) {
-        final MockProcessContext serviceProcessContext = new MockProcessContext(controllerService, context, stateManager, variableRegistry);
-        final MockValidationContext serviceValidationContext =  new MockValidationContext(serviceProcessContext, stateManager, variableRegistry);
+        final MockProcessContext serviceProcessContext = new MockProcessContext(controllerService, context, stateManager, context.getEnvironmentVariables());
+        final MockValidationContext serviceValidationContext =  new MockValidationContext(serviceProcessContext, stateManager, parameterLookup);
         serviceValidationContext.setValidateExpressions(validateExpressions);
         return serviceValidationContext;
     }
 
     @Override
     public PropertyValue getProperty(final PropertyDescriptor property) {
-        return context.getPropertyWithoutValidatingExpressions(property);
+        final PropertyDescriptor canonicalDescriptor = context.getPropertyDescriptor(property.getName());
+        if (canonicalDescriptor == null) {
+            return null;
+        }
+
+        final String propertyValue = getEffectiveValue(canonicalDescriptor);
+        return new MockPropertyValue(propertyValue, this, canonicalDescriptor, true, context.getEnvironmentVariables(), parameterLookup);
     }
 
     @Override
     public Map<PropertyDescriptor, String> getProperties() {
-        return context.getProperties();
+        final Map<PropertyDescriptor, String> properties = context.getProperties();
+        final Map<PropertyDescriptor, String> effectiveProperties = new LinkedHashMap<>(properties.size());
+
+        for (final Map.Entry<PropertyDescriptor, String> entry : properties.entrySet()) {
+            final PropertyDescriptor descriptor = entry.getKey();
+            final String effectiveValue = getEffectiveValue(descriptor, entry.getValue());
+            effectiveProperties.put(descriptor, effectiveValue);
+        }
+
+        return Collections.unmodifiableMap(effectiveProperties);
     }
 
     @Override
     public Map<String, String> getAllProperties() {
-        final Map<String,String> propValueMap = new LinkedHashMap<>();
+        final Map<String, String> propValueMap = new LinkedHashMap<>();
         for (final Map.Entry<PropertyDescriptor, String> entry : getProperties().entrySet()) {
             propValueMap.put(entry.getKey().getName(), entry.getValue());
         }
@@ -182,7 +179,7 @@ public class MockValidationContext extends MockControllerServiceLookup implement
         }
 
         final List<Range> elRanges = Query.extractExpressionRanges(value);
-        return (elRanges != null && !elRanges.isEmpty());
+        return !elRanges.isEmpty();
     }
 
     @Override
@@ -198,7 +195,9 @@ public class MockValidationContext extends MockControllerServiceLookup implement
 
     @Override
     public Collection<String> getReferencedParameters(final String propertyName) {
-        final String rawPropertyValue = context.getProperty(propertyName).getValue();
+        final PropertyDescriptor descriptor = new PropertyDescriptor.Builder().name(propertyName).build();
+        final PropertyValue propertyValue = context.getPropertyWithoutValidatingExpressions(descriptor);
+        final String rawPropertyValue = propertyValue == null ? null : propertyValue.getValue();
         final boolean elSupported = isExpressionLanguageSupported(propertyName);
 
         final ParameterParser parser = elSupported ? new ExpressionLanguageAwareParameterParser() : new ExpressionLanguageAgnosticParameterParser();
@@ -211,97 +210,39 @@ public class MockValidationContext extends MockControllerServiceLookup implement
 
     @Override
     public boolean isParameterDefined(final String parameterName) {
-        return true;
+        final Map<String, String> contextParameters = context.getContextParameters();
+        return contextParameters.containsKey(parameterName);
     }
 
     @Override
     public boolean isParameterSet(final String parameterName) {
-        return true;
+        final Map<String, String> contextParameters = context.getContextParameters();
+        return contextParameters.containsKey(parameterName) && contextParameters.get(parameterName) != null;
     }
 
     @Override
-    public boolean isDependencySatisfied(final PropertyDescriptor propertyDescriptor, final Function<String, PropertyDescriptor> propertyDescriptorLookup) {
-        // The logic for isDependencySatisfied is already implemented in the AbstractValidationContext. We don't want to duplicate the logic here.
-        // However, this class cannot extends AbstractValidationContext because it was already created to extend MockControllerServiceLookup. Changing that
-        // hierarchy gets complicated. So, for the time being we will create a concrete implementation of the AbstractValidationContext in order to call the
-        // isDependencySatisfied method.
-        final ValidationContext abstractValidationContext = new AbstractValidationContext(ParameterLookup.EMPTY, properties) {
-            @Override
-            public ControllerServiceLookup getControllerServiceLookup() {
-                return null;
-            }
-
-            @Override
-            public ValidationContext getControllerServiceValidationContext(final ControllerService controllerService) {
-                return null;
-            }
-
-            @Override
-            public ExpressionLanguageCompiler newExpressionLanguageCompiler() {
-                return null;
-            }
-
-            @Override
-            public PropertyValue newPropertyValue(final String value) {
-                return null;
-            }
-
-            @Override
-            public Map<PropertyDescriptor, String> getProperties() {
-                return null;
-            }
-
-            @Override
-            public String getAnnotationData() {
-                return null;
-            }
-
-            @Override
-            public boolean isValidationRequired(final ControllerService service) {
-                return false;
-            }
-
-            @Override
-            public boolean isExpressionLanguagePresent(final String value) {
-                return false;
-            }
-
-            @Override
-            public boolean isExpressionLanguageSupported(final String propertyName) {
-                return false;
-            }
-
-            @Override
-            public String getProcessGroupIdentifier() {
-                return null;
-            }
-
-            @Override
-            public Collection<String> getReferencedParameters(final String propertyName) {
-                return null;
-            }
-
-            @Override
-            public boolean isParameterDefined(final String parameterName) {
-                return false;
-            }
-
-            @Override
-            public boolean isParameterSet(final String parameterName) {
-                return false;
-            }
-
-            @Override
-            public PropertyValue getProperty(final PropertyDescriptor descriptor) {
-                return null;
-            }
-
-            @Override
-            public Map<String, String> getAllProperties() {
-                return null;
-            }
-        };
-
-        return abstractValidationContext.isDependencySatisfied(propertyDescriptor, propertyDescriptorLookup);
+    public String evaluateParameters(final String value) {
+        final ParameterParser parameterParser = new ExpressionLanguageAgnosticParameterParser();
+        final ParameterTokenList parameterTokenList = parameterParser.parseTokens(value);
+        return parameterTokenList.substitute(parameterLookup);
     }
+
+    private String getEffectiveValue(final PropertyDescriptor descriptor) {
+        final String configuredValue = context.getProperties().get(descriptor);
+        return getEffectiveValue(descriptor, configuredValue);
+    }
+
+    private String getEffectiveValue(final PropertyDescriptor descriptor, final String configuredValue) {
+        final String value = configuredValue == null ? descriptor.getDefaultValue() : configuredValue;
+        if (value == null) {
+            return null;
+        }
+
+        final ParameterParser parser = descriptor.isExpressionLanguageSupported()
+                ? new ExpressionLanguageAwareParameterParser()
+                : new ExpressionLanguageAgnosticParameterParser();
+
+        return parser.parseTokens(value).substitute(parameterLookup);
+    }
+
 }

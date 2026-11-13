@@ -16,18 +16,22 @@
  */
 package org.apache.nifi.attribute.expression.language.evaluation.functions;
 
+import com.jayway.jsonpath.DocumentContext;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.PathNotFoundException;
 import org.apache.nifi.attribute.expression.language.EvaluationContext;
 import org.apache.nifi.attribute.expression.language.evaluation.Evaluator;
 import org.apache.nifi.attribute.expression.language.evaluation.QueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.StringQueryResult;
-
-import com.jayway.jsonpath.DocumentContext;
-import com.jayway.jsonpath.JsonPath;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * JsonPathDeleteEvaluator allows delete elements at the specified path
  */
 public class JsonPathDeleteEvaluator extends JsonPathBaseEvaluator {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(JsonPathDeleteEvaluator.class);
 
     public JsonPathDeleteEvaluator(final Evaluator<String> subject, final Evaluator<String> jsonPathExp) {
         super(subject, jsonPathExp);
@@ -37,11 +41,16 @@ public class JsonPathDeleteEvaluator extends JsonPathBaseEvaluator {
     public QueryResult<String> evaluate(EvaluationContext context) {
         DocumentContext documentContext = getDocumentContext(context);
 
-        final JsonPath compiledJsonPath = getJsonPath(context);;
+        final JsonPath compiledJsonPath = getJsonPath(context);
 
         String result = null;
         try {
             result = documentContext.delete(compiledJsonPath).jsonString();
+        } catch (PathNotFoundException pnf) {
+            // it is valid for a path not to be found, keys may not be there
+            // do not spam the error log for this, instead we can log debug if enabled
+            LOGGER.debug("JSON Path not found: {}", compiledJsonPath.getPath(), pnf);
+            result = documentContext.jsonString();
         } catch (Exception e) {
             // assume the path did not match anything in the document
             return EMPTY_RESULT;

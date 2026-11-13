@@ -16,15 +16,14 @@
  */
 package org.apache.nifi.provenance.lineage;
 
-import java.util.List;
-
 import org.apache.nifi.provenance.ProvenanceEventRecord;
 import org.apache.nifi.provenance.ProvenanceEventType;
+
+import java.util.List;
 
 public class EventNode implements ProvenanceEventLineageNode {
 
     private final ProvenanceEventRecord record;
-    private String clusterNodeIdentifier = null;
 
     public EventNode(final ProvenanceEventRecord event) {
         this.record = event;
@@ -43,6 +42,11 @@ public class EventNode implements ProvenanceEventLineageNode {
     @Override
     public ProvenanceEventType getEventType() {
         return record.getEventType();
+    }
+
+    @Override
+    public String getComponentType() {
+        return record.getComponentType();
     }
 
     @Override
@@ -84,11 +88,10 @@ public class EventNode implements ProvenanceEventLineageNode {
             return true;
         }
 
-        if (!(obj instanceof EventNode)) {
+        if (!(obj instanceof final EventNode other)) {
             return false;
         }
 
-        final EventNode other = (EventNode) obj;
         return record.equals(other.record);
     }
 

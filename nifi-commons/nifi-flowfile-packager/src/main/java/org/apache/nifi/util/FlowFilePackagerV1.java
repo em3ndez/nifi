@@ -16,20 +16,22 @@
  */
 package org.apache.nifi.util;
 
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.text.StringEscapeUtils;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.text.StringEscapeUtils;
-
+@Deprecated(since = "2.12.0", forRemoval = true)
 public class FlowFilePackagerV1 implements FlowFilePackager {
 
     public static final String FILENAME_ATTRIBUTES = "flowfile.attributes";
     public static final String FILENAME_CONTENT = "flowfile.content";
+    @SuppressWarnings("PMD.AvoidUsingOctalValues")
     public static final int DEFAULT_TAR_PERMISSIONS = 0644;
 
     private final int tarPermissions;
@@ -48,8 +50,6 @@ public class FlowFilePackagerV1 implements FlowFilePackager {
             writeAttributesEntry(attributes, tout);
             writeContentEntry(tout, in, fileSize);
             tout.finish();
-            tout.flush();
-            tout.close();
         }
     }
 
@@ -78,7 +78,7 @@ public class FlowFilePackagerV1 implements FlowFilePackager {
         entry.setMode(tarPermissions);
         entry.setSize(fileSize);
         tarOut.putArchiveEntry(entry);
-        final byte[] buffer = new byte[512 << 10];//512KB
+        final byte[] buffer = new byte[512 << 10]; //512KB
         int bytesRead = 0;
         while ((bytesRead = inStream.read(buffer)) != -1) { //still more data to read
             if (bytesRead > 0) {

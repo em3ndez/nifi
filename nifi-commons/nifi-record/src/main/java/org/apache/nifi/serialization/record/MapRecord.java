@@ -19,34 +19,44 @@ package org.apache.nifi.serialization.record;
 
 import org.apache.nifi.serialization.SchemaValidationException;
 import org.apache.nifi.serialization.SimpleRecordSchema;
+import org.apache.nifi.serialization.record.field.FieldConverter;
+import org.apache.nifi.serialization.record.field.StandardFieldConverterRegistry;
 import org.apache.nifi.serialization.record.type.ArrayDataType;
 import org.apache.nifi.serialization.record.type.ChoiceDataType;
 import org.apache.nifi.serialization.record.type.MapDataType;
 import org.apache.nifi.serialization.record.type.RecordDataType;
 import org.apache.nifi.serialization.record.util.DataTypeUtils;
 import org.apache.nifi.serialization.record.util.IllegalTypeConversionException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
-import java.text.DateFormat;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Supplier;
 
 public class MapRecord implements Record {
+    private static final Logger logger = LoggerFactory.getLogger(MapRecord.class);
+
     private RecordSchema schema;
+    private boolean mutableSchema = false; // Track if schema is a private copy that can be safely modified
     private final Map<String, Object> values;
     private Optional<SerializedForm> serializedForm;
     private final boolean checkTypes;
     private final boolean dropUnknownFields;
     private Set<RecordField> inactiveFields = null;
+    private Map<String, RecordField> updatedFields = null;
 
     public MapRecord(final RecordSchema schema, final Map<String, Object> values) {
         this(schema, values, false, false);
@@ -218,7 +228,8 @@ public class MapRecord implements Record {
             return convertToString(getValue(fieldName), dataTypeOption.get().getFormat());
         }
 
-        return DataTypeUtils.toString(getValue(fieldName), (Supplier<DateFormat>) null);
+        final FieldConverter<Object, String> converter = StandardFieldConverterRegistry.getRegistry().getFieldConverter(String.class);
+        return converter.convertField(getValue(fieldName), Optional.empty(), fieldName);
     }
 
     @Override
@@ -270,15 +281,29 @@ public class MapRecord implements Record {
     }
 
     @Override
-    public Date getAsDate(final String fieldName, final String format) {
-        return DataTypeUtils.toDate(getValue(fieldName), () -> DataTypeUtils.getDateFormat(format), fieldName);
+    public LocalDate getAsLocalDate(final String fieldName, final String format) {
+        return convertFieldToDateTime(LocalDate.class, fieldName, format);
+    }
+
+    @Override
+    public LocalDateTime getAsLocalDateTime(String fieldName, String format) {
+        return convertFieldToDateTime(LocalDateTime.class, fieldName, format);
+    }
+
+    @Override
+    public OffsetDateTime getAsOffsetDateTime(final String fieldName, final String format) {
+        return convertFieldToDateTime(OffsetDateTime.class, fieldName, format);
+    }
+
+    private <T> T convertFieldToDateTime(Class<T> clazz, String fieldName, String format) {
+        final FieldConverter<Object, T> converter = StandardFieldConverterRegistry.getRegistry().getFieldConverter(clazz);
+        return converter.convertField(getValue(fieldName), Optional.ofNullable(format), fieldName);
     }
 
     @Override
     public Object[] getAsArray(final String fieldName) {
         return DataTypeUtils.toArray(getValue(fieldName), fieldName, null, StandardCharsets.UTF_8);
     }
-
 
     @Override
     public int hashCode() {
@@ -293,33 +318,168 @@ public class MapRecord implements Record {
         if (obj == null) {
             return false;
         }
-        if (!(obj instanceof MapRecord)) {
+        if (!(obj instanceof final MapRecord other)) {
             return false;
         }
-        final MapRecord other = (MapRecord) obj;
-        return schema.equals(other.schema) && values.equals(other.values);
+        return schema.equals(other.schema) && valuesEqual(values, other.values);
+    }
+
+    private boolean valuesEqual(final Map<String, Object> thisValues, final Map<String, Object> otherValues) {
+        if (thisValues == null || otherValues == null) {
+            return false;
+        }
+
+        if (thisValues.size() != otherValues.size()) {
+            return false;
+        }
+
+        for (final Map.Entry<String, Object> entry : thisValues.entrySet()) {
+            final Object thisValue = entry.getValue();
+            final Object otherValue = otherValues.get(entry.getKey());
+            if (Objects.equals(thisValue, otherValue)) {
+                continue;
+            }
+
+            if (thisValue instanceof final Object[] thisObjects && otherValue instanceof final Object[] otherObjects) {
+                if (!Arrays.equals(thisObjects, otherObjects)) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     @Override
     public String toString() {
-        return "MapRecord[" + values + "]";
+        final Optional<SerializedForm> serializedForm = getSerializedForm();
+        if (serializedForm.isEmpty()) {
+            return "MapRecord[" + values + "]";
+        }
+
+        final Object serialized = serializedForm.get().getSerialized();
+        return serialized == null ? "MapRecord[" + values + "]" : serialized.toString();
     }
 
     @Override
     public Optional<SerializedForm> getSerializedForm() {
+        if (serializedForm.isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (isSerializedFormReset()) {
+            return Optional.empty();
+        }
+
         return serializedForm;
+    }
+
+    private boolean isSerializedFormReset() {
+        if (serializedForm.isEmpty()) {
+            return true;
+        }
+
+        for (final Object value : values.values()) {
+            if (isSerializedFormReset(value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isSerializedFormReset(final Object value) {
+        if (value == null) {
+            return true;
+        }
+
+        if (value instanceof final MapRecord childRecord) {
+            if (childRecord.isSerializedFormReset()) {
+                return true;
+            }
+        } else if (value instanceof final Collection<?> collection) {
+            for (final Object collectionValue : collection) {
+                if (isSerializedFormReset(collectionValue)) {
+                    return true;
+                }
+            }
+        } else if (value instanceof final Object[] array) {
+            for (final Object arrayValue : array) {
+                if (isSerializedFormReset(arrayValue)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     @Override
     public Map<String, Object> toMap() {
-        return Collections.unmodifiableMap(values);
+        return toMap(false);
+    }
+
+    public Map<String, Object> toMap(boolean convertSubRecords) {
+        if (convertSubRecords) {
+            Map<String, Object> newMap = new LinkedHashMap<>();
+            values.forEach((key, value) -> {
+                Object valueToAdd;
+
+                if (value instanceof final MapRecord mapRecord) {
+                    valueToAdd = mapRecord.toMap(true);
+                } else if (value != null
+                        && value.getClass().isArray()
+                        && ((Object[]) value).length > 0
+                        && ((Object[]) value)[0] instanceof MapRecord) {
+                    Object[] records = (Object[]) value;
+                    Map<String, Object>[] maps = new Map[records.length];
+                    for (int index = 0; index < records.length; index++) {
+                        maps[index] = ((MapRecord) records[index]).toMap(true);
+                    }
+                    valueToAdd = maps;
+                } else if (value instanceof final List<?> valueList) {
+                    if (!valueList.isEmpty() && valueList.get(0) instanceof MapRecord) {
+                        List<Map<String, Object>> newRecords = new ArrayList<>();
+                        for (Object o : valueList) {
+                            MapRecord rec = (MapRecord) o;
+                            newRecords.add(rec.toMap(true));
+                        }
+
+                        valueToAdd = newRecords;
+                    } else {
+                        valueToAdd = value;
+                    }
+                } else {
+                    valueToAdd = value;
+                }
+
+                newMap.put(key, valueToAdd);
+            });
+
+            return newMap;
+        } else {
+            return Collections.unmodifiableMap(values);
+        }
     }
 
     @Override
     public void setValue(final RecordField field, final Object value) {
         final Optional<RecordField> existingField = setValueAndGetField(field.getFieldName(), value);
 
-        if (!existingField.isPresent()) {
+        // Keep track of any fields whose definition has been added or changed so that it can be taken into account when
+        // calling #incorporateInactiveFields
+        if (existingField.isPresent()) {
+            final RecordField existingRecordField = existingField.get();
+            final RecordField merged = DataTypeUtils.merge(existingRecordField, field);
+            if (!Objects.equals(existingRecordField, merged)) {
+                if (updatedFields == null) {
+                    updatedFields = new LinkedHashMap<>();
+                }
+                updatedFields.put(field.getFieldName(), merged);
+            }
+        } else {
             if (inactiveFields == null) {
                 inactiveFields = new LinkedHashSet<>();
             }
@@ -330,48 +490,149 @@ public class MapRecord implements Record {
 
     @Override
     public void setValue(final String fieldName, final Object value) {
-        final Optional<RecordField> existingField = setValueAndGetField(fieldName, value);
-
-        if (!existingField.isPresent()) {
-            if (inactiveFields == null) {
-                inactiveFields = new LinkedHashSet<>();
+        final Optional<RecordField> existingField = getSchema().getField(fieldName);
+        RecordField recordField = null;
+        if (existingField.isPresent()) {
+            final DataType existingDataType = existingField.get().getDataType();
+            final boolean compatible = DataTypeUtils.isCompatibleDataType(value, existingDataType);
+            if (compatible) {
+                recordField = existingField.get();
             }
-
-            final DataType inferredDataType = DataTypeUtils.inferDataType(value, RecordFieldType.STRING.getDataType());
-            final RecordField field = new RecordField(fieldName, inferredDataType);
-            inactiveFields.add(field);
         }
+        if (recordField == null) {
+            final DataType inferredDataType = DataTypeUtils.inferDataType(value, RecordFieldType.STRING.getDataType());
+            recordField = new RecordField(fieldName, inferredDataType);
+        }
+
+        setValue(recordField, value);
+    }
+
+    @Override
+    public void remove(final RecordField field) {
+        final Optional<RecordField> existingField = resolveField(field);
+        existingField.ifPresent(this::removeValue);
+    }
+
+    @Override
+    public boolean rename(final RecordField field, final String newName) {
+        final Optional<RecordField> resolvedField = resolveField(field);
+        if (resolvedField.isEmpty()) {
+            logger.debug("Could not rename {} to {} because the field could not be resolved to any field in the schema", field, newName);
+            return false;
+        }
+
+        // If the new name already exists in the schema, and there's already a value, do not rename.
+        if (schema.getField(newName).isPresent()) {
+            throw new IllegalArgumentException("Could not rename [" + field + "] to [" + newName + "] because a field already exists with the name [" + newName + "]");
+        }
+
+        // Create a defensive copy of the schema to avoid modifying a shared schema instance.
+        // Multiple records often share the same schema object for efficiency. If we modify
+        // the shared schema, subsequent records would fail to find the original field name.
+        // Only copy if we haven't already made a private copy.
+        if (!mutableSchema) {
+            this.schema = new SimpleRecordSchema(new ArrayList<>(schema.getFields()));
+            this.mutableSchema = true;
+        }
+
+        final String currentName = resolvedField.get().getFieldName();
+        final boolean renamed = schema.renameField(currentName, newName);
+        if (!renamed) {
+            return false;
+        }
+
+        final Object currentValue = removeValue(currentName);
+        updateValue(newName, currentValue);
+        return true;
+    }
+
+    @Override
+    public void regenerateSchema() {
+        final List<RecordField> schemaFields = new ArrayList<>(schema.getFieldCount());
+
+        for (final RecordField schemaField : schema.getFields()) {
+            final Object fieldValue = getValue(schemaField);
+            if (schemaField.getDataType().getFieldType() == RecordFieldType.CHOICE) {
+                schemaFields.add(schemaField);
+            } else if (fieldValue instanceof final Record childRecord) {
+                childRecord.regenerateSchema();
+                schemaFields.add(new RecordField(schemaField.getFieldName(), RecordFieldType.RECORD.getRecordDataType(childRecord.getSchema()), schemaField.isNullable()));
+            } else if (schemaField.getDataType().getFieldType() == RecordFieldType.ARRAY && fieldValue instanceof final Object[] array) {
+                // Handle arrays of records - regenerate schema based on actual element schemas
+                final ArrayDataType arrayType = (ArrayDataType) schemaField.getDataType();
+                final DataType elementType = arrayType.getElementType();
+                if (elementType.getFieldType() == RecordFieldType.RECORD) {
+                    RecordSchema mergedElementSchema = null;
+                    for (final Object element : array) {
+                        if (element instanceof final Record elementRecord) {
+                            elementRecord.regenerateSchema();
+                            if (mergedElementSchema == null) {
+                                mergedElementSchema = elementRecord.getSchema();
+                            } else {
+                                mergedElementSchema = DataTypeUtils.merge(mergedElementSchema, elementRecord.getSchema());
+                            }
+                        }
+                    }
+                    if (mergedElementSchema != null) {
+                        final DataType newElementType = RecordFieldType.RECORD.getRecordDataType(mergedElementSchema);
+                        final DataType newArrayType = RecordFieldType.ARRAY.getArrayDataType(newElementType);
+                        schemaFields.add(new RecordField(schemaField.getFieldName(), newArrayType, schemaField.isNullable()));
+                    } else {
+                        schemaFields.add(schemaField);
+                    }
+                } else {
+                    schemaFields.add(schemaField);
+                }
+            } else {
+                schemaFields.add(schemaField);
+            }
+        }
+
+        schema = new SimpleRecordSchema(schemaFields);
     }
 
     private Optional<RecordField> setValueAndGetField(final String fieldName, final Object value) {
         final Optional<RecordField> field = getSchema().getField(fieldName);
-        if (!field.isPresent()) {
-            if (dropUnknownFields) {
-                return field;
-            }
-
-            final Object previousValue = values.put(fieldName, value);
-            if (!Objects.equals(value, previousValue)) {
-                serializedForm = Optional.empty();
-            }
-
+        if (field.isEmpty()) {
+            updateValue(fieldName, value);
             return field;
         }
 
         final RecordField recordField = field.get();
         final Object coerced = isTypeChecked() ? DataTypeUtils.convertType(value, recordField.getDataType(), fieldName) : value;
-        final Object previousValue = values.put(recordField.getFieldName(), coerced);
-        if (!Objects.equals(coerced, previousValue)) {
+        updateValue(recordField.getFieldName(), coerced);
+
+        return field;
+    }
+
+    private void updateValue(final String fieldName, final Object value) {
+        final Object previousValue = values.put(fieldName, value);
+        if (!Objects.equals(value, previousValue)) {
+            serializedForm = Optional.empty();
+        }
+    }
+
+    private Object removeValue(final RecordField field) {
+        if (field == null) {
+            return null;
+        }
+
+        return removeValue(field.getFieldName());
+    }
+
+    private Object removeValue(final String fieldName) {
+        final Object previousValue = values.remove(fieldName);
+        if (previousValue != null) {
             serializedForm = Optional.empty();
         }
 
-        return field;
+        return previousValue;
     }
 
     @Override
     public void setArrayValue(final String fieldName, final int arrayIndex, final Object value) {
         final Optional<RecordField> field = getSchema().getField(fieldName);
-        if (!field.isPresent()) {
+        if (field.isEmpty()) {
             return;
         }
 
@@ -386,11 +647,10 @@ public class MapRecord implements Record {
         if (arrayObject == null) {
             return;
         }
-        if (!(arrayObject instanceof Object[])) {
+        if (!(arrayObject instanceof final Object[] array)) {
             return;
         }
 
-        final Object[] array = (Object[]) arrayObject;
         if (arrayIndex >= array.length) {
             return;
         }
@@ -410,7 +670,7 @@ public class MapRecord implements Record {
     @SuppressWarnings("unchecked")
     public void setMapValue(final String fieldName, final String mapKey, final Object value) {
         final Optional<RecordField> field = getSchema().getField(fieldName);
-        if (!field.isPresent()) {
+        if (field.isEmpty()) {
             return;
         }
 
@@ -423,7 +683,7 @@ public class MapRecord implements Record {
 
         Object mapObject = values.get(recordField.getFieldName());
         if (mapObject == null) {
-            mapObject = new HashMap<String, Object>();
+            mapObject = new LinkedHashMap<>();
         }
         if (!(mapObject instanceof Map)) {
             return;
@@ -446,12 +706,9 @@ public class MapRecord implements Record {
         this.schema = DataTypeUtils.merge(this.schema, other);
     }
 
-
-
-
     @Override
     public void incorporateInactiveFields() {
-        final List<RecordField> updatedFields = new ArrayList<>();
+        final Map<String, RecordField> fieldsByName = new LinkedHashMap<>();
 
         boolean fieldUpdated = false;
         for (final RecordField field : schema.getFields()) {
@@ -460,7 +717,7 @@ public class MapRecord implements Record {
                 fieldUpdated = true;
             }
 
-            updatedFields.add(updated);
+            fieldsByName.put(updated.getFieldName(), updated);
         }
 
         if (!fieldUpdated && (inactiveFields == null || inactiveFields.isEmpty())) {
@@ -469,30 +726,45 @@ public class MapRecord implements Record {
 
         if (inactiveFields != null) {
             for (final RecordField field : inactiveFields) {
-                if (!updatedFields.contains(field)) {
-                    updatedFields.add(field);
+                final RecordField existingField = fieldsByName.get(field.getFieldName());
+                if (existingField == null) {
+                    fieldsByName.put(field.getFieldName(), field);
+                } else {
+                    if (Objects.equals(existingField, field)) {
+                        continue;
+                    }
+
+                    final RecordField merged = DataTypeUtils.merge(existingField, field);
+                    fieldsByName.put(field.getFieldName(), merged);
                 }
             }
         }
 
-        this.schema = new SimpleRecordSchema(updatedFields);
+        this.schema = new SimpleRecordSchema(new ArrayList<>(fieldsByName.values()));
     }
 
     private RecordField getUpdatedRecordField(final RecordField field) {
-        final DataType dataType = field.getDataType();
+        final String fieldName = field.getFieldName();
+        final RecordField specField;
+        if (updatedFields == null) {
+            specField = field;
+        } else {
+            specField = updatedFields.getOrDefault(fieldName, field);
+        }
+
+        final DataType dataType = specField.getDataType();
         final RecordFieldType fieldType = dataType.getFieldType();
 
         if (isSimpleType(fieldType)) {
-            return field;
+            return specField;
         }
 
-        final Object value = getValue(field);
+        final Object value = getValue(specField);
         if (value == null) {
-            return field;
+            return specField;
         }
 
-        if (fieldType == RecordFieldType.RECORD && value instanceof Record) {
-            final Record childRecord = (Record) value;
+        if (fieldType == RecordFieldType.RECORD && value instanceof final Record childRecord) {
             childRecord.incorporateInactiveFields();
 
             final RecordSchema definedChildSchema = ((RecordDataType) dataType).getChildSchema();
@@ -500,16 +772,14 @@ public class MapRecord implements Record {
             final RecordSchema combinedChildSchema = DataTypeUtils.merge(definedChildSchema, actualChildSchema);
             final DataType combinedDataType = RecordFieldType.RECORD.getRecordDataType(combinedChildSchema);
 
-            final RecordField updatedField = new RecordField(field.getFieldName(), combinedDataType, field.getDefaultValue(), field.getAliases(), field.isNullable());
-            return updatedField;
+            return new RecordField(specField.getFieldName(), combinedDataType, specField.getDefaultValue(), specField.getAliases(), specField.isNullable());
         }
 
-        if (fieldType == RecordFieldType.ARRAY && value instanceof Object[]) {
+        if (fieldType == RecordFieldType.ARRAY && value instanceof final Object[] array) {
             final DataType elementType = ((ArrayDataType) dataType).getElementType();
             final RecordFieldType elementFieldType = elementType.getFieldType();
 
             if (elementFieldType == RecordFieldType.RECORD) {
-                final Object[] array = (Object[]) value;
                 RecordSchema mergedSchema = ((RecordDataType) elementType).getChildSchema();
 
                 for (final Object element : array) {
@@ -524,11 +794,10 @@ public class MapRecord implements Record {
 
                 final DataType mergedRecordType = RecordFieldType.RECORD.getRecordDataType(mergedSchema);
                 final DataType mergedDataType = RecordFieldType.ARRAY.getArrayDataType(mergedRecordType);
-                final RecordField updatedField = new RecordField(field.getFieldName(), mergedDataType, field.getDefaultValue(), field.getAliases(), field.isNullable());
-                return updatedField;
+                return new RecordField(specField.getFieldName(), mergedDataType, specField.getDefaultValue(), specField.getAliases(), specField.isNullable());
             }
 
-            return field;
+            return specField;
         }
 
         if (fieldType == RecordFieldType.CHOICE) {
@@ -536,12 +805,11 @@ public class MapRecord implements Record {
             final List<DataType> possibleTypes = choiceDataType.getPossibleSubTypes();
 
             final DataType chosenDataType = DataTypeUtils.chooseDataType(value, choiceDataType);
-            if (chosenDataType.getFieldType() != RecordFieldType.RECORD || !(value instanceof Record)) {
-                return field;
+            if (chosenDataType == null || chosenDataType.getFieldType() != RecordFieldType.RECORD || !(value instanceof final Record childRecord)) {
+                return specField;
             }
 
             final RecordDataType recordDataType = (RecordDataType) chosenDataType;
-            final Record childRecord = (Record) value;
             childRecord.incorporateInactiveFields();
 
             final RecordSchema definedChildSchema = recordDataType.getChildSchema();
@@ -559,22 +827,18 @@ public class MapRecord implements Record {
             }
 
             final DataType mergedDataType = RecordFieldType.CHOICE.getChoiceDataType(updatedPossibleTypes);
-            return new RecordField(field.getFieldName(), mergedDataType, field.getDefaultValue(), field.getAliases(), field.isNullable());
+            return new RecordField(specField.getFieldName(), mergedDataType, specField.getDefaultValue(), specField.getAliases(), specField.isNullable());
         }
 
-        return field;
+        return specField;
     }
 
     private boolean isSimpleType(final RecordFieldType fieldType) {
-        switch (fieldType) {
-            case ARRAY:
-            case RECORD:
-            case MAP:
-            case CHOICE:
-                return false;
-        }
+        return switch (fieldType) {
+            case ARRAY, RECORD, MAP, CHOICE -> false;
+            default -> true;
+        };
 
-        return true;
     }
 
     @Override

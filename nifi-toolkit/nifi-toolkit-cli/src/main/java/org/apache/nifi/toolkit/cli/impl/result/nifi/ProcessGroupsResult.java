@@ -16,7 +16,6 @@
  */
 package org.apache.nifi.toolkit.cli.impl.result.nifi;
 
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.Context;
 import org.apache.nifi.toolkit.cli.api.ReferenceResolver;
 import org.apache.nifi.toolkit.cli.api.Referenceable;
@@ -34,6 +33,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -45,8 +45,7 @@ public class ProcessGroupsResult extends AbstractWritableResult<List<ProcessGrou
 
     public ProcessGroupsResult(final ResultType resultType, final List<ProcessGroupDTO> processGroups) {
         super(resultType);
-        this.processGroups = processGroups;
-        Validate.notNull(this.processGroups);
+        this.processGroups = Objects.requireNonNull(processGroups);
         this.processGroups.sort(Comparator.comparing(ProcessGroupDTO::getName));
     }
 
@@ -66,18 +65,20 @@ public class ProcessGroupsResult extends AbstractWritableResult<List<ProcessGrou
                 .column("Stopped", 7, 7, false)
                 .column("Disabled", 8, 8, false)
                 .column("Invalid", 7, 7, false)
+                .column("Version Control", 36, 36, false)
                 .build();
 
-        for (int i=0; i < processGroups.size(); i++) {
+        for (int i = 0; i < processGroups.size(); i++) {
             final ProcessGroupDTO dto = processGroups.get(i);
             table.addRow(
-                    String.valueOf(i+1),
+                    String.valueOf(i + 1),
                     dto.getName(),
                     dto.getId(),
                     String.valueOf(dto.getRunningCount()),
                     String.valueOf(dto.getStoppedCount()),
                     String.valueOf(dto.getDisabledCount()),
-                    String.valueOf(dto.getInvalidCount())
+                    String.valueOf(dto.getInvalidCount()),
+                    dto.getVersionControlInformation() != null ? dto.getVersionControlInformation().getState() : "N/A"
             );
         }
 
@@ -87,7 +88,7 @@ public class ProcessGroupsResult extends AbstractWritableResult<List<ProcessGrou
 
     @Override
     public ReferenceResolver createReferenceResolver(final Context context) {
-        final Map<Integer,ProcessGroupDTO> backRefs = new HashMap<>();
+        final Map<Integer, ProcessGroupDTO> backRefs = new HashMap<>();
         final AtomicInteger position = new AtomicInteger(0);
         processGroups.forEach(p -> backRefs.put(position.incrementAndGet(), p));
 

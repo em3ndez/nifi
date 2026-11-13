@@ -18,16 +18,17 @@ package org.apache.nifi.toolkit.cli.impl.command.nifi.policies;
 
 import org.apache.commons.cli.MissingOptionException;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.Strings;
 import org.apache.nifi.toolkit.cli.api.AccessPolicyAction;
 import org.apache.nifi.toolkit.cli.api.CommandException;
 import org.apache.nifi.toolkit.cli.api.Context;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.PoliciesClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.TenantsClient;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
 import org.apache.nifi.toolkit.cli.impl.command.nifi.AbstractNiFiCommand;
 import org.apache.nifi.toolkit.cli.impl.result.VoidResult;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.toolkit.client.PoliciesClient;
+import org.apache.nifi.toolkit.client.TenantsClient;
 import org.apache.nifi.web.api.dto.AccessPolicyDTO;
 import org.apache.nifi.web.api.entity.AccessPolicyEntity;
 import org.apache.nifi.web.api.entity.TenantEntity;
@@ -49,8 +50,8 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
     @Override
     public String getDescription() {
         return "Updates the access policy for the given resource and action, or creates the policy " +
-            "if it doesn't not exist. In stand-alone mode this command will not produce all of " +
-            "the output seen in interactive mode unless the --verbose argument is specified.";
+                "if it doesn't not exist. In stand-alone mode this command will not produce all of " +
+                "the output seen in interactive mode unless the --verbose argument is specified.";
     }
 
     @Override
@@ -70,7 +71,7 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
         final PoliciesClient policiesClient = client.getPoliciesClient();
         final TenantsClient tenantsClient = client.getTenantsClient();
 
-        final String resource = "/" + StringUtils.removeStart(getRequiredArg(properties, CommandOption.POLICY_RESOURCE), "/");
+        final String resource = "/" + Strings.CS.removeStart(getRequiredArg(properties, CommandOption.POLICY_RESOURCE), "/");
         final AccessPolicyAction actionType = AccessPolicyAction.valueOf(
                 getRequiredArg(properties, CommandOption.POLICY_ACTION).toUpperCase().trim());
 
@@ -89,17 +90,17 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
             userEntities.addAll(generateTenantEntities(userIds));
         }
 
-        final Set<TenantEntity> groupEntites = new LinkedHashSet<>();
+        final Set<TenantEntity> groupEntities = new LinkedHashSet<>();
 
         if (StringUtils.isNotBlank(groups)) {
-            groupEntites.addAll(generateTenantEntities(groups, tenantsClient.getUserGroups()));
+            groupEntities.addAll(generateTenantEntities(groups, tenantsClient.getUserGroups()));
         }
 
         if (StringUtils.isNotBlank(groupIds)) {
-            groupEntites.addAll(generateTenantEntities(groupIds));
+            groupEntities.addAll(generateTenantEntities(groupIds));
         }
 
-        if (userEntities.isEmpty() && groupEntites.isEmpty()) {
+        if (userEntities.isEmpty() && groupEntities.isEmpty()) {
             throw new CommandException("Users and groups were blank, nothing to update");
         }
 
@@ -115,8 +116,8 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
         if (policyEntity == null) {
             if (shouldPrint(properties)) {
                 println("Access policy not found" +
-                    " for action " + actionType.toString().toLowerCase() +
-                    " on resource /" + StringUtils.removeStart(resource, "/"));
+                        " for action " + actionType.toString().toLowerCase() +
+                        " on resource /" + Strings.CS.removeStart(resource, "/"));
             }
 
             final AccessPolicyDTO policyDTO = new AccessPolicyDTO();
@@ -128,7 +129,7 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
             policyEntity = new AccessPolicyEntity();
             policyEntity.setComponent(policyDTO);
             policyEntity.setRevision(getInitialRevisionDTO());
-            setTenant(policyEntity, userEntities, groupEntites, overwrite, properties);
+            setTenant(policyEntity, userEntities, groupEntities, overwrite, properties);
 
             final AccessPolicyEntity createdEntity = policiesClient.createAccessPolicy(policyEntity);
 
@@ -139,7 +140,7 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
         } else if (!resource.equals(policyEntity.getComponent().getResource())) {
             if (shouldPrint(properties)) {
                 println("Override the policy inherited from "
-                    + policyEntity.getComponent().getResource());
+                        + policyEntity.getComponent().getResource());
             }
 
             final AccessPolicyDTO policyDTO = new AccessPolicyDTO();
@@ -151,7 +152,7 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
             policyEntity = new AccessPolicyEntity();
             policyEntity.setComponent(policyDTO);
             policyEntity.setRevision(getInitialRevisionDTO());
-            setTenant(policyEntity, userEntities, groupEntites, overwrite, properties);
+            setTenant(policyEntity, userEntities, groupEntities, overwrite, properties);
 
             final AccessPolicyEntity createdEntity = policiesClient.createAccessPolicy(policyEntity);
 
@@ -162,7 +163,7 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
         } else {
             final String clientId = getContext().getSession().getNiFiClientID();
             policyEntity.getRevision().setClientId(clientId);
-            setTenant(policyEntity, userEntities, groupEntites, overwrite, properties);
+            setTenant(policyEntity, userEntities, groupEntities, overwrite, properties);
 
             policiesClient.updateAccessPolicy(policyEntity);
 
@@ -192,8 +193,8 @@ public class UpdateAccessPolicy extends AbstractNiFiCommand<VoidResult> {
     private void addTenant(final Set<TenantEntity> tenantSet, final TenantEntity additionalTenant,
             final String tenantType, final Properties properties) {
         final String dispTenantName = additionalTenant.getComponent() != null && StringUtils.isNotBlank(additionalTenant.getComponent().getIdentity())
-            ? tenantType + " \"" + additionalTenant.getComponent().getIdentity() + "\""
-            : tenantType + " (id: " + additionalTenant.getId() + ")";
+                ? tenantType + " \"" + additionalTenant.getComponent().getIdentity() + "\""
+                : tenantType + " (id: " + additionalTenant.getId() + ")";
 
         if (tenantSet.contains(additionalTenant)) {
             if (shouldPrint(properties)) {

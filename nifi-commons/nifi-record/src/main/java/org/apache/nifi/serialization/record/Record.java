@@ -19,7 +19,9 @@ package org.apache.nifi.serialization.record;
 
 import org.apache.nifi.serialization.record.util.IllegalTypeConversionException;
 
-import java.util.Date;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -47,7 +49,7 @@ public interface Record {
     boolean isDropUnknownFields();
 
     /**
-     * Updates the Record's schema to to incorporate all of the fields in the given schema. If both schemas have a
+     * Updates the Record's schema to incorporate all of the fields in the given schema. If both schemas have a
      * field with the same name but a different type, then the existing schema will be updated to have a
      * {@link RecordFieldType#CHOICE} field with both types as choices. If two fields have the same name but different
      * default values, then the default value that is already in place will remain the default value, unless the current
@@ -108,7 +110,11 @@ public interface Record {
 
     Boolean getAsBoolean(String fieldName);
 
-    Date getAsDate(String fieldName, String format);
+    LocalDate getAsLocalDate(String fieldName, String format);
+
+    LocalDateTime getAsLocalDateTime(String fieldName, String format);
+
+    OffsetDateTime getAsOffsetDateTime(String fieldName, String format);
 
     Object[] getAsArray(String fieldName);
 
@@ -131,7 +137,7 @@ public interface Record {
     /**
      * Updates the value of the given field to the given value. If the field specified is not present in this Record's schema,
      * this method will track of the field as an 'inactive field', which can then be added into the Record's schema via the
-     * {@link #incorporateInactiveFields} method. This method should not be called after each invocation of {@link #setValue(RecordField, Object)}
+     * {@link #incorporateInactiveFields} method. This method should not be called after each invocation of setValue(RecordField, Object),
      * but rather should be called only once all updates to the Record have completed, in order to optimize performance.
      *
      * If this method changes any value in the Record, any {@link SerializedForm} that was provided will be removed (i.e., any
@@ -141,6 +147,32 @@ public interface Record {
      * @param value the value to set
      */
     void setValue(RecordField field, Object value);
+
+    /**
+     * Removes the value of a given field from the Record.
+     * It only removes the value of that field but does not modify the schema.
+     * To remove a field completely (from the schema as well as the data)
+     * the {@see org.apache.nifi.record.path.RecordFieldRemover} class should be used.
+     *
+     * @param field the field that should be removed from the record
+     */
+    void remove(RecordField field);
+
+    /**
+     * Renames the given field to the new name
+     *
+     * @param field   the RecordField to update
+     * @param newName the new name for the field
+     * @return <code>true</code> if the field was renamed, <code>false</code> if the field could not be found
+     * @throws IllegalArgumentException if unable to rename field due to a naming conflict, such as the new name already existing in the schema
+     */
+    boolean rename(RecordField field, String newName);
+
+    /**
+     * Creates a new schema for the Record based on the Record's field types.
+     * In case any of the Record's fields were changed, this method propagates the changes to the parent Record.
+     */
+    void regenerateSchema();
 
     /**
      * Updates the value of a the specified index of a field. If the field specified

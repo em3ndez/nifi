@@ -58,7 +58,7 @@ public enum ResponseCode {
     private static final ResponseCode[] codeArray = new ResponseCode[256];
 
     static {
-        for (final ResponseCode responseCode : ResponseCode.values()) {
+        for (final ResponseCode responseCode : values()) {
             codeArray[responseCode.getCode()] = responseCode;
         }
     }
@@ -70,7 +70,7 @@ public enum ResponseCode {
     private final String description;
     private final boolean containsMessage;
 
-    private ResponseCode(final int code, final String description, final boolean containsMessage) {
+    ResponseCode(final int code, final String description, final boolean containsMessage) {
         this.codeSequence = new byte[]{CODE_SEQUENCE_VALUE_1, CODE_SEQUENCE_VALUE_2, (byte) code};
         this.code = code;
         this.description = description;
@@ -95,22 +95,36 @@ public enum ResponseCode {
     }
 
     public void writeResponse(final DataOutputStream out) throws IOException {
+        writeResponse(out, true);
+    }
+
+    public void writeResponse(final DataOutputStream out, final boolean flush) throws IOException {
         if (containsMessage()) {
             throw new IllegalArgumentException("ResponseCode " + code + " expects an explanation");
         }
 
         out.write(getCodeSequence());
-        out.flush();
+
+        if (flush) {
+            out.flush();
+        }
     }
 
     public void writeResponse(final DataOutputStream out, final String explanation) throws IOException {
+        writeResponse(out, explanation, true);
+    }
+
+    public void writeResponse(final DataOutputStream out, final String explanation, final boolean flush) throws IOException {
         if (!containsMessage()) {
             throw new IllegalArgumentException("ResponseCode " + code + " does not expect an explanation");
         }
 
         out.write(getCodeSequence());
         out.writeUTF(explanation);
-        out.flush();
+
+        if (flush) {
+            out.flush();
+        }
     }
 
     static ResponseCode readCode(final InputStream in) throws IOException, ProtocolException {

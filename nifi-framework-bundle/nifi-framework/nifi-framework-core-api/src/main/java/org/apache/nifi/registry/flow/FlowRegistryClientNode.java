@@ -1,0 +1,95 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.registry.flow;
+
+import org.apache.nifi.components.ConfigVerificationResult;
+import org.apache.nifi.controller.ComponentNode;
+import org.apache.nifi.controller.LoggableComponent;
+import org.apache.nifi.flow.ExternalControllerServiceReference;
+import org.apache.nifi.flow.ParameterProviderReference;
+import org.apache.nifi.flow.VersionedParameterContext;
+import org.apache.nifi.flow.VersionedProcessGroup;
+import org.apache.nifi.logging.ComponentLog;
+import org.apache.nifi.migration.ControllerServiceFactory;
+import org.apache.nifi.nar.ExtensionManager;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+public interface FlowRegistryClientNode extends ComponentNode {
+
+    String getDescription();
+
+    void setDescription(String description);
+
+    boolean isStorageLocationApplicable(String location);
+
+    boolean isBranchingSupported();
+    Set<FlowRegistryBranch> getBranches(FlowRegistryClientUserContext context) throws FlowRegistryException, IOException;
+    FlowRegistryBranch getDefaultBranch(FlowRegistryClientUserContext context) throws FlowRegistryException, IOException;
+
+    Set<FlowRegistryBucket> getBuckets(FlowRegistryClientUserContext context, String branch) throws FlowRegistryException, IOException;
+    FlowRegistryBucket getBucket(FlowRegistryClientUserContext context, BucketLocation bucketLocation) throws FlowRegistryException, IOException;
+
+    RegisteredFlow registerFlow(FlowRegistryClientUserContext context, RegisteredFlow flow) throws FlowRegistryException, IOException;
+    RegisteredFlow deregisterFlow(FlowRegistryClientUserContext context, FlowLocation flowLocation) throws FlowRegistryException, IOException;
+
+    RegisteredFlow getFlow(FlowRegistryClientUserContext context, FlowLocation flowLocation) throws FlowRegistryException, IOException;
+    Set<RegisteredFlow> getFlows(FlowRegistryClientUserContext context, BucketLocation bucketLocation) throws FlowRegistryException, IOException;
+    void createBranch(FlowRegistryClientUserContext context, FlowVersionLocation sourceLocation, String newBranchName) throws FlowRegistryException, IOException;
+
+    FlowSnapshotContainer getFlowContents(FlowRegistryClientUserContext context, FlowVersionLocation flowVersionLocation, boolean fetchRemoteFlows) throws FlowRegistryException, IOException;
+    RegisteredFlowSnapshot registerFlowSnapshot(
+            FlowRegistryClientUserContext context,
+            RegisteredFlow flow,
+            VersionedProcessGroup snapshot,
+            Map<String, ExternalControllerServiceReference> externalControllerServices,
+            Map<String, VersionedParameterContext> parameterContexts,
+            Map<String, ParameterProviderReference> parameterProviderReferences, String comments,
+            String expectedVersion, RegisterAction registerAction
+    ) throws FlowRegistryException, IOException;
+
+    Set<RegisteredFlowSnapshotMetadata> getFlowVersions(FlowRegistryClientUserContext context, FlowLocation flowLocation) throws FlowRegistryException, IOException;
+    Optional<String> getLatestVersion(FlowRegistryClientUserContext context, FlowLocation flowLocation) throws FlowRegistryException, IOException;
+
+    String generateFlowId(String flowName) throws IOException, FlowRegistryException;
+
+    void setComponent(LoggableComponent<FlowRegistryClient> component);
+
+    /**
+     * Verifies that the given configuration is valid for the Flow Registry Client
+     *
+     * @param properties the proposed property values keyed by property name
+     * @param variables a map of variable names to values for resolving expression language
+     * @param logger a logger that can be used during verification
+     * @param extensionManager extension manager used for obtaining appropriate NAR ClassLoaders
+     * @return a list of verification results describing the verification outcome
+     */
+    List<ConfigVerificationResult> verifyConfiguration(Map<String, String> properties, Map<String, String> variables,
+                                                       ComponentLog logger, ExtensionManager extensionManager);
+
+    /**
+     * Migrates the configuration of the Flow Registry Client, allowing properties to be renamed, removed, or reconfigured.
+     *
+     * @param originalPropertyValues the original property values prior to migration
+     * @param controllerServiceFactory factory for creating controller services during migration
+     */
+    void migrateConfiguration(Map<String, String> originalPropertyValues, ControllerServiceFactory controllerServiceFactory);
+}

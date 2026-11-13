@@ -116,6 +116,24 @@ public interface JvmMetrics {
     double nonHeapUsage();
 
     /**
+     * Returns the non-heap memory currently used by the current JVM.
+     *
+     * @param dataUnit The {@link DataUnit} to which the metric will be converted
+     *
+     * @return Non-heap memory currently used by JVM in the given {@link DataUnit}
+     */
+    double nonHeapUsed(DataUnit dataUnit);
+
+    /**
+     * Returns the non-heap memory committed to the JVM.
+     *
+     * @param dataUnit The {@link DataUnit} to which the metric will be converted
+     *
+     * @return Non-heap memory currently committed to the JVM in the given {@link DataUnit}
+     */
+    double nonHeapCommitted(DataUnit dataUnit);
+
+    /**
      * Returns a map of memory pool names to the percentage of that pool which is being used.
      *
      * @return a map of memory pool names to the percentage of that pool which is being used
@@ -143,7 +161,7 @@ public interface JvmMetrics {
      * Returns the name of the currently-running jvm.
      *
      * @return the name of the currently-running jvm, eg  "Java HotSpot(TM) Client VM"
-     * @see <a href="http://download.oracle.com/javase/6/docs/api/java/lang/System.html#getProperties()">System.getProperties()</a>
+     * @see <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/System.html#getProperties()">System.getProperties()</a>
      */
     String name();
 
@@ -202,7 +220,8 @@ public interface JvmMetrics {
      * Per-GC statistics.
      */
     class GarbageCollectorStats {
-        private final long runs, timeMS;
+        private final long runs;
+        private final long timeMS;
 
         GarbageCollectorStats(long runs, long timeMS) {
             this.runs = runs;
@@ -235,7 +254,9 @@ public interface JvmMetrics {
      * buffers.
      */
     class BufferPoolStats {
-        private final long count, memoryUsed, totalCapacity;
+        private final long count;
+        private final long memoryUsed;
+        private final long totalCapacity;
 
         BufferPoolStats(long count, long memoryUsed, long totalCapacity) {
             this.count = count;
@@ -263,7 +284,7 @@ public interface JvmMetrics {
          *         available
          */
         public long getMemoryUsed(DataUnit dataUnit) {
-            return (long)dataUnit.convert(memoryUsed, DataUnit.B);
+            return (long) dataUnit.convert(memoryUsed, DataUnit.B);
         }
 
         /**

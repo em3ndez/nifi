@@ -1,0 +1,269 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { AfterViewInit, Component, DestroyRef, EventEmitter, inject, Input, Output } from '@angular/core';
+import { MatFormField, MatLabel } from '@angular/material/form-field';
+import { MatInput } from '@angular/material/input';
+import { FormBuilder, FormGroup, ReactiveFormsModule } from '@angular/forms';
+import { MatTableDataSource, MatTableModule } from '@angular/material/table';
+import { MatSortModule, Sort } from '@angular/material/sort';
+import { ComponentType, NiFiCommon } from '@nifi/shared';
+import { NavigateToComponentRequest } from '../../../../../../state/flow';
+import { ComponentDifference } from '../../../../../../../../state/flow-shared';
+import { debounceTime } from 'rxjs';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { MatIconButton } from '@angular/material/button';
+import { MatMenu, MatMenuItem, MatMenuTrigger } from '@angular/material/menu';
+import { MatCheckbox } from '@angular/material/checkbox';
+
+interface LocalChange {
+    componentType: string;
+    componentId: string;
+    componentName: string;
+    processGroupId: string;
+    differenceType: string;
+    difference: string;
+    environmental?: boolean;
+}
+
+@Component({
+    selector: 'local-changes-table',
+    imports: [
+        MatFormField,
+        MatInput,
+        MatLabel,
+        ReactiveFormsModule,
+        MatTableModule,
+        MatSortModule,
+        MatIconButton,
+        MatMenu,
+        MatMenuTrigger,
+        MatMenuItem,
+        MatCheckbox
+    ],
+    templateUrl: './local-changes-table.html',
+    styleUrl: './local-changes-table.scss'
+})
+export class LocalChangesTable implements AfterViewInit {
+    private formBuilder = inject(FormBuilder);
+    private nifiCommon = inject(NiFiCommon);
+
+    private destroyRef: DestroyRef = inject(DestroyRef);
+    initialSortColumn: 'componentName' | 'changeType' | 'difference' = 'componentName';
+    initialSortDirection: 'asc' | 'desc' = 'asc';
+
+    filterTerm = '';
+    totalCount = 0;
+    filteredCount = 0;
+    environmentalCount = 0;
+    showEnvironmentalChanges = false;
+
+    activeSort: Sort = {
+        active: this.initialSortColumn,
+        direction: this.initialSortDirection
+    };
+
+    displayedColumns: string[] = ['componentName', 'changeType', 'difference', 'actions'];
+    dataSource: MatTableDataSource<LocalChange> = new MatTableDataSource<LocalChange>();
+    filterForm: FormGroup;
+
+    private allLocalChanges: LocalChange[] = [];
+    private _mode: 'SHOW' | 'REVERT' = 'SHOW';
+
+    @Input() set mode(value: 'SHOW' | 'REVERT') {
+        this._mode = value;
+        // Re-apply filtering when mode changes (important for REVERT mode to filter environmental changes)
+        if (this.allLocalChanges.length > 0) {
+            this.updateDataSource();
+        }
+    }
+
+    get mode(): 'SHOW' | 'REVERT' {
+        return this._mode;
+    }
+
+    @Input() set differences(differences: ComponentDifference[]) {
+        this.allLocalChanges = this.explodeDifferences(differences);
+        this.environmentalCount = this.allLocalChanges.filter((change) => change.environmental === true).length;
+        this.updateDataSource();
+    }
+
+    @Output() goToChange: EventEmitter<NavigateToComponentRequest> = new EventEmitter<NavigateToComponentRequest>();
+
+    constructor() {
+        this.filterForm = this.formBuilder.group({ filterTerm: '', filterColumn: 'componentName' });
+    }
+
+    ngAfterViewInit(): void {
+        this.filterForm
+            .get('filterTerm')
+            ?.valueChanges.pipe(debounceTime(500), takeUntilDestroyed(this.destroyRef))
+            .subscribe((filterTerm: string) => {
+                this.applyFilter(filterTerm);
+            });
+    }
+
+    private updateDataSource(): void {
+        let localChanges = this.allLocalChanges;
+
+        // In REVERT mode, always filter out environmental changes as they cannot be reverted
+        // In SHOW mode, filter based on user preference
+        if (this.mode === 'REVERT' || !this.showEnvironmentalChanges) {
+            localChanges = localChanges.filter((change) => change.environmental !== true);
+        }
+
+        this.dataSource.data = this.sortEntities(localChanges, this.activeSort);
+        this.dataSource.filterPredicate = (data: LocalChange, filter: string) => {
+            const { filterTerm } = JSON.parse(filter);
+            // check the filter term in both the name and type columns
+            return (
+                this.nifiCommon.stringContains(data.componentName, filterTerm, true) ||
+                this.nifiCommon.stringContains(data.differenceType, filterTerm, true)
+            );
+        };
+        this.totalCount = this.mode === 'REVERT' ? localChanges.length : this.allLocalChanges.length;
+        this.filteredCount = localChanges.length;
+
+        // apply any filtering to the new data
+        const filterTerm = this.filterForm.get('filterTerm')?.value;
+        if (filterTerm?.length > 0) {
+            this.applyFilter(filterTerm);
+        }
+    }
+
+    toggleEnvironmentalChanges(): void {
+        this.showEnvironmentalChanges = !this.showEnvironmentalChanges;
+        this.updateDataSource();
+    }
+
+    applyFilter(filterTerm: string) {
+        this.dataSource.filter = JSON.stringify({ filterTerm });
+        this.filteredCount = this.dataSource.filteredData.length;
+    }
+
+    formatComponentName(item: LocalChange): string {
+        return item.componentName || '';
+    }
+
+    formatChangeType(item: LocalChange): string {
+        return item.differenceType;
+    }
+
+    canGoTo(item: LocalChange): boolean {
+        return item.differenceType !== 'Component Removed' && item.differenceType !== 'Component Bundle Changed';
+    }
+
+    formatDifference(item: LocalChange): string {
+        return item.difference;
+    }
+
+    isEnvironmental(item: LocalChange): boolean {
+        return item.environmental === true;
+    }
+
+    sortData(sort: Sort) {
+        this.activeSort = sort;
+        this.dataSource.data = this.sortEntities(this.dataSource.data, sort);
+    }
+
+    sortEntities(data: LocalChange[], sort: Sort): LocalChange[] {
+        if (!data) {
+            return [];
+        }
+        return data.slice().sort((a, b) => {
+            const isAsc = sort.direction === 'asc';
+            let retVal: number;
+            switch (sort.active) {
+                case 'componentName':
+                    retVal = this.nifiCommon.compareString(this.formatComponentName(a), this.formatComponentName(b));
+                    break;
+                case 'changeType':
+                    retVal = this.nifiCommon.compareString(this.formatChangeType(a), this.formatChangeType(b));
+                    break;
+                case 'difference':
+                    retVal = this.nifiCommon.compareString(this.formatDifference(a), this.formatDifference(b));
+                    break;
+                default:
+                    return 0;
+            }
+            return retVal * (isAsc ? 1 : -1);
+        });
+    }
+
+    goToClicked(item: LocalChange) {
+        const type = this.getComponentType(item.componentType);
+        if (type) {
+            const linkMeta: NavigateToComponentRequest = {
+                id: item.componentId,
+                type,
+                processGroupId: item.processGroupId
+            };
+            this.goToChange.next(linkMeta);
+        }
+    }
+
+    private getComponentType(componentType: string): ComponentType | null {
+        switch (componentType) {
+            case 'Connection':
+                return ComponentType.Connection;
+            case 'Processor':
+                return ComponentType.Processor;
+            case 'Output Port':
+                return ComponentType.OutputPort;
+            case 'Input Port':
+                return ComponentType.InputPort;
+            case 'Process Group':
+                return ComponentType.ProcessGroup;
+            case 'Controller Service':
+                return ComponentType.ControllerService;
+            case 'Flow':
+                return ComponentType.Flow;
+            case 'Flow Registry Client':
+                return ComponentType.FlowRegistryClient;
+            case 'Funnel':
+                return ComponentType.Funnel;
+            case 'Label':
+                return ComponentType.Label;
+            case 'Parameter Provider':
+                return ComponentType.ParameterProvider;
+            case 'Remote Process Group':
+                return ComponentType.RemoteProcessGroup;
+            case 'Reporting Task':
+                return ComponentType.ReportingTask;
+            default:
+                return null;
+        }
+    }
+
+    private explodeDifferences(differences: ComponentDifference[]): LocalChange[] {
+        return differences.reduce((accumulator, currentValue) => {
+            const diffs = currentValue.differences.map(
+                (diff) =>
+                    ({
+                        componentName: currentValue.componentName,
+                        componentId: currentValue.componentId,
+                        componentType: currentValue.componentType,
+                        processGroupId: currentValue.processGroupId,
+                        differenceType: diff.differenceType,
+                        difference: diff.difference,
+                        environmental: diff.environmental
+                    }) as LocalChange
+            );
+            return [...accumulator, ...diffs];
+        }, [] as LocalChange[]);
+    }
+}

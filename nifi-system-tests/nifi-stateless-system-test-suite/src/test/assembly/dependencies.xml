@@ -29,11 +29,8 @@
             <useTransitiveFiltering>true</useTransitiveFiltering>
 
             <excludes>
-                <exclude>nifi-stateless-api</exclude>
-                <exclude>nifi-framework-api</exclude>
-                <exclude>nifi-stateless-bootstrap</exclude>
-                <exclude>jackson-core</exclude>
-                <exclude>jackson-databind</exclude>
+                <exclude>*:jackson-core</exclude>
+                <exclude>*:jackson-databind</exclude>
             </excludes>
         </dependencySet>
     </dependencySets>

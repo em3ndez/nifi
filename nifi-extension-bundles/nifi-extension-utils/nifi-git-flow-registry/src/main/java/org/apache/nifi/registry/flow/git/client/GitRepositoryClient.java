@@ -1,0 +1,213 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one or more
+ *  contributor license agreements.  See the NOTICE file distributed with
+ *  this work for additional information regarding copyright ownership.
+ *  The ASF licenses this file to You under the Apache License, Version 2.0
+ *  (the "License"); you may not use this file except in compliance with
+ *  the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+package org.apache.nifi.registry.flow.git.client;
+
+import org.apache.nifi.registry.flow.FlowRegistryException;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * Client for a git repository.
+ */
+public interface GitRepositoryClient {
+
+    /**
+     * @return true if the client can read from the configured repository, false otherwise
+     */
+    boolean hasReadPermission();
+
+    /**
+     * @return true if the client can write from the configured repository, false otherwise
+     */
+    boolean hasWritePermission();
+
+    /**
+     * Retrieves the names of the branches.
+     *
+     * @return the set of branch names
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    Set<String> getBranches() throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the top level directory names which represent buckets.
+     *
+     * @param branch the branch to retrieve from
+     * @return the set of directory names
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    Set<String> getTopLevelDirectoryNames(String branch) throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the filenames in the given directory on the given branch.
+     *
+     * @param directory the directory
+     * @param branch the branch name
+     * @return the set of filenames
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    Set<String> getFileNames(String directory, String branch) throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the commits for the file at the given path on the given branch.
+     *
+     * @param path the path of the file
+     * @param branch the branch name
+     * @return the list of commits
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    List<GitCommit> getCommits(String path, String branch) throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the SHA of the most recent commit that changed the file at the given path on the given branch.
+     *
+     * @param path the path of the file
+     * @param branch the branch name
+     * @return the SHA of the most recent commit, or empty if the file has no commits
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    default Optional<String> getLatestCommitSha(String path, String branch) throws IOException, FlowRegistryException {
+        return getCommits(path, branch).stream().findFirst().map(GitCommit::id);
+    }
+
+    /**
+     * Retrieves the content for the file at the given path on the given branch.
+     *
+     * @param path the path of the file
+     * @param branch the branch name
+     * @return the input stream for the content
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    InputStream getContentFromBranch(String path, String branch) throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the content for the file at the given path from the given commit.
+     *
+     * @param path the path of the file
+     * @param commitSha the commit for the content
+     * @return the input stream for the content
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    InputStream getContentFromCommit(String path, String commitSha) throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the SHA of the file at the given path on the given branch.
+     *
+     * @param path the path of the file
+     * @param branch the branch
+     * @return the SHA of the content
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    Optional<String> getContentSha(String path, String branch) throws IOException, FlowRegistryException;
+
+    /**
+     * Retrieves the blob SHA of the file at the given path from a specific commit.
+     * This is used for atomic commit operations where we need the blob SHA at the
+     * user's expected version, not the current version.
+     *
+     * @param path the path of the file
+     * @param commitSha the commit SHA to get the blob SHA from
+     * @return the blob SHA of the content at the specified commit, or empty if not found
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    default Optional<String> getContentShaAtCommit(String path, String commitSha) throws IOException, FlowRegistryException {
+        // Default implementation returns empty to maintain backward compatibility.
+        // Implementations should override this to support atomic commit operations.
+        return Optional.empty();
+    }
+
+    /**
+     * Creates a file in the repository based on the given request.
+     *
+     * @param request the request
+     * @return the SHA of the commit that created the file
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    String createContent(GitCreateContentRequest request) throws IOException, FlowRegistryException;
+
+    /**
+     * Deletes the file at the given path on the given branch.
+     *
+     * The caller of this method is responsible for closing the returned InputStream.
+     *
+     * @param filePath the path of the file
+     * @param commitMessage the commit message
+     * @param branch the branch
+     * @return the input stream to the deleted content
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    InputStream deleteContent(String filePath, String commitMessage, String branch) throws FlowRegistryException, IOException;
+
+    /**
+     * Deletes the file at the given path on the given branch, attributing the commit to the specified author.
+     *
+     * The caller of this method is responsible for closing the returned InputStream.
+     *
+     * @param filePath the path of the file
+     * @param commitMessage the commit message
+     * @param branch the branch
+     * @param authorName the name of the commit author, or null to use the authenticated user
+     * @param authorEmail the email of the commit author, or null to use the authenticated user
+     * @return the input stream to the deleted content
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     */
+    default InputStream deleteContent(final String filePath, final String commitMessage, final String branch,
+                                      final String authorName, final String authorEmail) throws FlowRegistryException, IOException {
+        return deleteContent(filePath, commitMessage, branch);
+    }
+
+    /**
+     * Creates a new branch in the repository.
+     *
+     * @param newBranchName the name of the branch to create
+     * @param sourceBranch the name of the source branch
+     * @param sourceCommitSha optional commit SHA to use as the starting point for the new branch. If empty, the head commit of the source branch should be used.
+     * @throws IOException if an I/O error occurs
+     * @throws FlowRegistryException if a non-I/O error occurs
+     * @throws UnsupportedOperationException if the repository implementation does not support branch creation
+     */
+    default void createBranch(final String newBranchName, final String sourceBranch, final Optional<String> sourceCommitSha)
+            throws IOException, FlowRegistryException {
+        throw new UnsupportedOperationException("Branch creation is not supported");
+    }
+
+    /**
+     * Closes any resources held by the client.
+     *
+     * @throws IOException if an I/O error occurs closing the client
+     */
+    default void close() throws IOException {
+
+    }
+}

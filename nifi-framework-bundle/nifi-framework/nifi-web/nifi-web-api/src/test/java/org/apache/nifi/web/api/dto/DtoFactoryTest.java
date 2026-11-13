@@ -1,0 +1,1221 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.web.api.dto;
+
+import org.apache.nifi.asset.Asset;
+import org.apache.nifi.bundle.Bundle;
+import org.apache.nifi.bundle.BundleCoordinate;
+import org.apache.nifi.bundle.BundleDetails;
+import org.apache.nifi.components.AllowableValue;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.connector.ConnectorNode;
+import org.apache.nifi.components.connector.ConnectorState;
+import org.apache.nifi.components.connector.FrameworkFlowContext;
+import org.apache.nifi.components.validation.ValidationState;
+import org.apache.nifi.components.validation.ValidationStatus;
+import org.apache.nifi.connectable.Connectable;
+import org.apache.nifi.connectable.ConnectableType;
+import org.apache.nifi.connectable.Connection;
+import org.apache.nifi.connectable.Position;
+import org.apache.nifi.controller.ControllerService;
+import org.apache.nifi.controller.queue.FlowFileQueue;
+import org.apache.nifi.controller.queue.LoadBalanceCompression;
+import org.apache.nifi.controller.queue.LoadBalanceStrategy;
+import org.apache.nifi.controller.service.ControllerServiceNode;
+import org.apache.nifi.controller.service.ControllerServiceProvider;
+import org.apache.nifi.controller.service.ControllerServiceState;
+import org.apache.nifi.controller.status.ProcessGroupStatus;
+import org.apache.nifi.flow.ExecutionEngine;
+import org.apache.nifi.groups.FlowFileConcurrency;
+import org.apache.nifi.groups.FlowFileOutboundPolicy;
+import org.apache.nifi.groups.ProcessGroup;
+import org.apache.nifi.groups.ProcessGroupCounts;
+import org.apache.nifi.groups.StatelessGroupScheduledState;
+import org.apache.nifi.logging.LogLevel;
+import org.apache.nifi.nar.ExtensionManager;
+import org.apache.nifi.nar.NarManifest;
+import org.apache.nifi.nar.NarNode;
+import org.apache.nifi.nar.NarSource;
+import org.apache.nifi.nar.NarState;
+import org.apache.nifi.nar.StandardExtensionDiscoveringManager;
+import org.apache.nifi.nar.SystemBundle;
+import org.apache.nifi.parameter.Parameter;
+import org.apache.nifi.parameter.ParameterContext;
+import org.apache.nifi.parameter.ParameterContextLookup;
+import org.apache.nifi.parameter.ParameterReferenceManager;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.registry.flow.FlowRegistryClientNode;
+import org.apache.nifi.registry.flow.diff.DifferenceType;
+import org.apache.nifi.registry.flow.diff.FlowDifference;
+import org.apache.nifi.web.ResourceNotFoundException;
+import org.apache.nifi.web.api.dto.flow.ProcessGroupFlowDTO;
+import org.apache.nifi.web.api.entity.AllowableValueEntity;
+import org.apache.nifi.web.api.entity.ParameterContextReferenceEntity;
+import org.apache.nifi.web.revision.RevisionManager;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+public class DtoFactoryTest {
+    private final Logger logger = LoggerFactory.getLogger(getClass());
+
+    @Test
+    void testAllowableValuesControllerService() {
+        final Set<String> csIdentifiers = new HashSet<>(Arrays.asList("uuid-2", "uuid-3", "uuid-1"));
+        final ControllerServiceProvider controllerServiceProvider = mock(ControllerServiceProvider.class);
+        when(controllerServiceProvider.getControllerServiceIdentifiers(any(), any())).thenReturn(csIdentifiers);
+        final ControllerServiceNode service1 = mock(ControllerServiceNode.class);
+        final ControllerServiceNode service2 = mock(ControllerServiceNode.class);
+        final ControllerServiceNode service3 = mock(ControllerServiceNode.class);
+        when(service1.getIdentifier()).thenReturn("uuid-1");
+        when(service2.getIdentifier()).thenReturn("uuid-2");
+        when(service3.getIdentifier()).thenReturn("uuid-3");
+        when(service1.getName()).thenReturn("ReaderZ");
+        when(service2.getName()).thenReturn("ReaderY");
+        when(service3.getName()).thenReturn("ReaderX");
+        when(service1.isAuthorized(any(), any(), any())).thenReturn(Boolean.TRUE);
+        when(service2.isAuthorized(any(), any(), any())).thenReturn(Boolean.TRUE);
+        when(service3.isAuthorized(any(), any(), any())).thenReturn(Boolean.TRUE);
+        when(controllerServiceProvider.getControllerServiceNode(eq("uuid-1"))).thenReturn(service1);
+        when(controllerServiceProvider.getControllerServiceNode(eq("uuid-2"))).thenReturn(service2);
+        when(controllerServiceProvider.getControllerServiceNode(eq("uuid-3"))).thenReturn(service3);
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        final EntityFactory entityFactory = new EntityFactory();
+        dtoFactory.setControllerServiceProvider(controllerServiceProvider);
+        dtoFactory.setEntityFactory(entityFactory);
+        final StandardExtensionDiscoveringManager extensionManager =
+                new StandardExtensionDiscoveringManager(Collections.singleton(ControllerService.class));
+        extensionManager.discoverExtensions(
+                Collections.singleton(SystemBundle.create(".", getClass().getClassLoader())));
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final PropertyDescriptor propertyDescriptor = new PropertyDescriptor.Builder()
+                .name("reader")
+                .identifiesControllerService(ControllerService.class)
+                .build();
+        final PropertyDescriptorDTO dto = dtoFactory.createPropertyDescriptorDto(propertyDescriptor, null);
+        final List<AllowableValueEntity> allowableValues = dto.getAllowableValues();
+        final List<String> namesActual = allowableValues.stream()
+                .map(v -> v.getAllowableValue().getDisplayName()).collect(Collectors.toList());
+        logger.trace("{}", namesActual);
+        assertEquals(Arrays.asList("ReaderX", "ReaderY", "ReaderZ"), namesActual);
+    }
+
+    @Test
+    void testAllowableValuesFixed() {
+        // from "org.apache.nifi.processors.aws.s3.AbstractS3Processor"
+        final PropertyDescriptor signerOverride = new PropertyDescriptor.Builder()
+                .name("Signer Override")
+                .allowableValues(
+                        new AllowableValue("Default Signature", "Default Signature"),
+                        new AllowableValue("AWSS3V4SignerType", "Signature v4"),
+                        new AllowableValue("S3SignerType", "Signature v2"))
+                .defaultValue("Default Signature")
+                .build();
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        final EntityFactory entityFactory = new EntityFactory();
+        dtoFactory.setEntityFactory(entityFactory);
+        final PropertyDescriptorDTO dto = dtoFactory.createPropertyDescriptorDto(signerOverride, null);
+        final List<AllowableValueEntity> allowableValues = dto.getAllowableValues();
+        final List<String> namesActual = allowableValues.stream()
+                .map(v -> v.getAllowableValue().getDisplayName()).collect(Collectors.toList());
+        logger.trace("{}", namesActual);
+        assertEquals(Arrays.asList("Default Signature", "Signature v4", "Signature v2"), namesActual);
+    }
+
+    @Test
+    public void testCreateNarSummaryDtoWhenInstalled() {
+        final NarManifest narManifest = NarManifest.builder()
+                .group("com.foo")
+                .id("my-processor")
+                .version("1.0.0")
+                .buildTimestamp("2024-01-26T00:11:29Z")
+                .createdBy("Maven NAR Plugin")
+                .build();
+
+        final NarNode narNode = NarNode.builder()
+                .identifier(UUID.randomUUID().toString())
+                .narFile(new File("does-not-ext"))
+                .narFileDigest("nar-digest")
+                .manifest(narManifest)
+                .source(NarSource.UPLOAD)
+                .sourceIdentifier("1234")
+                .state(NarState.INSTALLED)
+                .build();
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        when(extensionManager.getTypes(narManifest.getCoordinate())).thenReturn(Collections.emptySet());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final NarSummaryDTO summaryDTO = dtoFactory.createNarSummaryDto(narNode);
+        assertEquals(narNode.getIdentifier(), summaryDTO.getIdentifier());
+        assertEquals(narManifest.getBuildTimestamp(), summaryDTO.getBuildTime());
+        assertEquals(narManifest.getCreatedBy(), summaryDTO.getCreatedBy());
+        assertEquals(narNode.getNarFileDigest(), summaryDTO.getDigest());
+        assertEquals(narNode.getState().getValue(), summaryDTO.getState());
+        assertEquals(narNode.getSource().name(), summaryDTO.getSourceType());
+        assertEquals(narNode.getSourceIdentifier(), summaryDTO.getSourceIdentifier());
+        assertEquals(0, summaryDTO.getExtensionCount());
+        assertTrue(summaryDTO.isInstallComplete());
+        assertNull(summaryDTO.getFailureMessage());
+        assertNull(summaryDTO.getDependencyCoordinate());
+
+        final NarCoordinateDTO coordinateDTO = summaryDTO.getCoordinate();
+        verifyCoordinateDTO(narManifest, coordinateDTO);
+    }
+
+    @Test
+    public void testCreateNarSummaryDtoWhenInstalling() {
+        final NarManifest narManifest = NarManifest.builder()
+                .group("com.foo")
+                .id("my-processor")
+                .version("1.0.0")
+                .dependencyGroup("com.dependency")
+                .dependencyId("my-dependency")
+                .dependencyVersion("2.0.0")
+                .buildTimestamp("2024-01-26T00:11:29Z")
+                .createdBy("Maven NAR Plugin")
+                .build();
+
+        final NarNode narNode = NarNode.builder()
+                .identifier(UUID.randomUUID().toString())
+                .narFile(new File("does-not-ext"))
+                .narFileDigest("nar-digest")
+                .manifest(narManifest)
+                .source(NarSource.UPLOAD)
+                .sourceIdentifier("1234")
+                .state(NarState.INSTALLING)
+                .build();
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        when(extensionManager.getTypes(narManifest.getCoordinate())).thenReturn(Collections.emptySet());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final NarSummaryDTO summaryDTO = dtoFactory.createNarSummaryDto(narNode);
+        assertEquals(narNode.getIdentifier(), summaryDTO.getIdentifier());
+        assertEquals(narManifest.getBuildTimestamp(), summaryDTO.getBuildTime());
+        assertEquals(narManifest.getCreatedBy(), summaryDTO.getCreatedBy());
+        assertEquals(narNode.getNarFileDigest(), summaryDTO.getDigest());
+        assertEquals(narNode.getState().getValue(), summaryDTO.getState());
+        assertEquals(narNode.getSource().name(), summaryDTO.getSourceType());
+        assertEquals(narNode.getSourceIdentifier(), summaryDTO.getSourceIdentifier());
+        assertEquals(0, summaryDTO.getExtensionCount());
+        assertFalse(summaryDTO.isInstallComplete());
+        assertNull(summaryDTO.getFailureMessage());
+
+        final NarCoordinateDTO coordinateDTO = summaryDTO.getCoordinate();
+        verifyCoordinateDTO(narManifest, coordinateDTO);
+
+        final NarCoordinateDTO dependencyCoordinateDTO = summaryDTO.getDependencyCoordinate();
+        verifyDependencyCoordinateDTO(narManifest, dependencyCoordinateDTO);
+    }
+
+    private void verifyCoordinateDTO(final NarManifest narManifest, final NarCoordinateDTO coordinateDTO) {
+        assertEquals(narManifest.getGroup(), coordinateDTO.getGroup());
+        assertEquals(narManifest.getId(), coordinateDTO.getArtifact());
+        assertEquals(narManifest.getVersion(), coordinateDTO.getVersion());
+    }
+
+    private void verifyDependencyCoordinateDTO(final NarManifest narManifest, final NarCoordinateDTO coordinateDTO) {
+        assertEquals(narManifest.getDependencyGroup(), coordinateDTO.getGroup());
+        assertEquals(narManifest.getDependencyId(), coordinateDTO.getArtifact());
+        assertEquals(narManifest.getDependencyVersion(), coordinateDTO.getVersion());
+    }
+
+    private Bundle createBundle(final String group, final String id, final String version) {
+        final BundleCoordinate coordinate = new BundleCoordinate(group, id, version);
+        final BundleDetails details = new BundleDetails.Builder()
+                .workingDir(new File("."))
+                .coordinate(coordinate)
+                .build();
+        return new Bundle(details, getClass().getClassLoader());
+    }
+
+    @Test
+    void testControllerServiceMultipleVersionsAvailableGhostWithOneCompatibleBundle() {
+        final String group = "com.example";
+        final String id = "test-service";
+
+        final BundleCoordinate currentCoordinate = new BundleCoordinate(group, id, "1.0.0");
+        final Bundle compatible = createBundle(group, id, "1.1.0");
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        final String canonicalClassName = "com.example.ControllerService";
+        when(extensionManager.getBundles(canonicalClassName)).thenReturn(Collections.singletonList(compatible));
+
+        final ControllerServiceNode serviceNode = mock(ControllerServiceNode.class);
+        when(serviceNode.getIdentifier()).thenReturn("svc-1");
+        when(serviceNode.getName()).thenReturn("Service");
+        when(serviceNode.getCanonicalClassName()).thenReturn(canonicalClassName);
+        when(serviceNode.getBundleCoordinate()).thenReturn(currentCoordinate);
+        when(serviceNode.getAnnotationData()).thenReturn(null);
+        when(serviceNode.getComments()).thenReturn(null);
+        when(serviceNode.getBulletinLevel()).thenReturn(LogLevel.INFO);
+        when(serviceNode.getState()).thenReturn(ControllerServiceState.DISABLED);
+        when(serviceNode.isSupportsSensitiveDynamicProperties()).thenReturn(false);
+        when(serviceNode.isDeprecated()).thenReturn(false);
+        when(serviceNode.isExtensionMissing()).thenReturn(true); // ghost component
+        when(serviceNode.getVersionedComponentId()).thenReturn(Optional.empty());
+        when(serviceNode.getRawPropertyValues()).thenReturn(Collections.emptyMap());
+        final ControllerService controllerService = mock(ControllerService.class);
+        when(controllerService.getPropertyDescriptors()).thenReturn(Collections.emptyList());
+        when(serviceNode.getControllerServiceImplementation()).thenReturn(controllerService);
+        when(serviceNode.getValidationStatus(anyLong(), any())).thenReturn(ValidationStatus.VALID);
+        when(serviceNode.getValidationErrors()).thenReturn(Collections.emptyList());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final ControllerServiceDTO dto = dtoFactory.createControllerServiceDto(serviceNode);
+        assertTrue(dto.getMultipleVersionsAvailable(), "Ghost service with one compatible bundle should allow change version");
+    }
+
+    @Test
+    void testControllerServiceMultipleVersionsAvailableNotGhostWithOneCompatibleBundle() {
+        final String group = "com.example";
+        final String id = "test-service";
+
+        final BundleCoordinate currentCoordinate = new BundleCoordinate(group, id, "1.0.0");
+        final Bundle compatible = createBundle(group, id, "1.1.0");
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        final String canonicalClassName = "com.example.ControllerService";
+        when(extensionManager.getBundles(canonicalClassName)).thenReturn(Collections.singletonList(compatible));
+
+        final ControllerServiceNode serviceNode = mock(ControllerServiceNode.class);
+        when(serviceNode.getIdentifier()).thenReturn("svc-1");
+        when(serviceNode.getName()).thenReturn("Service");
+        when(serviceNode.getCanonicalClassName()).thenReturn(canonicalClassName);
+        when(serviceNode.getBundleCoordinate()).thenReturn(currentCoordinate);
+        when(serviceNode.getAnnotationData()).thenReturn(null);
+        when(serviceNode.getComments()).thenReturn(null);
+        when(serviceNode.getBulletinLevel()).thenReturn(LogLevel.INFO);
+        when(serviceNode.getState()).thenReturn(ControllerServiceState.DISABLED);
+        when(serviceNode.isSupportsSensitiveDynamicProperties()).thenReturn(false);
+        when(serviceNode.isDeprecated()).thenReturn(false);
+        when(serviceNode.isExtensionMissing()).thenReturn(false); // not ghost
+        when(serviceNode.getVersionedComponentId()).thenReturn(Optional.empty());
+        when(serviceNode.getRawPropertyValues()).thenReturn(Collections.emptyMap());
+        final ControllerService controllerService = mock(ControllerService.class);
+        when(controllerService.getPropertyDescriptors()).thenReturn(Collections.emptyList());
+        when(serviceNode.getControllerServiceImplementation()).thenReturn(controllerService);
+        when(serviceNode.getValidationStatus(anyLong(), any())).thenReturn(ValidationStatus.VALID);
+        when(serviceNode.getValidationErrors()).thenReturn(Collections.emptyList());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final ControllerServiceDTO dto = dtoFactory.createControllerServiceDto(serviceNode);
+        assertFalse(dto.getMultipleVersionsAvailable(), "Non-ghost service with one compatible bundle should not allow change version");
+    }
+
+    @Test
+    void testControllerServiceMultipleVersionsAvailableNotGhostWithTwoCompatibleBundles() {
+        final String group = "com.example";
+        final String id = "test-service";
+
+        final BundleCoordinate currentCoordinate = new BundleCoordinate(group, id, "1.0.0");
+        final Bundle compatible1 = createBundle(group, id, "1.1.0");
+        final Bundle compatible2 = createBundle(group, id, "1.2.0");
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        final String canonicalClassName = "com.example.ControllerService";
+        when(extensionManager.getBundles(canonicalClassName)).thenReturn(Arrays.asList(compatible1, compatible2));
+
+        final ControllerServiceNode serviceNode = mock(ControllerServiceNode.class);
+        when(serviceNode.getIdentifier()).thenReturn("svc-1");
+        when(serviceNode.getName()).thenReturn("Service");
+        when(serviceNode.getCanonicalClassName()).thenReturn(canonicalClassName);
+        when(serviceNode.getBundleCoordinate()).thenReturn(currentCoordinate);
+        when(serviceNode.getAnnotationData()).thenReturn(null);
+        when(serviceNode.getComments()).thenReturn(null);
+        when(serviceNode.getBulletinLevel()).thenReturn(LogLevel.INFO);
+        when(serviceNode.getState()).thenReturn(ControllerServiceState.DISABLED);
+        when(serviceNode.isSupportsSensitiveDynamicProperties()).thenReturn(false);
+        when(serviceNode.isDeprecated()).thenReturn(false);
+        when(serviceNode.isExtensionMissing()).thenReturn(false); // not ghost
+        when(serviceNode.getVersionedComponentId()).thenReturn(Optional.empty());
+        when(serviceNode.getRawPropertyValues()).thenReturn(Collections.emptyMap());
+        final ControllerService controllerService = mock(ControllerService.class);
+        when(controllerService.getPropertyDescriptors()).thenReturn(Collections.emptyList());
+        when(serviceNode.getControllerServiceImplementation()).thenReturn(controllerService);
+        when(serviceNode.getValidationStatus(anyLong(), any())).thenReturn(ValidationStatus.VALID);
+        when(serviceNode.getValidationErrors()).thenReturn(Collections.emptyList());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final ControllerServiceDTO dto = dtoFactory.createControllerServiceDto(serviceNode);
+        assertTrue(dto.getMultipleVersionsAvailable(), "Non-ghost service with two compatible bundles should allow change version");
+    }
+
+    @Test
+    void testFlowRegistryClientMultipleVersionsAvailableGhostWithOneCompatibleBundle() {
+        final String group = "com.example";
+        final String id = "test-registry-client";
+
+        final BundleCoordinate currentCoordinate = new BundleCoordinate(group, id, "1.0.0");
+        final Bundle compatible = createBundle(group, id, "1.1.0");
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        final String canonicalClassName = "com.example.FlowRegistryClient";
+        when(extensionManager.getBundles(canonicalClassName)).thenReturn(Collections.singletonList(compatible));
+
+        final FlowRegistryClientNode clientNode = mock(FlowRegistryClientNode.class);
+        when(clientNode.getIdentifier()).thenReturn("client-1");
+        when(clientNode.getName()).thenReturn("Client");
+        when(clientNode.getDescription()).thenReturn("desc");
+        when(clientNode.getCanonicalClassName()).thenReturn(canonicalClassName);
+        when(clientNode.getBundleCoordinate()).thenReturn(currentCoordinate);
+        when(clientNode.getAnnotationData()).thenReturn(null);
+        when(clientNode.isSupportsSensitiveDynamicProperties()).thenReturn(false);
+        when(clientNode.isBranchingSupported()).thenReturn(false);
+        when(clientNode.isDeprecated()).thenReturn(false);
+        when(clientNode.isExtensionMissing()).thenReturn(true); // ghost component
+        when(clientNode.getRawPropertyValues()).thenReturn(Collections.emptyMap());
+        when(clientNode.getPropertyDescriptors()).thenReturn(Collections.emptyList());
+        when(clientNode.getValidationStatus(anyLong(), any())).thenReturn(ValidationStatus.VALID);
+        when(clientNode.getValidationErrors()).thenReturn(Collections.emptyList());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final FlowRegistryClientDTO dto = dtoFactory.createRegistryDto(clientNode);
+        assertTrue(dto.getMultipleVersionsAvailable(), "Ghost registry client with one compatible bundle should allow change version");
+    }
+
+    @Test
+    void testCreateConnectionDtoWithRetriedRelationships() {
+        // Set up test relationships
+        final Relationship successRelationship = new Relationship.Builder().name("success").build();
+        final Relationship failureRelationship = new Relationship.Builder().name("failure").build();
+        final Relationship retryRelationship = new Relationship.Builder().name("retry").build();
+
+        // Mock the process group
+        final ProcessGroup processGroup = mock(ProcessGroup.class);
+        when(processGroup.getIdentifier()).thenReturn("group-id");
+
+        // Mock the source connectable
+        final Connectable sourceConnectable = mock(Connectable.class);
+        when(sourceConnectable.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(sourceConnectable.getIdentifier()).thenReturn("source-id");
+        when(sourceConnectable.getName()).thenReturn("Source Processor");
+        when(sourceConnectable.getProcessGroupIdentifier()).thenReturn("group-id");
+        when(sourceConnectable.getProcessGroup()).thenReturn(processGroup);
+        // Configure retry settings: only "failure" and "retry" relationships are retried
+        when(sourceConnectable.isRelationshipRetried(successRelationship)).thenReturn(false);
+        when(sourceConnectable.isRelationshipRetried(failureRelationship)).thenReturn(true);
+        when(sourceConnectable.isRelationshipRetried(retryRelationship)).thenReturn(true);
+
+        // Mock the destination connectable
+        final Connectable destinationConnectable = mock(Connectable.class);
+        when(destinationConnectable.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(destinationConnectable.getIdentifier()).thenReturn("dest-id");
+        when(destinationConnectable.getName()).thenReturn("Destination Processor");
+        when(destinationConnectable.getProcessGroupIdentifier()).thenReturn("group-id");
+        when(destinationConnectable.getProcessGroup()).thenReturn(processGroup);
+
+        // Mock the flow file queue
+        final FlowFileQueue flowFileQueue = mock(FlowFileQueue.class);
+        when(flowFileQueue.getBackPressureObjectThreshold()).thenReturn(10000L);
+        when(flowFileQueue.getBackPressureDataSizeThreshold()).thenReturn("1 GB");
+        when(flowFileQueue.getFlowFileExpiration()).thenReturn("0 sec");
+        when(flowFileQueue.getPriorities()).thenReturn(Collections.emptyList());
+        when(flowFileQueue.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategy.DO_NOT_LOAD_BALANCE);
+        when(flowFileQueue.getPartitioningAttribute()).thenReturn(null);
+        when(flowFileQueue.getLoadBalanceCompression()).thenReturn(LoadBalanceCompression.DO_NOT_COMPRESS);
+        when(flowFileQueue.isActivelyLoadBalancing()).thenReturn(false);
+
+        // Mock the connection - only "failure" and "retry" are selected (success is not selected)
+        final Connection connection = mock(Connection.class);
+        when(connection.getIdentifier()).thenReturn("connection-id");
+        when(connection.getName()).thenReturn("Test Connection");
+        when(connection.getSource()).thenReturn(sourceConnectable);
+        when(connection.getDestination()).thenReturn(destinationConnectable);
+        when(connection.getProcessGroup()).thenReturn(processGroup);
+        when(connection.getFlowFileQueue()).thenReturn(flowFileQueue);
+        when(connection.getRelationships()).thenReturn(Arrays.asList(failureRelationship, retryRelationship));
+        when(connection.getBendPoints()).thenReturn(Collections.emptyList());
+        when(connection.getLabelIndex()).thenReturn(0);
+        when(connection.getZIndex()).thenReturn(0L);
+        when(connection.getVersionedComponentId()).thenReturn(Optional.empty());
+
+        // Create the DTO factory
+        final DtoFactory dtoFactory = new DtoFactory();
+
+        // Test the creation of ConnectionDTO
+        final ConnectionDTO connectionDto = dtoFactory.createConnectionDto(connection);
+
+        // Assertions
+        assertEquals("connection-id", connectionDto.getId());
+        assertEquals("Test Connection", connectionDto.getName());
+
+        // Verify selected relationships
+        assertEquals(2, connectionDto.getSelectedRelationships().size());
+        assertTrue(connectionDto.getSelectedRelationships().contains("failure"));
+        assertTrue(connectionDto.getSelectedRelationships().contains("retry"));
+
+        // Verify retried relationships - should only contain the selected relationships that are also retried
+        assertEquals(2, connectionDto.getRetriedRelationships().size());
+        assertTrue(connectionDto.getRetriedRelationships().contains("failure"));
+        assertTrue(connectionDto.getRetriedRelationships().contains("retry"));
+    }
+
+    @Test
+    void testCreateConnectionDtoWithPartiallyRetriedRelationships() {
+        // Set up test relationships
+        final Relationship successRelationship = new Relationship.Builder().name("success").build();
+        final Relationship failureRelationship = new Relationship.Builder().name("failure").build();
+
+        // Mock the process group
+        final ProcessGroup processGroup = mock(ProcessGroup.class);
+        when(processGroup.getIdentifier()).thenReturn("group-id");
+
+        // Mock the source connectable
+        final Connectable sourceConnectable = mock(Connectable.class);
+        when(sourceConnectable.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(sourceConnectable.getIdentifier()).thenReturn("source-id");
+        when(sourceConnectable.getName()).thenReturn("Source Processor");
+        when(sourceConnectable.getProcessGroupIdentifier()).thenReturn("group-id");
+        when(sourceConnectable.getProcessGroup()).thenReturn(processGroup);
+        // Configure retry settings: only "failure" relationship is retried, "success" is not
+        when(sourceConnectable.isRelationshipRetried(successRelationship)).thenReturn(false);
+        when(sourceConnectable.isRelationshipRetried(failureRelationship)).thenReturn(true);
+
+        // Mock the destination connectable
+        final Connectable destinationConnectable = mock(Connectable.class);
+        when(destinationConnectable.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(destinationConnectable.getIdentifier()).thenReturn("dest-id");
+        when(destinationConnectable.getName()).thenReturn("Destination Processor");
+        when(destinationConnectable.getProcessGroupIdentifier()).thenReturn("group-id");
+        when(destinationConnectable.getProcessGroup()).thenReturn(processGroup);
+
+        // Mock the flow file queue
+        final FlowFileQueue flowFileQueue = mock(FlowFileQueue.class);
+        when(flowFileQueue.getBackPressureObjectThreshold()).thenReturn(10000L);
+        when(flowFileQueue.getBackPressureDataSizeThreshold()).thenReturn("1 GB");
+        when(flowFileQueue.getFlowFileExpiration()).thenReturn("0 sec");
+        when(flowFileQueue.getPriorities()).thenReturn(Collections.emptyList());
+        when(flowFileQueue.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategy.DO_NOT_LOAD_BALANCE);
+        when(flowFileQueue.getPartitioningAttribute()).thenReturn(null);
+        when(flowFileQueue.getLoadBalanceCompression()).thenReturn(LoadBalanceCompression.DO_NOT_COMPRESS);
+        when(flowFileQueue.isActivelyLoadBalancing()).thenReturn(false);
+
+        // Mock the connection - both relationships are selected
+        final Connection connection = mock(Connection.class);
+        when(connection.getIdentifier()).thenReturn("connection-id");
+        when(connection.getName()).thenReturn("Test Connection");
+        when(connection.getSource()).thenReturn(sourceConnectable);
+        when(connection.getDestination()).thenReturn(destinationConnectable);
+        when(connection.getProcessGroup()).thenReturn(processGroup);
+        when(connection.getFlowFileQueue()).thenReturn(flowFileQueue);
+        when(connection.getRelationships()).thenReturn(Arrays.asList(successRelationship, failureRelationship));
+        when(connection.getBendPoints()).thenReturn(Collections.emptyList());
+        when(connection.getLabelIndex()).thenReturn(0);
+        when(connection.getZIndex()).thenReturn(0L);
+        when(connection.getVersionedComponentId()).thenReturn(Optional.empty());
+
+        // Create the DTO factory
+        final DtoFactory dtoFactory = new DtoFactory();
+
+        // Test the creation of ConnectionDTO
+        final ConnectionDTO connectionDto = dtoFactory.createConnectionDto(connection);
+
+        // Assertions
+        assertEquals("connection-id", connectionDto.getId());
+        assertEquals("Test Connection", connectionDto.getName());
+
+        // Verify selected relationships - should contain both
+        assertEquals(2, connectionDto.getSelectedRelationships().size());
+        assertTrue(connectionDto.getSelectedRelationships().contains("success"));
+        assertTrue(connectionDto.getSelectedRelationships().contains("failure"));
+
+        // Verify retried relationships - should only contain "failure" since "success" is not retried
+        assertEquals(1, connectionDto.getRetriedRelationships().size());
+        assertTrue(connectionDto.getRetriedRelationships().contains("failure"));
+        assertFalse(connectionDto.getRetriedRelationships().contains("success"));
+    }
+
+    @Test
+    void testCreateConnectionDtoWithNoRetriedRelationships() {
+        // Set up test relationships
+        final Relationship successRelationship = new Relationship.Builder().name("success").build();
+        final Relationship failureRelationship = new Relationship.Builder().name("failure").build();
+
+        // Mock the process group
+        final ProcessGroup processGroup = mock(ProcessGroup.class);
+        when(processGroup.getIdentifier()).thenReturn("group-id");
+
+        // Mock the source connectable
+        final Connectable sourceConnectable = mock(Connectable.class);
+        when(sourceConnectable.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(sourceConnectable.getIdentifier()).thenReturn("source-id");
+        when(sourceConnectable.getName()).thenReturn("Source Processor");
+        when(sourceConnectable.getProcessGroupIdentifier()).thenReturn("group-id");
+        when(sourceConnectable.getProcessGroup()).thenReturn(processGroup);
+        // Configure retry settings: no relationships are retried
+        when(sourceConnectable.isRelationshipRetried(successRelationship)).thenReturn(false);
+        when(sourceConnectable.isRelationshipRetried(failureRelationship)).thenReturn(false);
+
+        // Mock the destination connectable
+        final Connectable destinationConnectable = mock(Connectable.class);
+        when(destinationConnectable.getConnectableType()).thenReturn(ConnectableType.PROCESSOR);
+        when(destinationConnectable.getIdentifier()).thenReturn("dest-id");
+        when(destinationConnectable.getName()).thenReturn("Destination Processor");
+        when(destinationConnectable.getProcessGroupIdentifier()).thenReturn("group-id");
+        when(destinationConnectable.getProcessGroup()).thenReturn(processGroup);
+
+        // Mock the flow file queue
+        final FlowFileQueue flowFileQueue = mock(FlowFileQueue.class);
+        when(flowFileQueue.getBackPressureObjectThreshold()).thenReturn(10000L);
+        when(flowFileQueue.getBackPressureDataSizeThreshold()).thenReturn("1 GB");
+        when(flowFileQueue.getFlowFileExpiration()).thenReturn("0 sec");
+        when(flowFileQueue.getPriorities()).thenReturn(Collections.emptyList());
+        when(flowFileQueue.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategy.DO_NOT_LOAD_BALANCE);
+        when(flowFileQueue.getPartitioningAttribute()).thenReturn(null);
+        when(flowFileQueue.getLoadBalanceCompression()).thenReturn(LoadBalanceCompression.DO_NOT_COMPRESS);
+        when(flowFileQueue.isActivelyLoadBalancing()).thenReturn(false);
+
+        // Mock the connection
+        final Connection connection = mock(Connection.class);
+        when(connection.getIdentifier()).thenReturn("connection-id");
+        when(connection.getName()).thenReturn("Test Connection");
+        when(connection.getSource()).thenReturn(sourceConnectable);
+        when(connection.getDestination()).thenReturn(destinationConnectable);
+        when(connection.getProcessGroup()).thenReturn(processGroup);
+        when(connection.getFlowFileQueue()).thenReturn(flowFileQueue);
+        when(connection.getRelationships()).thenReturn(Arrays.asList(successRelationship, failureRelationship));
+        when(connection.getBendPoints()).thenReturn(Collections.emptyList());
+        when(connection.getLabelIndex()).thenReturn(0);
+        when(connection.getZIndex()).thenReturn(0L);
+        when(connection.getVersionedComponentId()).thenReturn(Optional.empty());
+
+        // Create the DTO factory
+        final DtoFactory dtoFactory = new DtoFactory();
+
+        // Test the creation of ConnectionDTO
+        final ConnectionDTO connectionDto = dtoFactory.createConnectionDto(connection);
+
+        // Assertions
+        assertEquals("connection-id", connectionDto.getId());
+        assertEquals("Test Connection", connectionDto.getName());
+
+        // Verify selected relationships
+        assertEquals(2, connectionDto.getSelectedRelationships().size());
+        assertTrue(connectionDto.getSelectedRelationships().contains("success"));
+        assertTrue(connectionDto.getSelectedRelationships().contains("failure"));
+
+        // Verify retried relationships - should be null since no relationships are retried
+        assertNull(connectionDto.getRetriedRelationships());
+    }
+
+    @Test
+    void testConnectionDtoCopy() {
+        // Create original ConnectionDTO with retried relationships
+        final ConnectionDTO original = new ConnectionDTO();
+        original.setId("connection-id");
+        original.setName("Test Connection");
+        original.setSelectedRelationships(new HashSet<>(Arrays.asList("success", "failure", "retry")));
+        original.setAvailableRelationships(new HashSet<>(Arrays.asList("success", "failure", "retry")));
+        original.setRetriedRelationships(new HashSet<>(Arrays.asList("failure", "retry")));
+
+        // Create the DTO factory
+        final DtoFactory dtoFactory = new DtoFactory();
+
+        // Test the copy method
+        final ConnectionDTO copy = dtoFactory.copy(original);
+
+        // Assertions
+        assertEquals(original.getId(), copy.getId());
+        assertEquals(original.getName(), copy.getName());
+        assertEquals(original.getSelectedRelationships(), copy.getSelectedRelationships());
+        assertEquals(original.getAvailableRelationships(), copy.getAvailableRelationships());
+        assertEquals(original.getRetriedRelationships(), copy.getRetriedRelationships());
+
+        // Verify they are separate objects (deep copy)
+        assertNotSame(original.getSelectedRelationships(), copy.getSelectedRelationships());
+        assertNotSame(original.getAvailableRelationships(), copy.getAvailableRelationships());
+        assertNotSame(original.getRetriedRelationships(), copy.getRetriedRelationships());
+    }
+
+    @Test
+    void testCreateBundleDifferenceDtoWhenRegistryBundleAvailable() {
+        final org.apache.nifi.flow.Bundle registryBundle = new org.apache.nifi.flow.Bundle("com.example", "my-nar", "1.0.0");
+        final BundleCoordinate expectedCoordinate = new BundleCoordinate("com.example", "my-nar", "1.0.0");
+
+        final FlowDifference difference = mock(FlowDifference.class);
+        when(difference.getDifferenceType()).thenReturn(DifferenceType.BUNDLE_CHANGED);
+        when(difference.getDescription()).thenReturn("Bundle changed from 1.0.0 to 2.0.0");
+        when(difference.getValueA()).thenReturn(registryBundle);
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        when(extensionManager.getBundle(eq(expectedCoordinate))).thenReturn(createBundle("com.example", "my-nar", "1.0.0"));
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final DifferenceDTO dto = dtoFactory.createBundleDifferenceDto(difference);
+        assertEquals(DifferenceType.BUNDLE_CHANGED.getDescription(), dto.getDifferenceType());
+        assertFalse(dto.getEnvironmental());
+    }
+
+    @Test
+    void testCreateBundleDifferenceDtoWhenRegistryBundleNotAvailable() {
+        final org.apache.nifi.flow.Bundle registryBundle = new org.apache.nifi.flow.Bundle("com.example", "my-nar", "1.0.0");
+
+        final FlowDifference difference = mock(FlowDifference.class);
+        when(difference.getDifferenceType()).thenReturn(DifferenceType.BUNDLE_CHANGED);
+        when(difference.getDescription()).thenReturn("Bundle changed from 1.0.0 to 2.0.0");
+        when(difference.getValueA()).thenReturn(registryBundle);
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        when(extensionManager.getBundle(any(BundleCoordinate.class))).thenReturn(null);
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final DifferenceDTO dto = dtoFactory.createBundleDifferenceDto(difference);
+        assertEquals(DifferenceType.BUNDLE_CHANGED.getDescription(), dto.getDifferenceType());
+        assertTrue(dto.getEnvironmental());
+    }
+
+    @Test
+    void testCreateBundleDifferenceDtoWhenValueIsNotBundle() {
+        final FlowDifference difference = mock(FlowDifference.class);
+        when(difference.getDifferenceType()).thenReturn(DifferenceType.BUNDLE_CHANGED);
+        when(difference.getDescription()).thenReturn("Bundle changed");
+        when(difference.getValueA()).thenReturn("not-a-bundle");
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+
+        final DifferenceDTO dto = dtoFactory.createBundleDifferenceDto(difference);
+        assertTrue(dto.getEnvironmental());
+    }
+
+    @Test
+    void testCreateAssetReferenceDtoWhenContentFileExists() {
+        final Asset asset = mock(Asset.class);
+        when(asset.getIdentifier()).thenReturn("asset-id-1");
+        when(asset.getName()).thenReturn("asset-name-1");
+        final File contentFile = mock(File.class);
+        when(contentFile.exists()).thenReturn(true);
+        when(asset.getFile()).thenReturn(contentFile);
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        final AssetReferenceDTO dto = dtoFactory.createAssetReferenceDto(asset);
+
+        assertEquals("asset-id-1", dto.getId());
+        assertEquals("asset-name-1", dto.getName());
+        assertNotNull(dto.getMissingContent());
+        assertFalse(dto.getMissingContent());
+    }
+
+    @Test
+    void testCreateAssetReferenceDtoWhenContentFileMissing() {
+        final Asset asset = mock(Asset.class);
+        when(asset.getIdentifier()).thenReturn("asset-id-2");
+        when(asset.getName()).thenReturn("asset-name-2");
+        final File contentFile = mock(File.class);
+        when(contentFile.exists()).thenReturn(false);
+        when(asset.getFile()).thenReturn(contentFile);
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        final AssetReferenceDTO dto = dtoFactory.createAssetReferenceDto(asset);
+
+        assertEquals("asset-id-2", dto.getId());
+        assertEquals("asset-name-2", dto.getName());
+        assertNotNull(dto.getMissingContent());
+        assertTrue(dto.getMissingContent());
+    }
+
+    @Test
+    void testCreateParameterDtoResolvesSourceContextWhenParameterContextIdIsNull() {
+        final String contextId = "context-1";
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertEquals("param-name", dto.getName());
+        assertEquals("param-value", dto.getValue());
+        assertFalse(dto.getInherited());
+
+        final ParameterContextReferenceEntity reference = dto.getParameterContext();
+        assertNotNull(reference);
+        assertEquals(contextId, reference.getId());
+
+        verify(lookup, never()).getParameterContext(anyString());
+    }
+
+    @Test
+    void testCreateParameterDtoResolvesSourceContextWhenParameterContextIdMatchesCurrent() {
+        final String contextId = "context-1";
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(contextId)
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertFalse(dto.getInherited());
+        assertEquals(contextId, dto.getParameterContext().getId());
+
+        verify(lookup, never()).getParameterContext(anyString());
+    }
+
+    @Test
+    void testCreateParameterDtoResolvesSourceContextFromInheritedGraph() {
+        final String childId = "context-child";
+        final String parentId = "context-parent";
+
+        final ParameterContext parentContext = createMockParameterContext(parentId, "parent", Collections.emptyList());
+        final ParameterContext childContext = createMockParameterContext(childId, "child", List.of(parentContext));
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(parentId)
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(childContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertTrue(dto.getInherited());
+        assertEquals(parentId, dto.getParameterContext().getId());
+
+        verify(lookup, never()).getParameterContext(anyString());
+    }
+
+    @Test
+    void testCreateParameterDtoResolvesSourceContextFromTransitiveInheritedGraph() {
+        final String childId = "context-child";
+        final String parentId = "context-parent";
+        final String grandparentId = "context-grandparent";
+
+        final ParameterContext grandparentContext = createMockParameterContext(grandparentId, "grandparent", Collections.emptyList());
+        final ParameterContext parentContext = createMockParameterContext(parentId, "parent", List.of(grandparentContext));
+        final ParameterContext childContext = createMockParameterContext(childId, "child", List.of(parentContext));
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(grandparentId)
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(childContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertTrue(dto.getInherited());
+        assertEquals(grandparentId, dto.getParameterContext().getId());
+
+        verify(lookup, never()).getParameterContext(anyString());
+    }
+
+    @Test
+    void testCreateParameterDtoFallsBackToLookupWhenSourceNotReachableInGraph() {
+        final String contextId = "context-1";
+        final String externalId = "context-external";
+
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+        final ParameterContext externalContext = createMockParameterContext(externalId, "context-external-name", Collections.emptyList());
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(externalId)
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+        when(lookup.hasParameterContext(externalId)).thenReturn(true);
+        when(lookup.getParameterContext(externalId)).thenReturn(externalContext);
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertTrue(dto.getInherited());
+        assertEquals(externalId, dto.getParameterContext().getId());
+
+        verify(lookup).hasParameterContext(externalId);
+        verify(lookup).getParameterContext(externalId);
+    }
+
+    @Test
+    void testCreateParameterDtoFallsBackToCurrentContextWhenSourceNotReachableInGraphAndLookupIsEmpty() {
+        final String contextId = "context-1";
+        final String externalId = "context-external";
+
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(externalId)
+                .build();
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), ParameterContextLookup.EMPTY);
+
+        assertFalse(dto.getInherited());
+        assertEquals(contextId, dto.getParameterContext().getId());
+    }
+
+    @Test
+    void testCreateParameterDtoFallsBackToCurrentContextWhenLookupReportsMissingSourceWithoutCallingGetter() {
+        final String contextId = "context-1";
+        final String missingSourceId = "context-missing";
+        final String parameterName = "param-name";
+
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+        final Parameter parameter = new Parameter.Builder()
+                .name(parameterName)
+                .value("param-value")
+                .parameterContextId(missingSourceId)
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+        when(lookup.hasParameterContext(missingSourceId)).thenReturn(false);
+        when(lookup.getParameterContext(missingSourceId)).thenThrow(new AssertionError("Lookup getter should not be called for a missing source context"));
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertFalse(dto.getInherited());
+        assertEquals(contextId, dto.getParameterContext().getId());
+
+        verify(lookup).hasParameterContext(missingSourceId);
+        verify(lookup, never()).getParameterContext(missingSourceId);
+    }
+
+    @Test
+    void testCreateParameterDtoFallsBackToCurrentContextWhenSourceDisappearsDuringLookup() {
+        final String contextId = "context-1";
+        final String missingSourceId = "context-missing";
+        final String parameterName = "param-name";
+
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+        final Parameter parameter = new Parameter.Builder()
+                .name(parameterName)
+                .value("param-value")
+                .parameterContextId(missingSourceId)
+                .build();
+
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+        when(lookup.hasParameterContext(missingSourceId)).thenReturn(true);
+        when(lookup.getParameterContext(missingSourceId)).thenThrow(new ResourceNotFoundException("Source context was removed"));
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertFalse(dto.getInherited());
+        assertEquals(contextId, dto.getParameterContext().getId());
+
+        verify(lookup).hasParameterContext(missingSourceId);
+        verify(lookup).getParameterContext(missingSourceId);
+    }
+
+    @Test
+    void testCreateParameterDtoResolvesSourceContextFromDiamondInheritanceGraph() {
+        final String contextAId = "context-a";
+        final String contextBId = "context-b";
+        final String contextCId = "context-c";
+        final String contextDId = "context-d";
+
+        final ParameterContext contextD = createMockParameterContext(contextDId, "context-d-name", Collections.emptyList());
+        final ParameterContext contextB = createMockParameterContext(contextBId, "context-b-name", List.of(contextD));
+        final ParameterContext contextC = createMockParameterContext(contextCId, "context-c-name", List.of(contextD));
+        final ParameterContext contextA = createMockParameterContext(contextAId, "context-a-name", List.of(contextB, contextC));
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(contextDId)
+                .build();
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(contextA, parameter, mock(RevisionManager.class), ParameterContextLookup.EMPTY);
+
+        assertTrue(dto.getInherited());
+        assertEquals(contextDId, dto.getParameterContext().getId());
+    }
+
+    @Test
+    void testCreateParameterDtoInheritanceGraphHandlesCycles() {
+        final String childId = "context-child";
+        final String parentId = "context-parent";
+        final String missingId = "context-missing";
+
+        final ParameterContext parentContext = mock(ParameterContext.class);
+        final ParameterContext childContext = mock(ParameterContext.class);
+        configureBaseParameterContext(childContext, childId, "child");
+        configureBaseParameterContext(parentContext, parentId, "parent");
+        when(childContext.getInheritedParameterContexts()).thenReturn(List.of(parentContext));
+        when(parentContext.getInheritedParameterContexts()).thenReturn(List.of(childContext));
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("param-name")
+                .value("param-value")
+                .parameterContextId(missingId)
+                .build();
+
+        final ParameterContext fallbackContext = createMockParameterContext(missingId, "missing", Collections.emptyList());
+        final ParameterContextLookup lookup = mock(ParameterContextLookup.class);
+        when(lookup.hasParameterContext(missingId)).thenReturn(true);
+        when(lookup.getParameterContext(missingId)).thenReturn(fallbackContext);
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(childContext, parameter, mock(RevisionManager.class), lookup);
+
+        assertTrue(dto.getInherited());
+        assertEquals(missingId, dto.getParameterContext().getId());
+
+        verify(lookup).hasParameterContext(missingId);
+        verify(lookup).getParameterContext(missingId);
+    }
+
+    @Test
+    void testCreateParameterDtoSensitiveValueIsMasked() {
+        final String contextId = "context-1";
+        final ParameterContext parameterContext = createMockParameterContext(contextId, "context-1-name", Collections.emptyList());
+
+        final Parameter parameter = new Parameter.Builder()
+                .name("sensitive-param")
+                .value("plaintext-secret")
+                .sensitive(true)
+                .build();
+
+        final DtoFactory dtoFactory = newDtoFactoryForParameters();
+        final ParameterDTO dto = dtoFactory.createParameterDto(parameterContext, parameter, mock(RevisionManager.class), mock(ParameterContextLookup.class));
+
+        assertTrue(dto.getSensitive());
+        assertEquals(DtoFactory.SENSITIVE_VALUE_MASK, dto.getValue());
+    }
+
+    @Test
+    void testConnectorMultipleVersionsAvailable() {
+        final List<Bundle> oneCompatibleBundle = Collections.singletonList(createBundle("com.example", "test-connector", "1.1.0"));
+        assertTrue(createConnectorDto(true, oneCompatibleBundle).getMultipleVersionsAvailable());
+        assertFalse(createConnectorDto(false, oneCompatibleBundle).getMultipleVersionsAvailable());
+
+        final List<Bundle> twoCompatibleBundles = Arrays.asList(
+                createBundle("com.example", "test-connector", "1.0.0"),
+                createBundle("com.example", "test-connector", "2.0.0"));
+        assertTrue(createConnectorDto(false, twoCompatibleBundles).getMultipleVersionsAvailable());
+    }
+
+    private ConnectorDTO createConnectorDto(final boolean extensionMissing, final List<Bundle> compatibleBundles) {
+        final String group = "com.example";
+        final String id = "test-connector";
+        final BundleCoordinate currentCoordinate = new BundleCoordinate(group, id, "1.0.0");
+        final String canonicalClassName = "com.example.TestConnector";
+
+        final ExtensionManager extensionManager = mock(ExtensionManager.class);
+        when(extensionManager.getBundles(canonicalClassName)).thenReturn(compatibleBundles);
+
+        final ProcessGroup managedProcessGroup = mock(ProcessGroup.class);
+        when(managedProcessGroup.getIdentifier()).thenReturn("pg-1");
+
+        final FrameworkFlowContext activeFlowContext = mock(FrameworkFlowContext.class);
+        when(activeFlowContext.getManagedProcessGroup()).thenReturn(managedProcessGroup);
+        when(activeFlowContext.getConfigurationContext()).thenReturn(null);
+
+        final ConnectorNode connectorNode = mock(ConnectorNode.class);
+        when(connectorNode.getIdentifier()).thenReturn("connector-1");
+        when(connectorNode.getName()).thenReturn("Connector");
+        when(connectorNode.getCanonicalClassName()).thenReturn(canonicalClassName);
+        when(connectorNode.getBundleCoordinate()).thenReturn(currentCoordinate);
+        when(connectorNode.isExtensionMissing()).thenReturn(extensionMissing);
+        when(connectorNode.getCurrentState()).thenReturn(ConnectorState.STOPPED);
+        when(connectorNode.getValidationState()).thenReturn(new ValidationState(ValidationStatus.VALID, Collections.emptyList()));
+        when(connectorNode.getActiveFlowContext()).thenReturn(activeFlowContext);
+        when(connectorNode.getWorkingFlowContext()).thenReturn(null);
+        when(connectorNode.getConfigurationSteps()).thenReturn(Collections.emptyList());
+        when(connectorNode.getAvailableActions()).thenReturn(Collections.emptyList());
+
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setExtensionManager(extensionManager);
+        return dtoFactory.createConnectorDto(connectorNode);
+    }
+
+    private static DtoFactory newDtoFactoryForParameters() {
+        final DtoFactory dtoFactory = new DtoFactory();
+        dtoFactory.setEntityFactory(new EntityFactory());
+        return dtoFactory;
+    }
+
+    private static ParameterContext createMockParameterContext(final String id, final String name, final List<ParameterContext> inherited) {
+        final ParameterContext context = mock(ParameterContext.class);
+        configureBaseParameterContext(context, id, name);
+        when(context.getInheritedParameterContexts()).thenReturn(inherited);
+        return context;
+    }
+
+    private static void configureBaseParameterContext(final ParameterContext context, final String id, final String name) {
+        when(context.getIdentifier()).thenReturn(id);
+        when(context.getName()).thenReturn(name);
+        when(context.getParameterReferenceManager()).thenReturn(ParameterReferenceManager.EMPTY);
+    }
+
+    @Test
+    void testCreateProcessGroupDtoSetsResolvedExecutionEngineForInheritedUnderStatelessParent() {
+        final ProcessGroup group = stubProcessGroup(ExecutionEngine.INHERITED, ExecutionEngine.STATELESS);
+
+        final ProcessGroupDTO dto = newDtoFactoryForParameters().createProcessGroupDto(group, false);
+
+        assertEquals("INHERITED", dto.getExecutionEngine());
+        assertEquals("STATELESS", dto.getResolvedExecutionEngine());
+    }
+
+    @Test
+    void testCreateProcessGroupDtoSetsResolvedExecutionEngineStandardForRootInherited() {
+        final ProcessGroup group = stubProcessGroup(ExecutionEngine.INHERITED, ExecutionEngine.STANDARD);
+
+        final ProcessGroupDTO dto = newDtoFactoryForParameters().createProcessGroupDto(group, false);
+
+        assertEquals("INHERITED", dto.getExecutionEngine());
+        assertEquals("STANDARD", dto.getResolvedExecutionEngine());
+    }
+
+    @Test
+    void testCreateProcessGroupDtoSetsResolvedExecutionEngineForConfiguredStateless() {
+        final ProcessGroup group = stubProcessGroup(ExecutionEngine.STATELESS, ExecutionEngine.STATELESS);
+
+        final ProcessGroupDTO dto = newDtoFactoryForParameters().createProcessGroupDto(group, false);
+
+        assertEquals("STATELESS", dto.getExecutionEngine());
+        assertEquals("STATELESS", dto.getResolvedExecutionEngine());
+    }
+
+    @Test
+    void testCreateProcessGroupFlowDtoSetsResolvedExecutionEngine() {
+        final ProcessGroup group = stubProcessGroup(ExecutionEngine.INHERITED, ExecutionEngine.STATELESS);
+        final ProcessGroupStatus groupStatus = mock(ProcessGroupStatus.class);
+        when(groupStatus.getProcessorStatus()).thenReturn(Collections.emptyList());
+        when(groupStatus.getConnectionStatus()).thenReturn(Collections.emptyList());
+        when(groupStatus.getProcessGroupStatus()).thenReturn(Collections.emptyList());
+        when(groupStatus.getRemoteProcessGroupStatus()).thenReturn(Collections.emptyList());
+        when(groupStatus.getInputPortStatus()).thenReturn(Collections.emptyList());
+        when(groupStatus.getOutputPortStatus()).thenReturn(Collections.emptyList());
+
+        final ProcessGroupFlowDTO dto = newDtoFactoryForParameters().createProcessGroupFlowDto(
+                group,
+                groupStatus,
+                mock(RevisionManager.class),
+                ignored -> Collections.emptyList(),
+                false
+        );
+
+        assertEquals("STATELESS", dto.getResolvedExecutionEngine());
+    }
+
+    @Test
+    void testCopyProcessGroupDtoCopiesResolvedExecutionEngine() {
+        final ProcessGroupDTO original = new ProcessGroupDTO();
+        original.setContents(new FlowSnippetDTO());
+        original.setExecutionEngine("INHERITED");
+        original.setResolvedExecutionEngine("STATELESS");
+
+        final ProcessGroupDTO copy = newDtoFactoryForParameters().copy(original, false);
+
+        assertEquals("INHERITED", copy.getExecutionEngine());
+        assertEquals("STATELESS", copy.getResolvedExecutionEngine());
+    }
+
+    private static ProcessGroup stubProcessGroup(final ExecutionEngine configured, final ExecutionEngine resolved) {
+        final ProcessGroup group = mock(ProcessGroup.class);
+        when(group.getIdentifier()).thenReturn("pg-1");
+        when(group.getPosition()).thenReturn(new Position(0, 0));
+        when(group.getComments()).thenReturn("");
+        when(group.getName()).thenReturn("group");
+        when(group.getVersionedComponentId()).thenReturn(Optional.empty());
+        when(group.getVersionControlInformation()).thenReturn(null);
+        when(group.getFlowFileConcurrency()).thenReturn(FlowFileConcurrency.UNBOUNDED);
+        when(group.getFlowFileOutboundPolicy()).thenReturn(FlowFileOutboundPolicy.STREAM_WHEN_AVAILABLE);
+        when(group.getDefaultFlowFileExpiration()).thenReturn("0 sec");
+        when(group.getDefaultBackPressureObjectThreshold()).thenReturn(10000L);
+        when(group.getDefaultBackPressureDataSizeThreshold()).thenReturn("1 GB");
+        when(group.getLogFileSuffix()).thenReturn(null);
+        when(group.getStatelessScheduledState()).thenReturn(StatelessGroupScheduledState.STOPPED);
+        when(group.getExecutionEngine()).thenReturn(configured);
+        when(group.resolveExecutionEngine()).thenReturn(resolved);
+        when(group.getMaxConcurrentTasks()).thenReturn(1);
+        when(group.getStatelessFlowTimeout()).thenReturn("1 min");
+        when(group.getParameterContext()).thenReturn(null);
+        when(group.getParent()).thenReturn(null);
+        when(group.getCounts()).thenReturn(new ProcessGroupCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        when(group.getProcessors()).thenReturn(Collections.emptySet());
+        when(group.getConnections()).thenReturn(Collections.emptySet());
+        when(group.getLabels()).thenReturn(Collections.emptySet());
+        when(group.getFunnels()).thenReturn(Collections.emptySet());
+        when(group.getProcessGroups()).thenReturn(Collections.emptySet());
+        when(group.getRemoteProcessGroups()).thenReturn(Collections.emptySet());
+        when(group.getInputPorts()).thenReturn(Collections.emptySet());
+        when(group.getOutputPorts()).thenReturn(Collections.emptySet());
+        return group;
+    }
+
+}

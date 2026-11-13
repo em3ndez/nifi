@@ -16,45 +16,39 @@
  */
 package org.apache.nifi.util.file.monitor;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestSynchronousFileWatcher {
 
     @Test
-    public void testIt() throws UnsupportedEncodingException, IOException, InterruptedException {
+    public void testIt() throws IOException {
         final Path path = Paths.get("target/1.txt");
-        Files.copy(new ByteArrayInputStream("Hello, World!".getBytes("UTF-8")), path, StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(new ByteArrayInputStream("Hello, World!".getBytes(StandardCharsets.UTF_8)), path, StandardCopyOption.REPLACE_EXISTING);
         final UpdateMonitor monitor = new DigestUpdateMonitor();
 
-        final SynchronousFileWatcher watcher = new SynchronousFileWatcher(path, monitor, 10L);
+        final SynchronousFileWatcher watcher = new SynchronousFileWatcher(path, monitor, 0L);
         assertFalse(watcher.checkAndReset());
-        Thread.sleep(30L);
         assertFalse(watcher.checkAndReset());
 
-        final FileOutputStream fos = new FileOutputStream(path.toFile());
-        try {
-            fos.write("Good-bye, World!".getBytes("UTF-8"));
+        try (FileOutputStream fos = new FileOutputStream(path.toFile())) {
+            fos.write("Good-bye, World!".getBytes(StandardCharsets.UTF_8));
             fos.getFD().sync();
-        } finally {
-            fos.close();
         }
 
+        // file has changed, answer should be true once
         assertTrue(watcher.checkAndReset());
-        assertFalse(watcher.checkAndReset());
-
-        Thread.sleep(30L);
         assertFalse(watcher.checkAndReset());
     }
 }

@@ -19,12 +19,12 @@ package org.apache.nifi.toolkit.cli.impl.command.nifi.params;
 import org.apache.commons.cli.MissingOptionException;
 import org.apache.nifi.toolkit.cli.api.CommandException;
 import org.apache.nifi.toolkit.cli.api.Context;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.ParamContextClient;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
 import org.apache.nifi.toolkit.cli.impl.command.nifi.AbstractNiFiCommand;
 import org.apache.nifi.toolkit.cli.impl.result.nifi.ParamContextResult;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.toolkit.client.ParamContextClient;
 import org.apache.nifi.web.api.entity.ParameterContextEntity;
 
 import java.io.IOException;
@@ -38,20 +38,22 @@ public class GetParamContext extends AbstractNiFiCommand<ParamContextResult> {
 
     @Override
     public String getDescription() {
-        return "Retrieves a parameter context by id and list each parameter and it's value.";
+        return "Retrieves a parameter context by id and lists each parameter and its value.";
     }
 
     @Override
     protected void doInitialize(Context context) {
         addOption(CommandOption.PARAM_CONTEXT_ID.createOption());
+        addOption(CommandOption.PARAM_CONTEXT_INCLUDE_INHERITED.createOption());
     }
 
     @Override
     public ParamContextResult doExecute(final NiFiClient client, final Properties properties)
             throws NiFiClientException, IOException, MissingOptionException, CommandException {
         final String paramContextId = getRequiredArg(properties, CommandOption.PARAM_CONTEXT_ID);
+        final boolean includeInheritedParameters = hasArg(properties, CommandOption.PARAM_CONTEXT_INCLUDE_INHERITED);
         final ParamContextClient paramContextClient = client.getParamContextClient();
-        final ParameterContextEntity parameterContext = paramContextClient.getParamContext(paramContextId);
-        return new ParamContextResult(getResultType(properties), parameterContext);
+        final ParameterContextEntity parameterContext = paramContextClient.getParamContext(paramContextId, includeInheritedParameters);
+        return new ParamContextResult(getResultType(properties), parameterContext, includeInheritedParameters);
     }
 }

@@ -16,12 +16,15 @@
  */
 package org.apache.nifi.stream.io;
 
+import org.junit.jupiter.api.Test;
+
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
-import junit.framework.TestCase;
 
-public class ByteCountingInputStreamTest extends TestCase {
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
+public class ByteCountingInputStreamTest {
+    @Test
     public void testReset() throws Exception {
 
         final ByteArrayInputStream reader = new ByteArrayInputStream("abcdefghijklmnopqrstuvwxyz".getBytes(StandardCharsets.UTF_8));
@@ -30,9 +33,9 @@ public class ByteCountingInputStreamTest extends TestCase {
 
         /* verify first 2 bytes */
         tmp = bcis.read();
-        assertEquals(tmp, 97);
+        assertEquals(97, tmp);
         tmp = bcis.read();
-        assertEquals(tmp, 98);
+        assertEquals(98, tmp);
 
         /* save bytes read and place mark */
         final long bytesAtMark = bcis.getBytesRead();
@@ -40,9 +43,9 @@ public class ByteCountingInputStreamTest extends TestCase {
 
         /* verify next 2 bytes */
         tmp = bcis.read();
-        assertEquals(tmp, 99);
+        assertEquals(99, tmp);
         tmp = bcis.read();
-        assertEquals(tmp, 100);
+        assertEquals(100, tmp);
 
         /* verify reset returns to position when mark was placed */
         bcis.reset();
@@ -53,26 +56,29 @@ public class ByteCountingInputStreamTest extends TestCase {
         assertEquals(bytesAtMark, bcis.getBytesRead());
     }
 
+    @Test
     public void testAvailableShouldReturnCorrectCount() throws Exception {
         // Arrange
-        final String ALPHABET = "abcdefghijklmnopqrstuvwxyz";
-        final ByteArrayInputStream inputStream = new ByteArrayInputStream(ALPHABET.getBytes(StandardCharsets.UTF_8));
+        final String alphabet = "abcdefghijklmnopqrstuvwxyz";
+        final ByteArrayInputStream inputStream = new ByteArrayInputStream(alphabet.getBytes(StandardCharsets.UTF_8));
         final ByteCountingInputStream bcis = new ByteCountingInputStream(inputStream);
         int tmp;
         int initialAvailableBytes = bcis.available();
-        assertEquals(ALPHABET.length(), initialAvailableBytes);
+        assertEquals(alphabet.length(), initialAvailableBytes);
 
         // Act
         /* verify first 2 bytes */
         tmp = bcis.read();
-        assertEquals(tmp, 97);
+        assertEquals(97, tmp);
         tmp = bcis.read();
-        assertEquals(tmp, 98);
+        assertEquals(98, tmp);
 
         int availableBytes = bcis.available();
-        assertEquals(ALPHABET.length() - 2, availableBytes);
+        assertEquals(alphabet.length() - 2, availableBytes);
 
-        bcis.skip(24);
+        final long expectedSkip = 24;
+        final long actualSkip = bcis.skip(expectedSkip);
+        assertEquals(expectedSkip, actualSkip);
 
         // Assert
         int finalAvailableBytes = bcis.available();

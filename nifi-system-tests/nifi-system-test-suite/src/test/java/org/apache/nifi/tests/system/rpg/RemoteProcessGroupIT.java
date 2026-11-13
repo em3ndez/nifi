@@ -19,15 +19,14 @@ package org.apache.nifi.tests.system.rpg;
 import org.apache.nifi.remote.protocol.SiteToSiteTransportProtocol;
 import org.apache.nifi.tests.system.NiFiClientUtil;
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.dto.ConnectableDTO;
 import org.apache.nifi.web.api.dto.RemoteProcessGroupPortDTO;
 import org.apache.nifi.web.api.entity.ConnectionEntity;
 import org.apache.nifi.web.api.entity.PortEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
 import org.apache.nifi.web.api.entity.RemoteProcessGroupEntity;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -45,7 +44,6 @@ public class RemoteProcessGroupIT extends NiFiSystemIT {
         testRPGBackToSelf(SiteToSiteTransportProtocol.RAW, "RawIn");
     }
 
-
     protected void testRPGBackToSelf(final SiteToSiteTransportProtocol protocol, final String portName) throws NiFiClientException, IOException, InterruptedException {
         final NiFiClientUtil util = getClientUtil();
 
@@ -56,7 +54,7 @@ public class RemoteProcessGroupIT extends NiFiSystemIT {
 
         // Create a flow that is GenerateFlowFile -> RPG, connected to the input port
         final ProcessorEntity generateFlowFile = getClientUtil().createProcessor("GenerateFlowFile");
-        RemoteProcessGroupEntity rpg = getClientUtil().createRPG("root", protocol);
+        RemoteProcessGroupEntity rpg = getClientUtil().createRPG("root", getClientApiPort(), protocol);
 
         util.updateProcessorProperties(generateFlowFile, Collections.singletonMap("File Size", "1 KB"));
         util.updateProcessorProperties(generateFlowFile, Collections.singletonMap("Batch Size", "3"));
@@ -82,9 +80,7 @@ public class RemoteProcessGroupIT extends NiFiSystemIT {
 
                 return false;
             } catch (Exception e) {
-                e.printStackTrace();
-                Assert.fail("Could not retrieve RPG with ID " + rpgId);
-                return false;
+                throw new RuntimeException("Could not retrieve RPG with ID " + rpgId);
             }
         });
 
@@ -104,7 +100,8 @@ public class RemoteProcessGroupIT extends NiFiSystemIT {
         final ConnectionEntity portToCount = getClientUtil().createConnection(util.createConnectableDTO(port), util.createConnectableDTO(count), "");
 
         getNifiClient().getInputPortClient().startInputPort(port);
-        getNifiClient().getProcessorClient().startProcessor(generateFlowFile);
+        getClientUtil().waitForValidProcessor(generateFlowFile.getId());
+        getClientUtil().startProcessor(generateFlowFile);
         getNifiClient().getRemoteProcessGroupClient().startTransmitting(rpg);
 
         waitFor(() -> util.getQueueSize(generateToRPG.getId()).getObjectCount() == 0);

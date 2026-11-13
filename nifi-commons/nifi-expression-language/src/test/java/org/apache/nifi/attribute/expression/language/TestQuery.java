@@ -16,49 +16,57 @@
  */
 package org.apache.nifi.attribute.expression.language;
 
-import org.antlr.runtime.tree.Tree;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.attribute.expression.language.Query.Range;
 import org.apache.nifi.attribute.expression.language.evaluation.NumberQueryResult;
 import org.apache.nifi.attribute.expression.language.evaluation.QueryResult;
 import org.apache.nifi.attribute.expression.language.exception.AttributeExpressionLanguageException;
 import org.apache.nifi.attribute.expression.language.exception.AttributeExpressionLanguageParsingException;
+import org.apache.nifi.expression.AttributeExpression;
 import org.apache.nifi.expression.AttributeExpression.ResultType;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.parameter.Parameter;
 import org.apache.nifi.parameter.ParameterDescriptor;
 import org.apache.nifi.parameter.ParameterLookup;
-import org.apache.nifi.registry.VariableRegistry;
-import org.junit.Assert;
-import org.junit.Ignore;
-import org.junit.Test;
-import org.mockito.Mockito;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
-import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TimeZone;
+import java.util.concurrent.TimeUnit;
 
 import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.NaN;
 import static java.lang.Double.POSITIVE_INFINITY;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.greaterThan;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class TestQuery {
 
@@ -105,10 +113,7 @@ public class TestQuery {
         assertValid("${attr:padRight(10, '#')}");
         assertValid("${attr:padLeft(10)}");
         assertValid("${attr:padRight(10)}");
-        // left here because it's convenient for looking at the output
-        //System.out.println(Query.compile("").evaluate(null));
     }
-
 
     @Test
     public void testPrepareWithEscapeChar() {
@@ -123,23 +128,26 @@ public class TestQuery {
         final PreparedQuery mixedQuery = Query.prepare("${foo}$${foo}");
         final String mixedEvaluated = mixedQuery.evaluateExpressions(new StandardEvaluationContext(variables), null);
         assertEquals("bar${foo}", mixedEvaluated);
+
+        final PreparedQuery multipleEscapedQuery = Query.prepare("$${foo}$${bar}");
+        final String multipleEscapedEvaluated = multipleEscapedQuery.evaluateExpressions(new StandardEvaluationContext(variables), null);
+        assertEquals("${foo}${bar}", multipleEscapedEvaluated);
+
+        final PreparedQuery multipleEscapedWithTextQuery = Query.prepare("foo$${foo}bar$${bar}");
+        final String multipleEscapedWithTextEvaluated = multipleEscapedWithTextQuery.evaluateExpressions(new StandardEvaluationContext(variables), null);
+        assertEquals("foo${foo}bar${bar}", multipleEscapedWithTextEvaluated);
+
+        final PreparedQuery multipleMixedQuery = Query.prepare("foo${foo}$${foo}bar${bar}$${bar}");
+        final String multipleMixedEvaluated = multipleMixedQuery.evaluateExpressions(new StandardEvaluationContext(variables), null);
+        assertEquals("foobar${foo}bar${bar}", multipleMixedEvaluated);
     }
 
     private void assertValid(final String query) {
-        try {
-            Query.compile(query);
-        } catch (final Exception e) {
-            e.printStackTrace();
-            Assert.fail("Expected query to be valid, but it failed to compile due to " + e);
-        }
+        assertDoesNotThrow(() -> Query.compile(query));
     }
 
     private void assertInvalid(final String query) {
-        try {
-            Query.compile(query);
-            Assert.fail("Expected query to be invalid, but it did compile");
-        } catch (final Exception e) {
-        }
+        assertThrows(Exception.class, () -> Query.compile(query));
     }
 
     @Test
@@ -147,11 +155,7 @@ public class TestQuery {
         Query.validateExpression("${abc:substring(${xyz:length()})}", false);
         Query.isValidExpression("${now():format('yyyy-MM-dd')}");
 
-        try {
-            Query.validateExpression("$${attr}", false);
-            Assert.fail("invalid query validated");
-        } catch (final AttributeExpressionLanguageParsingException e) {
-        }
+        assertThrows(AttributeExpressionLanguageParsingException.class, () -> Query.validateExpression("$${attr}", false));
 
         Query.validateExpression("$${attr}", true);
 
@@ -181,11 +185,46 @@ public class TestQuery {
     }
 
     @Test
+    public void testEvaluateELStringNonSensitiveParameters() {
+        final String value = "value";
+        final String query = "${variable:evaluateELString()}";
+
+        final Map<String, String> variables = Collections.singletonMap("variable", "#{parameter}");
+        final Map<String, String> parameters = Collections.singletonMap("parameter", value);
+
+        final MapParameterLookup parameterLookup = new MapParameterLookup(parameters);
+        final EvaluationContext evaluationContext = new StandardEvaluationContext(variables, Collections.emptyMap(), parameterLookup);
+
+        final String evaluated = Query.prepare(query).evaluateExpressions(evaluationContext, null);
+
+        assertEquals(StringUtils.EMPTY, evaluated);
+    }
+
+    @Test
+    public void testEvaluateELStringSensitiveParameters() {
+        final String parameterName = "parameter";
+        final String parameterRef = String.format("#{%s}", parameterName);
+        final String value = "value";
+        final String query = "${variable:evaluateELString()}";
+
+        final Map<String, String> variables = Collections.singletonMap("variable", parameterRef);
+
+        final ParameterLookup parameterLookup = mock(ParameterLookup.class);
+        final ParameterDescriptor parameterDescriptor = new ParameterDescriptor.Builder().name(parameterName).sensitive(true).build();
+        final Parameter parameter = new Parameter.Builder().descriptor(parameterDescriptor).value(value).build();
+        when(parameterLookup.getParameter(eq(parameterName))).thenReturn(Optional.of(parameter));
+        when(parameterLookup.isEmpty()).thenReturn(false);
+
+        final EvaluationContext evaluationContext = new StandardEvaluationContext(variables, Collections.emptyMap(), parameterLookup);
+
+        final String evaluated = Query.prepare(query).evaluateExpressions(evaluationContext, null);
+
+        assertEquals(StringUtils.EMPTY, evaluated);
+    }
+
+    @Test
     public void testCompileEmbedded() {
         final String expression = "${x:equals( ${y} )}";
-        final Query query = Query.compile(expression);
-        final Tree tree = query.getTree();
-        System.out.println(printTree(tree));
 
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("x", "x");
@@ -194,29 +233,6 @@ public class TestQuery {
         assertEquals("true", result);
 
         Query.validateExpression(expression, false);
-    }
-
-    private String printTree(final Tree tree) {
-        final StringBuilder sb = new StringBuilder();
-        printTree(tree, 0, sb);
-
-        return sb.toString();
-    }
-
-    private void printTree(final Tree tree, final int spaces, final StringBuilder sb) {
-        for (int i = 0; i < spaces; i++) {
-            sb.append(" ");
-        }
-
-        if (tree.getText().trim().isEmpty()) {
-            sb.append(tree.toString()).append("\n");
-        } else {
-            sb.append(tree.getText()).append("\n");
-        }
-
-        for (int i = 0; i < tree.getChildCount(); i++) {
-            printTree(tree.getChild(i), spaces + 2, sb);
-        }
     }
 
     @Test
@@ -233,8 +249,8 @@ public class TestQuery {
         assertEquals("$xyz", evaluateQueryForEscape("$$${abc}", attributes));
         assertEquals("$${abc}", evaluateQueryForEscape("$$$${abc}", attributes));
 
-        assertEquals( "Unescaped $$${5 because no closing brace", evaluateQueryForEscape("Unescaped $$${5 because no closing brace", attributes));
-        assertEquals( "Unescaped $ because no closing brace", evaluateQueryForEscape("Unescaped $$${'5'} because no closing brace", attributes));
+        assertEquals("Unescaped $$${5 because no closing brace", evaluateQueryForEscape("Unescaped $$${5 because no closing brace", attributes));
+        assertEquals("Unescaped $ because no closing brace", evaluateQueryForEscape("Unescaped $$${'5'} because no closing brace", attributes));
 
         assertEquals("I owe you $5", evaluateQueryForEscape("I owe you $5", attributes));
         assertEquals("You owe me $$5 too", evaluateQueryForEscape("You owe me $$5 too", attributes));
@@ -290,6 +306,56 @@ public class TestQuery {
     }
 
     @Test
+    public void testInstantToNumber() {
+        final Query query = Query.compile("${dateTime:toInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York'):toNumber()}");
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("dateTime", "2013/11/18 10:22:27.678");
+
+        final QueryResult<?> result = query.evaluate(new StandardEvaluationContext(attributes));
+        assertEquals(ResultType.WHOLE_NUMBER, result.getResultType());
+        assertEquals(1384788147678L, result.getValue());
+    }
+
+    @Test
+    public void testInstantToNanos() {
+        final String pattern = "yyyy/MM/dd HH:mm:ss.SSSSSSSSS";
+        final String dateTime = "2022/03/18 10:22:27.678234567";
+        final String zoneId = "America/New_York";
+
+        final Query query = Query.compile(String.format("${dateTime:toInstant('%s', '%s'):toNanos()}", pattern, zoneId));
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("dateTime", dateTime);
+
+        final Instant instant = DateTimeFormatter
+                .ofPattern(pattern)
+                .withZone(ZoneId.of(zoneId))
+                .parse(dateTime, Instant::from);
+
+        final QueryResult<?> result = query.evaluate(new StandardEvaluationContext(attributes));
+        assertEquals(ResultType.NUMBER, result.getResultType());
+        assertEquals(TimeUnit.SECONDS.toNanos(instant.getEpochSecond()) + instant.getNano(), result.getValue());
+    }
+
+    @Test
+    public void testInstantToMicros() {
+        final String pattern = "yyyy/MM/dd HH:mm:ss.SSSSSSSSS";
+        final String dateTime = "2022/03/18 10:22:27.678234567";
+        final String zoneId = "America/New_York";
+        final Query query = Query.compile(String.format("${dateTime:toInstant('%s', '%s'):toMicros()}", pattern, zoneId));
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("dateTime", dateTime);
+
+        final Instant instant = DateTimeFormatter
+                .ofPattern(pattern)
+                .withZone(ZoneId.of(zoneId))
+                .parse(dateTime, Instant::from);
+
+        final QueryResult<?> result = query.evaluate(new StandardEvaluationContext(attributes));
+        assertEquals(ResultType.NUMBER, result.getResultType());
+        assertEquals(ChronoUnit.MICROS.between(Instant.EPOCH, instant), result.getValue());
+    }
+
+    @Test
     public void testAddOneDayToDate() {
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("dateTime", "2013/11/18 10:22:27.678");
@@ -299,7 +365,18 @@ public class TestQuery {
     }
 
     @Test
-    @Ignore("Requires specific locale")
+    public void testAddOneDayToInstant() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("dateTime", "2013/11/18 10:22:27.678");
+
+        verifyEquals("${dateTime:toInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York'):toNumber():plus(86400000)" +
+                ":toInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York'):formatInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York')}", attributes, "2013/11/19 10:22:27.678");
+        verifyEquals("${dateTime:toInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York'):plus(86400000)" +
+                ":format('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York')}", attributes, "2013/11/19 10:22:27.678");
+    }
+
+    @Test
+    @Disabled("Requires specific locale")
     public void implicitDateConversion() {
         final Date date = new Date();
         final Query query = Query.compile("${dateTime:format('yyyy/MM/dd HH:mm:ss.SSS')}");
@@ -308,10 +385,26 @@ public class TestQuery {
 
         // the date.toString() above will end up truncating the milliseconds. So remove millis from the Date before
         // formatting it
-        final SimpleDateFormat sdf = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS", Locale.US);
-        final long millis = date.getTime() % 1000L;
-        final Date roundedToNearestSecond = new Date(date.getTime() - millis);
-        final String formatted = sdf.format(roundedToNearestSecond);
+        final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss.SSS", Locale.US);
+        final Instant truncatedSecond = date.toInstant().truncatedTo(ChronoUnit.SECONDS);
+        final String formatted = dtf.format(truncatedSecond);
+
+        final QueryResult<?> result = query.evaluate(new StandardEvaluationContext(attributes));
+        assertEquals(ResultType.STRING, result.getResultType());
+        assertEquals(formatted, result.getValue());
+    }
+
+    @Test
+    @Disabled("Requires specific locale")
+    public void implicitInstantConversion() {
+        final Instant instant = Instant.now();
+        final Query query = Query.compile("${dateTime:formatInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York')}");
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("dateTime", instant.toString());
+
+        final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss.SSS", Locale.US)
+                .withZone(ZoneId.of("America/New_York"));
+        final String formatted = dtf.format(instant);
 
         final QueryResult<?> result = query.evaluate(new StandardEvaluationContext(attributes));
         assertEquals(ResultType.STRING, result.getResultType());
@@ -340,35 +433,49 @@ public class TestQuery {
         final Map<String, String> parameters = new HashMap<>();
         parameters.put("test", "unit");
 
-        verifyEquals("${#{test}}", attributes, stateValues, parameters,"unit");
-        verifyEquals("${#{test}:append(' - '):append(#{test})}", attributes, stateValues, parameters,"unit - unit");
+        verifyEquals("${#{test}}", attributes, stateValues, parameters, "unit");
+        verifyEquals("${#{test}:append(' - '):append(#{test})}", attributes, stateValues, parameters, "unit - unit");
+    }
+
+    @Test
+    public void testParameterReferenceWithSpace() {
+        final Map<String, String> attributes = Collections.emptyMap();
+        final Map<String, String> stateValues = Collections.emptyMap();
+        final Map<String, String> parameters = new HashMap<>();
+        parameters.put("test param", "unit");
+
+        verifyEquals("${#{'test param'}}", attributes, stateValues, parameters, "unit");
+        verifyEquals("${#{'test param'}:append(' - '):append(#{'test param'})}", attributes, stateValues, parameters, "unit - unit");
+
+        verifyEquals("${#{\"test param\"}}", attributes, stateValues, parameters, "unit");
+
+        // Unquoted parameter reference with spaces should also work
+        verifyEquals("${#{test param}}", attributes, stateValues, parameters, "unit");
+
+        // Unquoted parameter used within a function argument
+        parameters.put("Date Format", "yyyy");
+        final String expectedYear = String.valueOf(LocalDate.now().getYear());
+        verifyEquals("${now():format(#{Date Format})}", attributes, stateValues, parameters, expectedYear);
     }
 
     @Test
     public void testJsonPath() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        Map<String, String> attributes = verifyJsonPathExpressions(
             ADDRESS_BOOK_JSON_PATH_EMPTY,
             "", "${json:jsonPathDelete('$.missingpath')}", "");
         verifyEquals("${json:jsonPath('$.missingpath')}", attributes, "");
-        try {
-            verifyEquals("${json:jsonPath('$..')}", attributes, "");
-            Assert.fail("Did not detect bad JSON path expression");
-        } catch (final AttributeExpressionLanguageException e) {
-        }
-        try {
-            verifyEquals("${missing:jsonPath('$.firstName')}", attributes, "");
-            Assert.fail("Did not detect empty JSON document");
-        } catch (AttributeExpressionLanguageException e) {
-        }
+
+        assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${json:jsonPath('$..')}", attributes, ""));
+        assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${missing:jsonPath('$.firstName')}", attributes, ""));
+
         attributes.put("invalid", "[}");
-        try {
-            verifyEquals("${invlaid:jsonPath('$.firstName')}", attributes, "John");
-            Assert.fail("Did not detect invalid JSON document");
-        } catch (AttributeExpressionLanguageException e) {
-        }
+        assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${invlaid:jsonPath('$.firstName')}", attributes, "John"));
     }
 
-    private void verifyAddressBookAttributes(String originalAddressBook, Map<String,String> attributes, String updatedAttribute, Object updatedValue) {
+    private void verifyAddressBookAttributes(String originalAddressBook, Map<String, String> attributes, String updatedAttribute, Object updatedValue) {
 
         if (StringUtils.isBlank(attributes.get("json"))) {
             throw new IllegalArgumentException("original Json attributes is empty");
@@ -380,21 +487,20 @@ public class TestQuery {
         phoneBookAttributes.stream()
                 .filter(currentAttribute -> !currentAttribute.equals(updatedAttribute))
                 .forEach(currentAttribute -> {
-                            String expected = Query.evaluateExpressions(currentAttribute, originalAttributes, null, null, ParameterLookup.EMPTY);
-                            verifyEquals(currentAttribute, attributes, expected);
-                        }
-                );
-        if (! ADDRESS_BOOK_JSON_PATH_EMPTY.equals(updatedAttribute) ) {
+                    String expected = Query.evaluateExpressions(currentAttribute, originalAttributes, null, null, ParameterLookup.EMPTY);
+                    verifyEquals(currentAttribute, attributes, expected);
+                });
+        if (!ADDRESS_BOOK_JSON_PATH_EMPTY.equals(updatedAttribute)) {
             verifyEquals(updatedAttribute, attributes, updatedValue);
         }
     }
 
-    private Map<String,String> verifyJsonPathExpressions(String targetAttribute, Object originalValue, String updateExpression, Object updatedValue) throws IOException {
+    private Map<String, String> verifyJsonPathExpressions(String targetAttribute, Object originalValue, String updateExpression, Object updatedValue) throws IOException {
         final Map<String, String> attributes = new HashMap<>();
         String addressBook = getResourceAsString("/json/address-book.json");
         attributes.put("json", addressBook);
 
-        if ( ! ADDRESS_BOOK_JSON_PATH_EMPTY.equals(targetAttribute) ) {
+        if (!ADDRESS_BOOK_JSON_PATH_EMPTY.equals(targetAttribute)) {
             verifyEquals(targetAttribute, attributes, originalValue);
         }
 
@@ -419,7 +525,7 @@ public class TestQuery {
 
     @Test
     public void testJsonPathDeleteMissingPath() throws IOException {
-       verifyJsonPathExpressions(
+        verifyJsonPathExpressions(
             ADDRESS_BOOK_JSON_PATH_EMPTY,
             "",
             "${json:jsonPathDelete('$.missing-path')}",
@@ -482,7 +588,7 @@ public class TestQuery {
 
     @Test
     public void testJsonPathAddNicknameJimmy() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        Map<String, String> attributes = verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_EMPTY,
                 "",
                 "${json:jsonPathAdd('$.nicknames', 'Jimmy')}",
@@ -492,26 +598,26 @@ public class TestQuery {
 
     @Test
     public void testJsonPathAddNicknameJimmyAtNonexistantPath() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        Map<String, String> attributes = verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_EMPTY,
                 "",
                 "${json:jsonPathAdd('$.missing-path', 'Jimmy')}",
                 "");
-       verifyEquals("${json:jsonPath('$.missing-path')}", attributes, "");
+        verifyEquals("${json:jsonPath('$.missing-path')}", attributes, "");
     }
 
-    @Test(expected=IllegalArgumentException.class)
-    public void testJsonPathAddNicknameJimmyAtNonArray() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+    @Test
+    public void testJsonPathAddNicknameJimmyAtNonArray() {
+        assertThrows(IllegalArgumentException.class, () -> verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_EMPTY,
                 "",
                 "${json:jsonPathAdd('$.firstName', 'Jimmy')}",
-                "");
+                ""));
     }
 
     @Test
     public void testJsonPathPutRootLevelMiddlenameTuron() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        Map<String, String> attributes = verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_EMPTY,
                 "",
                 "${json:jsonPathPut('$','middlename','Turon')}",
@@ -521,7 +627,7 @@ public class TestQuery {
 
     @Test
     public void testJsonPathPutCountryToMap() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        Map<String, String> attributes = verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_EMPTY,
                 "",
                 "${json:jsonPathPut('$.address','country','US')}",
@@ -531,7 +637,7 @@ public class TestQuery {
 
     @Test
     public void testJsonPathPutElementToArray() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        Map<String, String> attributes = verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_EMPTY,
                 "",
                 "${json:jsonPathPut('$.phoneNumbers[1]', 'backup', '212-555-1212')}",
@@ -541,7 +647,7 @@ public class TestQuery {
 
     @Test
     public void testJsonPathPutOverwriteFirstNameToJimmy() throws IOException {
-        Map<String,String> attributes = verifyJsonPathExpressions(
+        verifyJsonPathExpressions(
                 ADDRESS_BOOK_JSON_PATH_FIRST_NAME,
                 "John",
                 "${json:jsonPathPut('$','firstName','Jimmy')}",
@@ -575,9 +681,9 @@ public class TestQuery {
         verifyEquals("${allAttributes( 'x', 'y' ):join(',')}", attributes, ",");
     }
 
-    @Test(expected = AttributeExpressionLanguageException.class)
+    @Test
     public void testCannotCombineWithNonReducingFunction() {
-        Query.compile("${allAttributes( 'a.1' ):plus(1)}");
+        assertThrows(AttributeExpressionLanguageException.class, () -> Query.compile("${allAttributes( 'a.1' ):plus(1)}"));
     }
 
     @Test
@@ -632,14 +738,14 @@ public class TestQuery {
 
     @SuppressWarnings("unchecked")
     private String evaluateQueryForEscape(final String queryString, final Map<String, String> attributes) {
-        final FlowFile mockFlowFile = Mockito.mock(FlowFile.class);
-        Mockito.when(mockFlowFile.getAttributes()).thenReturn(attributes);
-        Mockito.when(mockFlowFile.getId()).thenReturn(1L);
-        Mockito.when(mockFlowFile.getEntryDate()).thenReturn(System.currentTimeMillis());
-        Mockito.when(mockFlowFile.getSize()).thenReturn(1L);
-        Mockito.when(mockFlowFile.getLineageStartDate()).thenReturn(System.currentTimeMillis());
+        final FlowFile mockFlowFile = mock(FlowFile.class);
+        when(mockFlowFile.getAttributes()).thenReturn(attributes);
+        when(mockFlowFile.getId()).thenReturn(1L);
+        when(mockFlowFile.getEntryDate()).thenReturn(System.currentTimeMillis());
+        when(mockFlowFile.getSize()).thenReturn(1L);
+        when(mockFlowFile.getLineageStartDate()).thenReturn(System.currentTimeMillis());
 
-        final ValueLookup lookup = new ValueLookup(VariableRegistry.EMPTY_REGISTRY, mockFlowFile);
+        final ValueLookup lookup = new ValueLookup(mockFlowFile);
         return Query.evaluateExpressions(queryString, lookup, ParameterLookup.EMPTY);
     }
 
@@ -675,7 +781,7 @@ public class TestQuery {
     @Test
     public void testProblematic1() {
         // There was a bug that prevented this expression from compiling. This test just verifies that it now compiles.
-        final String queryString = "${xx:append( \"120101\" ):toDate( 'yyMMddHHmmss' ):format( \"yy-MM-dd’T’HH:mm:ss\") }";
+        final String queryString = "${xx:append( \"120101\" ):toDate( 'yyMMddHHmmss' ):format( \"yy-MM-dd'T'HH:mm:ss\") }";
         Query.compile(queryString);
     }
 
@@ -821,7 +927,6 @@ public class TestQuery {
         verifyEquals(query, attributes, "say \"hi\"");
 
         query = "${xx:replace( '\\'', '\"')}";
-        System.out.println(query);
         verifyEquals(query, attributes, "say \"hi\"");
     }
 
@@ -831,7 +936,6 @@ public class TestQuery {
         attributes.put("xx", "say 'hi'");
 
         final String query = "${xx:replace( \"'hi'\", '\\\"hello\\\"' )}";
-        System.out.println(query);
         verifyEquals(query, attributes, "say \"hello\"");
     }
 
@@ -844,13 +948,62 @@ public class TestQuery {
         final String format = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
 
         final String query = "startDateTime=\"${date:toNumber():toDate():format(\"" + format + "\")}\"";
+
+        TimeZone current = TimeZone.getDefault();
+        TimeZone defaultTimeZone = TimeZone.getTimeZone("Europe/Kiev");
+        TimeZone.setDefault(defaultTimeZone);
+        try {
+            final String result = Query.evaluateExpressions(query, attributes, null);
+
+            final String expectedTime = DateTimeFormatter.ofPattern(format, Locale.US).format(Instant.ofEpochMilli(timestamp).atZone(defaultTimeZone.toZoneId()));
+            assertEquals("startDateTime=\"" + expectedTime + "\"", result);
+        } finally {
+            TimeZone.setDefault(current);
+        }
+        final List<Range> ranges = Query.extractExpressionRanges(query);
+        assertEquals(1, ranges.size());
+    }
+
+    @Test
+    public void testInstantEscapeQuotes() {
+        final long timestamp = 1403620278642L;
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("date", String.valueOf(timestamp));
+
+        final String format = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+
+        final String query = "startDateTime=\"${date:toNumber():toInstant('yyyy/MM/dd HH:mm:ss.SSS', 'America/New_York'):formatInstant(\"" + format + "\", 'America/New_York')}\"";
         final String result = Query.evaluateExpressions(query, attributes, null);
 
-        final String expectedTime = new SimpleDateFormat(format, Locale.US).format(timestamp);
+        final String expectedTime = DateTimeFormatter.ofPattern(format, Locale.US)
+                .withZone(ZoneId.of("America/New_York"))
+                .format(Instant.ofEpochMilli(timestamp));
         assertEquals("startDateTime=\"" + expectedTime + "\"", result);
 
         final List<Range> ranges = Query.extractExpressionRanges(query);
         assertEquals(1, ranges.size());
+    }
+
+    @Test
+    public void testFormatUsesLocalTimeZoneUnlessIsSpecified() {
+        TimeZone current = TimeZone.getDefault();
+        TimeZone.setDefault(TimeZone.getTimeZone("Europe/Kiev"));
+        try {
+            final String formatWithZoneInvocation = "format(\"yyyy-MM-dd HH:mm:ss\", \"GMT\")";
+            assertEquals("2020-01-01 00:00:00", evaluateFormatDate("2020-01-01 00:00:00", formatWithZoneInvocation));
+
+            final String formatWithoutZoneInvocation = "format(\"yyyy-MM-dd HH:mm:ss\")";
+            assertEquals("2020-02-01 02:00:00", evaluateFormatDate("2020-02-01 00:00:00", formatWithoutZoneInvocation));
+        } finally {
+            TimeZone.setDefault(current);
+        }
+    }
+
+    private String evaluateFormatDate(String givenDateStringInGMT, String formatInvocation) {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("date", String.valueOf(givenDateStringInGMT));
+        final String query = "${date:toDate(\"yyyy-MM-dd HH:mm:ss\", \"GMT\"):" + formatInvocation + "}";
+        return Query.evaluateExpressions(query, attributes, null);
     }
 
     @Test
@@ -864,6 +1017,42 @@ public class TestQuery {
         verifyEquals("${date:toNumber():toDate():format('yyyy')}", attributes, "2014");
         verifyEquals("${date:toDate():toNumber():format('yyyy')}", attributes, "2014");
         verifyEquals("${date:toDate():toNumber():toDate():toNumber():toDate():toNumber():format('yyyy')}", attributes, "2014");
+    }
+
+    @Test
+    public void testToDateAdjustedWithTimeZone() {
+        final String dateFormat = "yyyy-MM-dd";
+        final String created = "2025-06-01";
+        final String timeZoneId = "UTC";
+        final TimeZone timeZone = TimeZone.getTimeZone(timeZoneId);
+
+        // Build Calendar for java.util.Date to match expected result of toDate() function
+        final Calendar calendar = Calendar.getInstance();
+        calendar.clear();
+        calendar.set(Calendar.YEAR, 2025);
+        calendar.set(Calendar.MONTH, Calendar.JUNE);
+        calendar.set(Calendar.DAY_OF_MONTH, 1);
+        calendar.setTimeZone(timeZone);
+
+        // Expected Date with System Default Time Zone and hours adjusted based on Time Zone specified
+        final Date expected = calendar.getTime();
+
+        final String expression = "${created:toDate('%s', '%s')}".formatted(dateFormat, timeZoneId);
+        final Map<String, String> attributes = Map.of("created", created);
+        verifyEquals(expression, attributes, expected);
+    }
+
+    @Test
+    public void testInstantConversion() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("instant", "1403620278642");
+
+        verifyEquals("${instant:formatInstant('yyyy', 'America/New_York')}", attributes, "2014");
+        verifyEquals("${instant:toInstant():formatInstant('yyyy', 'America/New_York')}", attributes, "2014");
+        verifyEquals("${instant:toNumber():formatInstant('yyyy', 'America/New_York')}", attributes, "2014");
+        verifyEquals("${instant:toNumber():toInstant():formatInstant('yyyy', 'America/New_York')}", attributes, "2014");
+        verifyEquals("${instant:toInstant():toNumber():formatInstant('yyyy', 'America/New_York')}", attributes, "2014");
+        verifyEquals("${instant:toInstant():toNumber():toInstant():toNumber():toInstant():toNumber():formatInstant('yyyy', 'America/New_York')}", attributes, "2014");
     }
 
     @Test
@@ -1047,6 +1236,98 @@ public class TestQuery {
     }
 
     @Test
+    public void testReplaceShouldReplaceAllLiteralMatches() {
+        int n = 3;
+        final String originalValue = "Hello World";
+        final Map<String, String> attributes = Map.of("single", originalValue,
+                "repeating", StringUtils.repeat(originalValue, " ", n));
+        final String replacementValue = "Goodbye Planet";
+        final String expectedRepeatingResult = StringUtils.repeat(replacementValue, " ", n);
+        final String replaceSingleExpression = "${single:replace('" + originalValue + "', '" + replacementValue + "')}";
+        final String replaceRepeatingExpression = "${repeating:replace('" + originalValue + "', '" + replacementValue + "')}";
+        Query replaceSingleQuery = Query.compile(replaceSingleExpression);
+        Query replaceRepeatingQuery = Query.compile(replaceRepeatingExpression);
+
+        QueryResult<?> replaceSingleResult = replaceSingleQuery.evaluate(new StandardEvaluationContext(attributes));
+        QueryResult<?> replaceRepeatingResult = replaceRepeatingQuery.evaluate(new StandardEvaluationContext(attributes));
+
+        assertEquals(replacementValue, replaceSingleResult.getValue());
+        assertEquals(AttributeExpression.ResultType.STRING, replaceSingleResult.getResultType());
+        assertEquals(expectedRepeatingResult, replaceRepeatingResult.getValue());
+        assertEquals(AttributeExpression.ResultType.STRING, replaceRepeatingResult.getResultType());
+    }
+
+    @Test
+    public void testReplaceFirstShouldOnlyReplaceFirstRegexMatch() {
+        int n = 3;
+        final String originalValue = "Hello World";
+        final Map<String, String> attributes = Map.of("single", originalValue,
+                "repeating", StringUtils.repeat(originalValue, " ", n));
+
+        final String replacementValue = "Goodbye Planet";
+        final String expectedRepeatingResult = replacementValue + " " + StringUtils.repeat(originalValue, " ", n - 1);
+        final String replaceOnlyFirstPattern = "\\w+\\s\\w+\\b??";
+        final String replaceSingleExpression = "${single:replaceFirst('" + replaceOnlyFirstPattern + "', '" + replacementValue + "')}";
+        final String replaceRepeatingExpression = "${repeating:replaceFirst('" + replaceOnlyFirstPattern + "', '" + replacementValue + "')}";
+        Query replaceSingleQuery = Query.compile(replaceSingleExpression);
+        Query replaceRepeatingQuery = Query.compile(replaceRepeatingExpression);
+
+        QueryResult<?> replaceSingleResult = replaceSingleQuery.evaluate(new StandardEvaluationContext(attributes));
+        QueryResult<?> replaceRepeatingResult = replaceRepeatingQuery.evaluate(new StandardEvaluationContext(attributes));
+
+        assertEquals(replacementValue, replaceSingleResult.getValue());
+        assertEquals(AttributeExpression.ResultType.STRING, replaceSingleResult.getResultType());
+        assertEquals(expectedRepeatingResult, replaceRepeatingResult.getValue());
+        assertEquals(AttributeExpression.ResultType.STRING, replaceRepeatingResult.getResultType());
+    }
+
+    @Test
+    public void testReplaceFirstShouldOnlyReplaceFirstLiteralMatch() {
+        int n = 3;
+        final String originalValue = "Hello World";
+        final Map<String, String> attributes = Map.of("single", originalValue,
+                "repeating", StringUtils.repeat(originalValue, " ", n));
+        final String replacementValue = "Goodbye Planet";
+        final String expectedRepeatingResult = replacementValue + " " + StringUtils.repeat(originalValue, " ", n - 1);
+        final String replaceSingleExpression = "${single:replaceFirst('" + originalValue + "', '" + replacementValue + "')}";
+        final String replaceRepeatingExpression = "${repeating:replaceFirst('" + originalValue + "', '" + replacementValue + "')}";
+        Query replaceSingleQuery = Query.compile(replaceSingleExpression);
+        Query replaceRepeatingQuery = Query.compile(replaceRepeatingExpression);
+
+        QueryResult<?> replaceSingleResult = replaceSingleQuery.evaluate(new StandardEvaluationContext(attributes));
+        QueryResult<?> replaceRepeatingResult = replaceRepeatingQuery.evaluate(new StandardEvaluationContext(attributes));
+
+        assertEquals(replacementValue, replaceSingleResult.getValue());
+        assertEquals(AttributeExpression.ResultType.STRING, replaceSingleResult.getResultType());
+        assertEquals(expectedRepeatingResult, replaceRepeatingResult.getValue());
+        assertEquals(AttributeExpression.ResultType.STRING, replaceRepeatingResult.getResultType());
+    }
+
+    @Test
+    public void testShouldDemonstrateDifferenceBetweenStringReplaceAndStringReplaceFirst() {
+        int n = 3;
+        final String originalValue = "Hello World";
+        final Map<String, String> attributes = Map.of("single", originalValue,
+                "repeating", StringUtils.repeat(originalValue, " ", n));
+        final String replacementValue = "Goodbye Planet";
+        final String expectedRepeatingResult = replacementValue + " " + StringUtils.repeat(originalValue, " ", n - 1);
+        final String replaceOnlyFirstPattern = "\\w+\\s\\w+\\b??";
+
+        // Execute on both single and repeating with String#replace()
+        String replaceSingleResult = attributes.get("single").replace(replaceOnlyFirstPattern, replacementValue);
+        String replaceRepeatingResult = attributes.get("repeating").replace(replaceOnlyFirstPattern, replacementValue);
+
+        // Execute on both single and repeating with String#replaceFirst()
+        String replaceFirstSingleResult = attributes.get("single").replaceFirst(replaceOnlyFirstPattern, replacementValue);
+        String replaceFirstRepeatingResult = attributes.get("repeating").replaceFirst(replaceOnlyFirstPattern, replacementValue);
+
+        assertNotEquals(replacementValue, replaceSingleResult);
+        assertNotEquals(expectedRepeatingResult, replaceRepeatingResult);
+        assertEquals(replacementValue, replaceFirstSingleResult);
+        assertEquals(expectedRepeatingResult, replaceFirstRepeatingResult);
+    }
+
+    @Test
     public void testMathWholeNumberOperations() {
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("one", "1");
@@ -1070,7 +1351,7 @@ public class TestQuery {
         attributes.put("hundred", "100");
 
         // The expected resulted is calculated instead of a set number due to the inaccuracy of double arithmetic
-        verifyEquals("${hundred:toNumber():multiply(${second}):divide(${third}):plus(${first}):mod(${fifth})}", attributes, (((100 * 12.3) / 3) + 1.5) %5.1);
+        verifyEquals("${hundred:toNumber():multiply(${second}):divide(${third}):plus(${first}):mod(${fifth})}", attributes, (((100 * 12.3) / 3) + 1.5) % 5.1);
     }
 
     @Test
@@ -1102,32 +1383,24 @@ public class TestQuery {
         attributes.put("negativeDecimal", "-64.1");
 
         // Test that errors relating to not finding methods are properly handled
-        try {
-            verifyEquals("${math('rand'):toNumber()}", attributes, 0L);
-            fail();
-        } catch (AttributeExpressionLanguageException expected) {
-            assertEquals("Cannot evaluate 'math' function because no subjectless method was found with the name:'rand'", expected.getMessage());
-        }
-        try {
-            verifyEquals("${negativeDecimal:math('absolute')}", attributes, 0L);
-            fail();
-        } catch (AttributeExpressionLanguageException expected) {
-            assertEquals("Cannot evaluate 'math' function because no method was found matching the passed parameters: name:'absolute', one argument of type: 'double'", expected.getMessage());
-        }
-        try {
-            verifyEquals("${oneDecimal:math('power', ${two:toDecimal()})}", attributes, 0L);
-            fail();
-        } catch (AttributeExpressionLanguageException expected) {
-            assertEquals("Cannot evaluate 'math' function because no method was found matching the passed parameters: name:'power', " +
-                    "first argument type: 'double', second argument type:  'double'", expected.getMessage());
-        }
-        try {
-            verifyEquals("${oneDecimal:math('power', ${two})}", attributes, 0L);
-            fail();
-        } catch (AttributeExpressionLanguageException expected) {
-            assertEquals("Cannot evaluate 'math' function because no method was found matching the passed parameters: name:'power', " +
-                    "first argument type: 'double', second argument type:  'long'", expected.getMessage());
-        }
+
+        AttributeExpressionLanguageException expected = assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${math('rand'):toNumber()}", attributes, 0L));
+        assertEquals("Cannot evaluate 'math' function because no subjectless method was found with the name:'rand'", expected.getMessage());
+
+        expected = assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${negativeDecimal:math('absolute')}", attributes, 0L));
+        assertEquals("Cannot evaluate 'math' function because no method was found matching the passed parameters: name:'absolute', one argument of type: 'double'", expected.getMessage());
+
+        expected = assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${oneDecimal:math('power', ${two:toDecimal()})}", attributes, 0L));
+        assertEquals("Cannot evaluate 'math' function because no method was found matching the passed parameters: name:'power', " +
+                "first argument type: 'double', second argument type:  'double'", expected.getMessage());
+
+        expected = assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${oneDecimal:math('power', ${two})}", attributes, 0L));
+        assertEquals("Cannot evaluate 'math' function because no method was found matching the passed parameters: name:'power', " +
+                "first argument type: 'double', second argument type:  'long'", expected.getMessage());
 
         // Can only verify that it runs. ToNumber() will verify that it produced a number greater than or equal to 0.0 and less than 1.0
         verifyEquals("${math('random'):toNumber()}", attributes, 0L);
@@ -1138,11 +1411,11 @@ public class TestQuery {
         verifyEquals("${negative:math('max', ${two})}", attributes, 2L);
         verifyEquals("${negativeDecimal:math('max', ${twoDecimal})}", attributes, 2.3D);
 
-        verifyEquals("${oneDecimal:math('pow', ${two:toDecimal()})}", attributes, Math.pow(1.5,2));
-        verifyEquals("${oneDecimal:math('scalb', ${two})}", attributes, Math.scalb(1.5,2));
+        verifyEquals("${oneDecimal:math('pow', ${two:toDecimal()})}", attributes, Math.pow(1.5, 2));
+        verifyEquals("${oneDecimal:math('scalb', ${two})}", attributes, Math.scalb(1.5, 2));
 
         verifyEquals("${negative:math('abs'):toDecimal():math('cbrt'):math('max', ${two:toDecimal():math('pow',${oneDecimal}):mod(${two})})}", attributes,
-                Math.max(Math.cbrt(Math.abs(-64)), Math.pow(2,1.5)%2));
+                Math.max(Math.cbrt(Math.abs(-64)), Math.pow(2, 1.5) % 2));
     }
 
     @Test
@@ -1152,8 +1425,8 @@ public class TestQuery {
         attributes.put("two", "2.2");
 
         // The expected resulted is calculated instead of a set number due to the inaccuracy of double arithmetic
-        verifyEquals("${literal(5):toNumber():multiply(${two:plus(1)})}", attributes, 5*3.2);
-        verifyEquals("${literal(5.5E-1):toDecimal():plus(${literal(.5E1)}):multiply(${two:plus(1)})}", attributes, (0.55+5)*3.2);
+        verifyEquals("${literal(5):toNumber():multiply(${two:plus(1)})}", attributes, 5 * 3.2);
+        verifyEquals("${literal(5.5E-1):toDecimal():plus(${literal(.5E1)}):multiply(${two:plus(1)})}", attributes, (0.55 + 5) * 3.2);
     }
 
     @Test
@@ -1183,6 +1456,39 @@ public class TestQuery {
         assertEquals("63", Query.evaluateExpressions("${year:append('/'):append('${month}'):append('/'):append('${day}'):toDate('yyyy/MM/dd'):format('D')}", attributes, null));
 
         verifyEquals("${year:append('/'):append(${month}):append('/'):append(${day}):toDate('yyyy/MM/dd'):format('D')}", attributes, "63");
+    }
+
+    @Test
+    public void testInstant() {
+        final Calendar now = Calendar.getInstance();
+        final int year = now.get(Calendar.YEAR);
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("entryDate", String.valueOf(now.getTimeInMillis()));
+
+        verifyEquals("${entryDate:toNumber():toInstant():formatInstant('yyyy', 'America/New_York')}", attributes, String.valueOf(year));
+
+        // test for not existing attribute (NIFI-1962)
+        assertEquals("", Query.evaluateExpressions("${notExistingAtt:toInstant()}", attributes, null));
+
+        attributes.clear();
+        attributes.put("month", "3");
+        attributes.put("day", "4");
+        attributes.put("year", "2013");
+        attributes.put("hour", "16");
+        attributes.put("minute", "22");
+        attributes.put("second", "59");
+
+        assertEquals("63", Query.evaluateExpressions("${year:append('/'):append(${month}):append('/'):append(${day}):append(' ')" +
+                ":append(${hour}):append(':'):append(${minute}):append(':'):append(${second}):toInstant('yyyy/M/d HH:mm:ss', 'America/New_York')" +
+                ":formatInstant('D', 'America/New_York')}", attributes, null));
+
+        assertEquals("63", Query.evaluateExpressions("${year:append('/'):append('${month}'):append('/'):append('${day}'):append(' ')" +
+                ":append(${hour}):append(':'):append(${minute}):append(':'):append(${second}):toInstant('yyyy/M/d HH:mm:ss', 'America/New_York')" +
+                ":formatInstant('D', 'America/New_York')}", attributes, null));
+
+        verifyEquals("${year:append('/'):append(${month}):append('/'):append(${day}):append(' ')" +
+                ":append(${hour}):append(':'):append(${minute}):append(':'):append(${second}):toInstant('yyyy/M/d HH:mm:ss', 'America/New_York')" +
+                ":formatInstant('D', 'America/New_York')}", attributes, "63");
     }
 
     @Test
@@ -1337,12 +1643,7 @@ public class TestQuery {
         verifyEquals("${allAttributes('abc', 'xyz'):length():equals(4)}", attributes, true);
         verifyEquals("${allAttributes('abc', 'xyz', 'other'):isNull()}", attributes, false);
 
-        try {
-            Query.compile("${allAttributes('#ah'):equals('hello')");
-            Assert.fail("Was able to compile with allAttributes and an invalid attribute name");
-        } catch (final AttributeExpressionLanguageParsingException e) {
-            // expected behavior
-        }
+        assertThrows(AttributeExpressionLanguageParsingException.class, () -> Query.compile("${allAttributes('#ah'):equals('hello')"));
     }
 
     @Test
@@ -1525,9 +1826,9 @@ public class TestQuery {
         verifyEmpty("${literal('0x1.1'):toDecimal()}", attributes);
 
         // Special cases
-        verifyEquals("${literal('" + Double.toString(POSITIVE_INFINITY) + "'):toDecimal():plus(1):plus(2)}", attributes, POSITIVE_INFINITY);
-        verifyEquals("${literal('" + Double.toString(NEGATIVE_INFINITY) + "'):toDecimal():plus(1):plus(2)}", attributes, NEGATIVE_INFINITY);
-        verifyEquals("${literal('" + Double.toString(NaN) + "'):toDecimal():plus(1):plus(2)}", attributes, NaN);
+        verifyEquals("${literal('" + POSITIVE_INFINITY + "'):toDecimal():plus(1):plus(2)}", attributes, POSITIVE_INFINITY);
+        verifyEquals("${literal('" + NEGATIVE_INFINITY + "'):toDecimal():plus(1):plus(2)}", attributes, NEGATIVE_INFINITY);
+        verifyEquals("${literal('" + NaN + "'):toDecimal():plus(1):plus(2)}", attributes, NaN);
     }
 
     @Test
@@ -1537,8 +1838,6 @@ public class TestQuery {
         attributes.put("xyz", "4132");
         attributes.put("hello", "world!");
         attributes.put("123.cba", "hell.o");
-
-        System.out.println(printTree(Query.compile("${allMatchingAttributes('(abc|xyz)'):matches('\\\\d+')}").getTree()));
 
         verifyEquals("${'123.cba':matches('hell\\.o')}", attributes, true);
         verifyEquals("${allMatchingAttributes('123\\.cba'):equals('hell.o')}", attributes, true);
@@ -1669,7 +1968,7 @@ public class TestQuery {
     }
 
     @Test
-    public void testBase64Encode(){
+    public void testBase64Encode() {
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("userpass", "admin:admin");
         verifyEquals("${userpass:base64Encode()}", attributes, "YWRtaW46YWRtaW4=");
@@ -1677,7 +1976,7 @@ public class TestQuery {
     }
 
     @Test
-    public void testBase64Decode(){
+    public void testBase64Decode() {
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("userpassbase64", "YWRtaW46YWRtaW4=");
         verifyEquals("${userpassbase64:base64Decode()}", attributes, "admin:admin");
@@ -1692,6 +1991,13 @@ public class TestQuery {
     }
 
     @Test
+    public void testDateFormatConversionIsCaseInsensitive() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("blue", "10may2004");
+        verifyEquals("${blue:toDate('ddMMMyyyy'):format('yyyy/MM/dd')}", attributes, "2004/05/10");
+    }
+
+    @Test
     public void testDateFormatConversionWithTimeZone() {
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("blue", "20130917162643");
@@ -1701,8 +2007,17 @@ public class TestQuery {
     }
 
     @Test
+    public void testInstantFormatConversion() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("blue", "20130917162643");
+        verifyEquals("${blue:toInstant('yyyyMMddHHmmss', 'GMT'):formatInstant(\"yyyy/MM/dd HH:mm:ss.SSS'Z'\", 'GMT')}", attributes, "2013/09/17 16:26:43.000Z");
+        verifyEquals("${blue:toInstant('yyyyMMddHHmmss', 'GMT'):formatInstant(\"yyyy/MM/dd HH:mm:ss.SSS'Z'\", 'Europe/Paris')}", attributes, "2013/09/17 18:26:43.000Z");
+        verifyEquals("${blue:toInstant('yyyyMMddHHmmss', 'GMT'):formatInstant(\"yyyy/MM/dd HH:mm:ss.SSS'Z'\", 'America/Los_Angeles')}", attributes, "2013/09/17 09:26:43.000Z");
+    }
+
+    @Test
     public void testNot() {
-        verifyEquals("${ab:notNull():not()}", new HashMap<String, String>(), true);
+        verifyEquals("${ab:notNull():not()}", new HashMap<>(), true);
     }
 
     @Test
@@ -1773,7 +2088,6 @@ public class TestQuery {
                 + "     )"
                 + "}";
 
-        System.out.println(query);
         verifyEquals(query, attributes, true);
     }
 
@@ -1886,27 +2200,14 @@ public class TestQuery {
 
     @Test
     public void testLiteralFunction() {
-        final Map<String, String> attrs = Collections.<String, String>emptyMap();
+        final Map<String, String> attrs = Collections.emptyMap();
         verifyEquals("${literal(2):gt(1)}", attrs, true);
         verifyEquals("${literal('hello'):substring(0, 1):equals('h')}", attrs, true);
     }
 
-    @Test
-    public void testRandomFunction() {
-        final Map<String, String> attrs = Collections.<String, String>emptyMap();
-        final Long negOne = Long.valueOf(-1L);
-        final HashSet<Long> results = new HashSet<>(100);
-        for (int i = 0; i < results.size(); i++) {
-            long result = (Long) getResult("${random()}", attrs).getValue();
-            assertThat("random", result, greaterThan(negOne));
-            assertEquals("duplicate random", true, results.add(result));
-        }
-    }
-
     QueryResult<?> getResult(String expr, Map<String, String> attrs) {
         final Query query = Query.compile(expr);
-        final QueryResult<?> result = query.evaluate(new StandardEvaluationContext(attrs));
-        return result;
+        return query.evaluate(new StandardEvaluationContext(attrs));
     }
 
     @Test
@@ -2031,7 +2332,7 @@ public class TestQuery {
 
         attributes.put("string", "special ♣");
         verifyEquals("${string:escapeHtml4()}", attributes, "special &clubs;");
-      }
+    }
 
     @Test
     public void testUnescapeFunctions() {
@@ -2082,10 +2383,38 @@ public class TestQuery {
         verifyEquals("${nbr_attr:hash('MD5')}", attributes, "d3d9446802a44259755d38e6d163e820");
     }
 
-    @Test(expected = AttributeExpressionLanguageException.class)
+    @Test
+    public void testReplaceByPattern() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("str_attr", "myValue2");
+
+        verifyEquals("${str_attr:replaceByPattern('')}", attributes, "myValue2");
+        verifyEquals("${str_attr:replaceByPattern(${doesnotexist})}", attributes, "myValue2");
+
+        verifyEquals("${str_attr:replaceByPattern('.*:foo')}", attributes, "foo");
+        verifyEquals("${str_attr:replaceByPattern('myValue2:test,.*:foo')}", attributes, "test");
+        verifyEquals("${str_attr:replaceByPattern('myValue[3-4]:test,.*:foo')}", attributes, "foo");
+        verifyEquals("${str_attr:replaceByPattern('myValue[3-4]:test,abc:foo')}", attributes, "myValue2");
+        verifyEquals("${str_attr:replaceByPattern('myValue[3-4]:test, abc:foo, myValue[1-4]:xyz')}", attributes, "xyz");
+        verifyEquals("${str_attr:replaceByPattern('myValue1:test,myValue2:test,myValue3:test')}", attributes, "test");
+
+        verifyEquals("${str_attr:replaceByPattern(${literal('myValue[3-4]:test'):append(','):append(' .*:foo')})}", attributes, "foo");
+    }
+
+    @Test
+    public void testReplaceByPatternWithSameReplacement() {
+        final String expression = "${attr:replaceByPattern('a:ok,b:ok,c:ok')}";
+
+        verifyEquals(expression, Map.of("attr", "a"), "ok");
+        verifyEquals(expression, Map.of("attr", "b"), "ok");
+        verifyEquals(expression, Map.of("attr", "c"), "ok");
+    }
+
+    @Test
     public void testHashFailure() {
         final Map<String, String> attributes = new HashMap<>();
-        verifyEquals("${literal('john'):hash('NOT_A_ALGO')}", attributes, "527bd5b5d689e2c32ae974c6229ff785");
+        assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${literal('john'):hash('NOT_A_ALGO')}", attributes, "527bd5b5d689e2c32ae974c6229ff785"));
     }
 
     @Test
@@ -2151,24 +2480,9 @@ public class TestQuery {
         assertTrue(multipleResultExpectedResults.contains(actualResult));
 
         verifyEquals("${str:repeat(4)}", attributes, "abcabcabcabc");
-        try {
-            verifyEquals("${str:repeat(-1)}", attributes, "");
-            fail("Should have failed on numRepeats < 0");
-        } catch(AttributeExpressionLanguageException aele) {
-            // Do nothing, it is expected
-        }
-        try {
-            verifyEquals("${str:repeat(0)}", attributes, "");
-            fail("Should have failed on numRepeats = 0");
-        } catch(AttributeExpressionLanguageException aele) {
-            // Do nothing, it is expected
-        }
-        try {
-            verifyEquals("${str:repeat(2,1)}", attributes, "");
-            fail("Should have failed on minRepeats > maxRepeats");
-        } catch(AttributeExpressionLanguageException aele) {
-            // Do nothing, it is expected
-        }
+        assertThrows(AttributeExpressionLanguageException.class, () -> verifyEquals("${str:repeat(-1)}", attributes, ""));
+        assertThrows(AttributeExpressionLanguageException.class, () -> verifyEquals("${str:repeat(0)}", attributes, ""));
+        assertThrows(AttributeExpressionLanguageException.class, () -> verifyEquals("${str:repeat(2,1)}", attributes, ""));
     }
 
     @Test
@@ -2223,8 +2537,144 @@ public class TestQuery {
         verifyEquals("${myattr0:UUID5(${UUID()}):length()}", attributes, 36L);
     }
 
+    @Test
+    void testIsJson() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("jsonObj", "{\"name\":\"John\", \"age\":30, \"car\":null}");
+        attributes.put("jsonObjWithLeadingAndTrailingingSpaces", "\n{\"name\":\"John\", \"age\":30, \"car\":null}\n");
+        attributes.put("jsonObjMissingStartingBrace", "\"name\":\"John\", \"age\":30, \"car\":null}");
+        attributes.put("jsonObjMissingEndingBrace", "{\"name\":\"John\", \"age\":30, \"car\":null");
+        attributes.put("jsonArray", "[\"Ford\", \"BMW\", \"Fiat\"]");
+        attributes.put("jsonArrayMissingStartingBracket", "\"Ford\", \"BMW\", \"Fiat\"]");
+        attributes.put("jsonArrayMissingEndingBracket", "[\"Ford\", \"BMW\", \"Fiat\"");
+        attributes.put("emptyQuotedString", "\"\"");
+        attributes.put("quotedString", "\"someString\"");
+        attributes.put("integer", "1234");
+        attributes.put("decimal", "18.36");
+        attributes.put("trueAttr", "true");
+        attributes.put("falseAttr", "false");
+        attributes.put("nullAttr", "null");
+
+        verifyEquals("${jsonObj:isJson()}", attributes, true);
+        verifyEquals("${jsonObjWithLeadingAndTrailingingSpaces:isJson()}", attributes, true);
+        verifyEquals("${jsonObjMissingStartingBrace:isJson()}", attributes, false);
+        verifyEquals("${jsonObjMissingEndingBrace:isJson()}", attributes, false);
+        verifyEquals("${jsonArray:isJson()}", attributes, true);
+        verifyEquals("${jsonArrayMissingStartingBracket:isJson()}", attributes, false);
+        verifyEquals("${jsonArrayMissingEndingBracket:isJson()}", attributes, false);
+        verifyEquals("${someAttribute:isJson()}", attributes, false);
+        verifyEquals("${emptyQuotedString:isJson()}", attributes, false);
+        verifyEquals("${quotedString:isJson()}", attributes, false);
+        verifyEquals("${integer:isJson()}", attributes, false);
+        verifyEquals("${decimal:isJson()}", attributes, false);
+        verifyEquals("${trueAttr:isJson()}", attributes, false);
+        verifyEquals("${falseAttr:isJson()}", attributes, false);
+        verifyEquals("${nullAttr:isJson()}", attributes, false);
+    }
+
+    @Test
+    void testIsValidDate() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("validDate", "04-08-2026");
+        attributes.put("invalidCalendarDate", "31-02-2026");
+        attributes.put("formatMismatch", "2026-08-04");
+        attributes.put("notADate", "not-a-date");
+        attributes.put("validDateWithTime", "2026-08-04 10:15:30");
+        attributes.put("validDateUtc", "2026-08-04 10:15:30");
+        attributes.put("leapDay", "29-02");
+        attributes.put("leapDayInLeapYear", "29-02-2000");
+        attributes.put("leapDayInNonLeapYear", "29-02-2001");
+
+        verifyEquals("${validDate:isValidDate('dd-MM-yyyy')}", attributes, true);
+        verifyEquals("${invalidCalendarDate:isValidDate('dd-MM-yyyy')}", attributes, false);
+        verifyEquals("${formatMismatch:isValidDate('dd-MM-yyyy')}", attributes, false);
+        verifyEquals("${notADate:isValidDate('dd-MM-yyyy')}", attributes, false);
+
+        // Feb 29 without a year in the format should be valid (format has no year field)
+        verifyEquals("${leapDay:isValidDate('dd-MM')}", attributes, true);
+        // Feb 29 with an explicit leap year should be valid
+        verifyEquals("${leapDayInLeapYear:isValidDate('dd-MM-yyyy')}", attributes, true);
+        // Feb 29 in a non-leap year should be invalid
+        verifyEquals("${leapDayInNonLeapYear:isValidDate('dd-MM-yyyy')}", attributes, false);
+
+        // with timezone argument
+        verifyEquals("${validDateWithTime:isValidDate('yyyy-MM-dd HH:mm:ss', 'UTC')}", attributes, true);
+        verifyEquals("${notADate:isValidDate('yyyy-MM-dd HH:mm:ss', 'UTC')}", attributes, false);
+
+        // DST gap: Australia/Sydney springs forward from 02:00 to 03:00 on 2024-10-06,
+        // so 02:30 on that date does not exist and should be invalid
+        attributes.put("dstGapTime", "2024-10-06 02:30:00");
+        attributes.put("dstValidTimeBefore", "2024-10-06 01:30:00");
+        attributes.put("dstValidTimeAfter", "2024-10-06 03:30:00");
+        verifyEquals("${dstGapTime:isValidDate('yyyy-MM-dd HH:mm:ss', 'Australia/Sydney')}", attributes, false);
+        verifyEquals("${dstValidTimeBefore:isValidDate('yyyy-MM-dd HH:mm:ss', 'Australia/Sydney')}", attributes, true);
+        verifyEquals("${dstValidTimeAfter:isValidDate('yyyy-MM-dd HH:mm:ss', 'Australia/Sydney')}", attributes, true);
+
+        // chaining with ifElse
+        verifyEquals("${validDate:isValidDate('dd-MM-yyyy'):ifElse('valid', 'invalid')}", attributes, "valid");
+        verifyEquals("${invalidCalendarDate:isValidDate('dd-MM-yyyy'):ifElse('valid', 'invalid')}", attributes, "invalid");
+
+        // null subject (attribute does not exist)
+        verifyEquals("${nonExistentAttr:isValidDate('dd-MM-yyyy')}", attributes, false);
+
+        // leading/trailing whitespace should be trimmed before parsing
+        attributes.put("paddedDate", "  04-08-2026  ");
+        verifyEquals("${paddedDate:isValidDate('dd-MM-yyyy')}", attributes, true);
+
+        // DST gap with 12-hour clock format: Australia/Sydney springs forward from 02:00 to 03:00
+        // on 2024-10-06, so 02:30 AM does not exist and should be invalid
+        attributes.put("dstGapTime12h", "2024-10-06 02:30:00 AM");
+        attributes.put("dstValidTimeBefore12h", "2024-10-06 01:30:00 AM");
+        attributes.put("dstValidTimeAfter12h", "2024-10-06 03:30:00 AM");
+        verifyEquals("${dstGapTime12h:isValidDate('yyyy-MM-dd hh:mm:ss a', 'Australia/Sydney')}", attributes, false);
+        verifyEquals("${dstValidTimeBefore12h:isValidDate('yyyy-MM-dd hh:mm:ss a', 'Australia/Sydney')}", attributes, true);
+        verifyEquals("${dstValidTimeAfter12h:isValidDate('yyyy-MM-dd hh:mm:ss a', 'Australia/Sydney')}", attributes, true);
+    }
+
+    @Test
+    void testIsValidInstant() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("isoInstant", "2026-08-04T10:15:30Z");
+        attributes.put("isoOffsetDateTime", "2026-08-04T10:15:30+05:30");
+        attributes.put("notAnInstant", "not-a-date");
+        attributes.put("plainDate", "2026-08-04");
+
+        verifyEquals("${isoInstant:isValidInstant()}", attributes, true);
+        verifyEquals("${isoOffsetDateTime:isValidInstant()}", attributes, true);
+        verifyEquals("${notAnInstant:isValidInstant()}", attributes, false);
+        verifyEquals("${plainDate:isValidInstant()}", attributes, false);
+
+        // chaining with ifElse
+        verifyEquals("${isoInstant:isValidInstant():ifElse('valid-instant', 'invalid-instant')}", attributes, "valid-instant");
+        verifyEquals("${notAnInstant:isValidInstant():ifElse('valid-instant', 'invalid-instant')}", attributes, "invalid-instant");
+
+        // null subject (attribute does not exist)
+        verifyEquals("${nonExistentAttr:isValidInstant()}", attributes, false);
+    }
+
+    @Test
+    void testGetUri() {
+        verifyEquals("${getUri('https', 'admin:admin', 'nifi.apache.org', '1234', '/path/data ', 'key=value &key2=value2', 'frag1')}",
+                null, "https://admin:admin@nifi.apache.org:1234/path/data%20?key=value%20&key2=value2#frag1");
+        verifyEquals("${getUri('https', null, 'nifi.apache.org', 8443, '/docs.html', null, null)}",
+                null, "https://nifi.apache.org:8443/docs.html");
+        verifyEquals("${getUri('http', null, 'nifi.apache.org', -1, '/docs.html', null, null)}",
+                null, "http://nifi.apache.org/docs.html");
+
+        assertInvalid("${getUri()}");
+        assertInvalid("${getUri('http://nifi.apache.org:1234/path/data?key=value&key2=value2#frag1')}");
+        assertInvalid("${getUri('https', 'admin:admin')}");
+        assertInvalid("${getUri('mailto', 'dev@nifi.apache.org', '')}");
+        assertInvalid("${getUri('http', 'nifi.apache.org', '/path/data', 'frag1')}");
+        assertInvalid("${getUri('https', 'admin:admin@nifi.apache.org:1234', '/path/data ', 'key=value&key2=value2', 'frag1')}");
+
+        AttributeExpressionLanguageException thrown = assertThrows(AttributeExpressionLanguageException.class,
+                () -> verifyEquals("${getUri('https', 'admin:admin', 'nifi.apache.org', 'notANumber', '/path/data ', 'key=value&key2=value2', 'frag1')}", null, ""));
+        assertEquals("Could not evaluate 'getUri' function with argument 'notANumber' which is not a number", thrown.getMessage());
+    }
+
     private void verifyEquals(final String expression, final Map<String, String> attributes, final Object expectedResult) {
-        verifyEquals(expression,attributes, null, ParameterLookup.EMPTY, expectedResult);
+        verifyEquals(expression, attributes, null, ParameterLookup.EMPTY, expectedResult);
     }
 
     private void verifyEquals(final String expression, final Map<String, String> attributes, final Map<String, String> stateValues, final Object expectedResult) {
@@ -2248,19 +2698,21 @@ public class TestQuery {
         if (expectedResult instanceof Long) {
             if (ResultType.NUMBER.equals(result.getResultType())) {
                 final Number resultNumber = ((NumberQueryResult) result).getValue();
-                assertTrue(resultNumber instanceof Long);
+                assertInstanceOf(Long.class, resultNumber);
             } else {
                 assertEquals(ResultType.WHOLE_NUMBER, result.getResultType());
             }
-        } else if(expectedResult instanceof Double) {
+        } else if (expectedResult instanceof Double) {
             if (ResultType.NUMBER.equals(result.getResultType())) {
                 final Number resultNumber = ((NumberQueryResult) result).getValue();
-                assertTrue(resultNumber instanceof Double);
+                assertInstanceOf(Double.class, resultNumber);
             } else {
                 assertEquals(ResultType.DECIMAL, result.getResultType());
             }
         } else if (expectedResult instanceof Boolean) {
             assertEquals(ResultType.BOOLEAN, result.getResultType());
+        } else if (expectedResult instanceof Date) {
+            assertEquals(ResultType.DATE, result.getResultType());
         } else {
             assertEquals(ResultType.STRING, result.getResultType());
         }
@@ -2270,7 +2722,7 @@ public class TestQuery {
 
     private void verifyEmpty(final String expression, final Map<String, String> attributes) {
         Query.validateExpression(expression, false);
-        assertEquals(String.valueOf(""), Query.evaluateExpressions(expression, attributes, null));
+        assertEquals("", Query.evaluateExpressions(expression, attributes, null));
     }
 
     private String getResourceAsString(String resourceName) throws IOException {
@@ -2292,7 +2744,6 @@ public class TestQuery {
         }
     }
 
-
     private static class MapParameterLookup implements ParameterLookup {
         private final Map<String, String> parameters;
 
@@ -2307,7 +2758,7 @@ public class TestQuery {
                 return Optional.empty();
             }
 
-            return Optional.of(new Parameter(new ParameterDescriptor.Builder().name(parameterName).build(), value));
+            return Optional.of(new Parameter.Builder().name(parameterName).value(value).build());
         }
 
         @Override
@@ -2319,5 +2770,946 @@ public class TestQuery {
         public long getVersion() {
             return 0;
         }
+    }
+
+    @Test
+    public void testUnique() {
+        final Map<String, String> attributes = new HashMap<>();
+
+        // Test basic comma-separated list
+        attributes.put("list", "apple,banana,apple,orange,banana,grape");
+        verifyEquals("${list:unique(',')}", attributes, "apple,banana,orange,grape");
+
+        // Test pipe-separated list
+        attributes.put("pipe_list", "red|blue|red|green|blue|yellow");
+        verifyEquals("${pipe_list:unique('|')}", attributes, "red|blue|green|yellow");
+
+        // Test with spaces
+        attributes.put("space_list", "one two one three two four");
+        verifyEquals("${space_list:unique(' ')}", attributes, "one two three four");
+
+        // Test with empty values in list
+        attributes.put("empty_values_in_list", "a,b,,c,,d,b");
+        verifyEquals("${empty_values_in_list:unique(',')}", attributes, "a,b,,c,d");
+
+        // Test with single value
+        attributes.put("single", "only_one");
+        verifyEquals("${single:unique(',')}", attributes, "only_one");
+
+        // Test with no duplicates
+        attributes.put("no_dups", "x,y,z");
+        verifyEquals("${no_dups:unique(',')}", attributes, "x,y,z");
+
+        // Test with all duplicates
+        attributes.put("all_dups", "same,same,same,same");
+        verifyEquals("${all_dups:unique(',')}", attributes, "same");
+
+        // Test with multi-character separator
+        attributes.put("multi_sep", "one::two::one::three::two");
+        verifyEquals("${multi_sep:unique('::')}", attributes, "one::two::three");
+
+        // Test with special characters in separator
+        attributes.put("special_sep", "a|b|a|c|b");
+        verifyEquals("${special_sep:unique('|')}", attributes, "a|b|c");
+
+        // Test with empty string separator (should return original)
+        attributes.put("test_list", "abc");
+        verifyEquals("${test_list:unique('')}", attributes, "abc");
+
+        // Test with empty string
+        attributes.put("empty_attr", "");
+        verifyEquals("${empty_attr:unique(',')}", attributes, "");
+
+        // Test with null attribute
+        verifyEquals("${missing_attr:unique(',')}", attributes, "");
+
+        attributes.put("ordered", "3,1,4,1,5,9,2,6,5,3,5");
+        verifyEquals("${ordered:unique(',')}", attributes, "3,1,4,5,9,2,6");
+
+        // Test with URLs
+        attributes.put("urls", "http://example.com,http://test.com,http://example.com");
+        verifyEquals("${urls:unique(',')}", attributes, "http://example.com,http://test.com");
+
+        // Test with file paths (Windows-style)
+        attributes.put("paths", "C:\\Users\\test;D:\\Data;C:\\Users\\test;E:\\Backup");
+        verifyEquals("${paths:unique(';')}", attributes, "C:\\Users\\test;D:\\Data;E:\\Backup");
+
+        // Test with dash separator (replaced tab test)
+        attributes.put("dash_separated", "field1-field2-field1-field3");
+        verifyEquals("${dash_separated:unique('-')}", attributes, "field1-field2-field3");
+    }
+
+    @Test
+    public void testCompactDelimitedList() {
+        final Map<String, String> attributes = new HashMap<>();
+
+        // Core behaviour — comma delimiter
+        attributes.put("input", ",a,b,c,,");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "a,b,c");
+
+        attributes.put("input", "a,,b,,,c");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "a,b,c");
+
+        attributes.put("input", ",,a,,b,,c,,");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "a,b,c");
+
+        attributes.put("input", ",,,");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "");
+
+        attributes.put("input", "a,b,c");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "a,b,c");
+
+        attributes.put("input", "a");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "a");
+
+        attributes.put("input", "");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "");
+
+        attributes.put("input", ",");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "");
+
+        // Pipe delimiter
+        attributes.put("input", "|a|b||c|");
+        verifyEquals("${input:compactDelimitedList('|')}", attributes, "a|b|c");
+
+        // Multi-character delimiter
+        attributes.put("input", "::a::::b::c::");
+        verifyEquals("${input:compactDelimitedList('::')}", attributes, "a::b::c");
+
+        // Regex-special character delimiter
+        attributes.put("input", "..a....b..c..");
+        verifyEquals("${input:compactDelimitedList('..')}", attributes, "a..b..c");
+
+        // Whitespace-only tokens are non-empty and preserved
+        attributes.put("input", "a, ,b");
+        verifyEquals("${input:compactDelimitedList(',')}", attributes, "a, ,b");
+
+        // Chaining with trim() to also strip whitespace
+        attributes.put("input", " ,,a,,b,, ");
+        verifyEquals("${input:trim():compactDelimitedList(',')}", attributes, "a,b");
+
+        // Missing attribute evaluates to empty string
+        verifyEquals("${missing:compactDelimitedList(',')}", attributes, "");
+    }
+
+    @Test
+    public void testTrimDelimitedList() {
+        final Map<String, String> attributes = new HashMap<>();
+
+        // Leading and trailing empties removed
+        attributes.put("input", ",a,b,c,,");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "a,b,c");
+
+        // Interior empties preserved — key difference from compactDelimitedList
+        attributes.put("input", "a,,b,,,c");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "a,,b,,,c");
+
+        attributes.put("input", ",,a,,b,,");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "a,,b");
+
+        attributes.put("input", ",,,a,,b,,c,,,");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "a,,b,,c");
+
+        attributes.put("input", ",,,");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "");
+
+        attributes.put("input", "a,b,c");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "a,b,c");
+
+        attributes.put("input", "a");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "a");
+
+        attributes.put("input", "");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "");
+
+        attributes.put("input", ",");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, "");
+
+        // Pipe delimiter — interior empties preserved
+        attributes.put("input", "|a||b|c|");
+        verifyEquals("${input:trimDelimitedList('|')}", attributes, "a||b|c");
+
+        // Multi-character delimiter — interior empties preserved
+        attributes.put("input", "::a::::b::c::");
+        verifyEquals("${input:trimDelimitedList('::')}", attributes, "a::::b::c");
+
+        // Regex-special character delimiter
+        attributes.put("input", "..a....b..c..");
+        verifyEquals("${input:trimDelimitedList('..')}", attributes, "a....b..c");
+
+        // Whitespace-only tokens are non-empty
+        attributes.put("input", ", ,a, ,");
+        verifyEquals("${input:trimDelimitedList(',')}", attributes, " ,a, ");
+
+        // Chaining with trim() to also strip whitespace
+        attributes.put("input", " ,,a,,b,, ");
+        verifyEquals("${input:trim():trimDelimitedList(',')}", attributes, "a,,b");
+
+        // Missing attribute evaluates to empty string
+        verifyEquals("${missing:trimDelimitedList(',')}", attributes, "");
+    }
+
+    @Test
+    public void testPlusDuration() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("date", "04-08-2026");
+
+        // All units
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1000000000 nanoseconds'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 00:00:01");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('30 seconds'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 00:00:30");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('15 minutes'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 00:15:00");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('2 hours'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 02:00:00");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('7 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "11-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('2 weeks'):format('dd-MM-yyyy')}",
+                attributes,
+                "18-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('3 months'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-11-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 year'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-08-2027");
+
+        // Time crossing day boundary from midnight
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('25 hours'):format('dd-MM-yyyy')}",
+                attributes,
+                "05-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('90 minutes'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 01:30:00");
+
+        // Nanoseconds — singular and plural
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 nanosecond'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 00:00:00");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 nanoseconds'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 00:00:00");
+
+        // Singular and plural
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 day'):format('dd-MM-yyyy')}",
+                attributes,
+                "05-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "05-08-2026");
+
+        // Case-insensitive
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('2 WEEKS'):format('dd-MM-yyyy')}",
+                attributes,
+                "18-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 Month'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-09-2026");
+
+        // Zero amount
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('0 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-08-2026");
+
+        // DateTime input
+        attributes.put("dt", "04-08-2026 10:30:00");
+        verifyEquals(
+                "${dt:toDate('dd-MM-yyyy HH:mm:ss'):plusDuration('3 hours'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 13:30:00");
+
+        // Chaining
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 month'):minusDuration('2 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "02-09-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 year'):plusDuration('1 month'):plusDuration('1 day'):format('dd-MM-yyyy')}",
+                attributes,
+                "05-09-2027");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('2 hours'):minusDuration('30 minutes'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 01:30:00");
+
+        // Leap year: Feb 29, 2024 + 1 year = Feb 28, 2025
+        attributes.put("date", "29-02-2024");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 year'):format('dd-MM-yyyy')}",
+                attributes,
+                "28-02-2025");
+
+        // Month-end clamping: Jan 31 + 1 month = Feb 28 (non-leap)
+        attributes.put("date", "31-01-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 month'):format('dd-MM-yyyy')}",
+                attributes,
+                "28-02-2026");
+
+        // Month-end clamping: Jan 31 + 1 month = Feb 29 (leap year)
+        attributes.put("date", "31-01-2024");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration('1 month'):format('dd-MM-yyyy')}",
+                attributes,
+                "29-02-2024");
+
+        // Dynamic attribute as amount
+        attributes.put("date", "04-08-2026");
+        attributes.put("timeUnit", "2 weeks");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):plusDuration(${timeUnit}):format('dd-MM-yyyy')}",
+                attributes,
+                "18-08-2026");
+
+        // Without format() — returns Date
+        final QueryResult<?> epochResult = Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNotNull(epochResult.getValue());
+        assertInstanceOf(Date.class, epochResult.getValue());
+
+        // Dynamic attribute — invalid throws at evaluation
+        attributes.put("timeUnit", "1 Monday");
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration(${timeUnit}):format('dd-MM-yyyy')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Invalid literal rejected at compile time
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration('1 Monday')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration('1days')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration('2 fortnights')}"));
+
+        // Subject is not a date — no toDate() call, throws at evaluation
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:plusDuration('1 week')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Missing attribute returns null
+        final QueryResult<?> missingNoToDate = Query.compile("${missing:plusDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNull(missingNoToDate.getValue());
+
+        // DST-aware: adding 1 day across a spring-forward DST boundary preserves wall-clock time
+        // 2026-03-29 00:00:00 CET (+01:00) + 1 day (DST-aware) = 2026-03-30 00:00:00 CEST (+02:00)
+        // Without timezone context, this would add exactly 24 hours → wrong result due to the DST gap
+        attributes.put("dstDate", "2026-03-29 00:00:00");
+        verifyEquals(
+                "${dstDate:toDate('yyyy-MM-dd HH:mm:ss', 'Europe/Vienna'):plusDuration('1 day', 'Europe/Vienna'):format('yyyy-MM-dd HH:mm:ssXXX', 'Europe/Vienna')}",
+                attributes,
+                "2026-03-30 00:00:00+02:00");
+
+        // DST-aware: adding 1 week across a spring-forward DST boundary preserves wall-clock time
+        verifyEquals(
+                "${dstDate:toDate('yyyy-MM-dd HH:mm:ss', 'Europe/Vienna'):plusDuration('1 week', 'Europe/Vienna'):format('yyyy-MM-dd HH:mm:ssXXX', 'Europe/Vienna')}",
+                attributes,
+                "2026-04-05 00:00:00+02:00");
+
+        // DST-aware: subtracting 1 day while specifying a timezone preserves wall-clock time
+        attributes.put("fallDate", "2026-11-02 00:00:00");
+        verifyEquals(
+                "${fallDate:toDate('yyyy-MM-dd HH:mm:ss', 'America/New_York'):minusDuration('1 day', 'America/New_York'):format('yyyy-MM-dd HH:mm:ssXXX', 'America/New_York')}",
+                attributes,
+                "2026-11-01 00:00:00-04:00");
+
+        // Invalid literal timezone rejected at compile time
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration('1 day', 'America/Fake')}"));
+
+        // Invalid dynamic timezone rejected at evaluation time
+        attributes.put("tz", "NotAZone");
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):plusDuration('1 day', ${tz}):format('dd-MM-yyyy')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+    }
+
+    @Test
+    public void testMinusDuration() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("date", "04-08-2026");
+
+        // All units
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1000000000 nanoseconds'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 23:59:59");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('30 seconds'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 23:59:30");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('15 minutes'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 23:45:00");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('2 hours'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 22:00:00");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('7 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "28-07-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('2 weeks'):format('dd-MM-yyyy')}",
+                attributes,
+                "21-07-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('3 months'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-05-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 year'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-08-2025");
+
+        // Time crossing day boundary from midnight
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('25 hours'):format('dd-MM-yyyy')}",
+                attributes,
+                "02-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('90 minutes'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 22:30:00");
+
+        // Nanoseconds — singular and plural (Date truncates to ms, so 1 ns crosses into the previous second)
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 nanosecond'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 23:59:59");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 nanoseconds'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 23:59:59");
+
+        // Singular and plural
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 day'):format('dd-MM-yyyy')}",
+                attributes,
+                "03-08-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "03-08-2026");
+
+        // Case-insensitive
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('2 WEEKS'):format('dd-MM-yyyy')}",
+                attributes,
+                "21-07-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 Month'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-07-2026");
+
+        // Zero amount
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('0 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "04-08-2026");
+
+        // DateTime input
+        attributes.put("dt", "04-08-2026 10:30:00");
+        verifyEquals(
+                "${dt:toDate('dd-MM-yyyy HH:mm:ss'):minusDuration('3 hours'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "04-08-2026 07:30:00");
+
+        // Chaining
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 month'):plusDuration('2 days'):format('dd-MM-yyyy')}",
+                attributes,
+                "06-07-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 year'):minusDuration('1 month'):minusDuration('1 day'):format('dd-MM-yyyy')}",
+                attributes,
+                "03-07-2025");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('2 hours'):plusDuration('30 minutes'):format('dd-MM-yyyy HH:mm:ss')}",
+                attributes,
+                "03-08-2026 22:30:00");
+
+        // Leap year: Feb 29, 2024 - 1 year = Feb 28, 2023
+        attributes.put("date", "29-02-2024");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 year'):format('dd-MM-yyyy')}",
+                attributes,
+                "28-02-2023");
+
+        // Month-end clamping: Mar 31 - 1 month = Feb 28 (non-leap)
+        attributes.put("date", "31-03-2026");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 month'):format('dd-MM-yyyy')}",
+                attributes,
+                "28-02-2026");
+
+        // Month-end clamping: Mar 31 - 1 month = Feb 29 (leap year)
+        attributes.put("date", "31-03-2024");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration('1 month'):format('dd-MM-yyyy')}",
+                attributes,
+                "29-02-2024");
+
+        // Dynamic attribute as amount
+        attributes.put("date", "04-08-2026");
+        attributes.put("timeUnit", "2 weeks");
+        verifyEquals(
+                "${date:toDate('dd-MM-yyyy'):minusDuration(${timeUnit}):format('dd-MM-yyyy')}",
+                attributes,
+                "21-07-2026");
+
+        // Without format() — returns Date
+        final QueryResult<?> epochResult = Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNotNull(epochResult.getValue());
+        assertInstanceOf(Date.class, epochResult.getValue());
+
+        // Dynamic attribute — invalid throws at evaluation
+        attributes.put("timeUnit", "1 Monday");
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration(${timeUnit}):format('dd-MM-yyyy')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Invalid literal rejected at compile time
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration('1 Monday')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration('1days')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration('2 fortnights')}"));
+
+        // Subject is not a date — no toDate() call, throws at evaluation
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:minusDuration('1 week')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Missing attribute returns null
+        final QueryResult<?> missingNoToDate = Query.compile("${missing:minusDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNull(missingNoToDate.getValue());
+
+        // Invalid literal timezone rejected at compile time
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration('1 day', 'America/Fake')}"));
+
+        // Invalid dynamic timezone rejected at evaluation time
+        attributes.put("tz", "NotAZone");
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:toDate('dd-MM-yyyy'):minusDuration('1 day', ${tz}):format('dd-MM-yyyy')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+    }
+
+    @Test
+    public void testPlusInstantDuration() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("date", "04-08-2026 00:00:00");
+
+        // All units
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1000000000 nanoseconds'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 00:00:01");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('30 seconds'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 00:00:30");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('15 minutes'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 00:15:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('2 hours'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 02:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('7 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "11-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('2 weeks'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "18-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('3 months'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-11-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 year'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-08-2027");
+
+        // Non-UTC timezone
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Brisbane'):plusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Brisbane')}",
+                attributes,
+                "04-11-2026 00:00:00");
+
+        // Across daylight savings
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney'):plusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney')}",
+                attributes,
+                "04-11-2026 01:00:00");
+
+        // Time crossing day boundary from midnight
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('25 hours'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "05-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('90 minutes'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 01:30:00");
+
+        // Nanoseconds — sub-second precision and singular/plural
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 nanosecond'):formatInstant('dd-MM-yyyy HH:mm:ss.SSSSSSSSS', 'UTC')}",
+                attributes,
+                "04-08-2026 00:00:00.000000001");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 nanoseconds'):formatInstant('dd-MM-yyyy HH:mm:ss.SSSSSSSSS', 'UTC')}",
+                attributes,
+                "04-08-2026 00:00:00.000000001");
+
+        // Singular and plural
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 day'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "05-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "05-08-2026");
+
+        // Case-insensitive
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('2 WEEKS'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "18-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 Month'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-09-2026");
+
+        // Zero amount
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('0 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-08-2026");
+
+        // DateTime input
+        attributes.put("dt", "04-08-2026 10:30:00");
+        verifyEquals(
+                "${dt:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('3 hours'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 13:30:00");
+
+        // Chaining
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 month'):minusInstantDuration('2 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "02-09-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 year'):plusInstantDuration('1 month'):plusInstantDuration('1 day'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "05-09-2027");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('2 hours'):minusInstantDuration('30 minutes'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 01:30:00");
+
+        // Leap year: Feb 29, 2024 + 1 year = Feb 28, 2025
+        attributes.put("date", "29-02-2024 00:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 year'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "28-02-2025");
+
+        // Month-end clamping: Jan 31 + 1 month = Feb 28 (non-leap)
+        attributes.put("date", "31-01-2026 00:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 month'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "28-02-2026");
+
+        // Month-end clamping: Jan 31 + 1 month = Feb 29 (leap year)
+        attributes.put("date", "31-01-2024 00:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 month'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "29-02-2024");
+
+        // Dynamic attribute as amount
+        attributes.put("date", "04-08-2026 00:00:00");
+        attributes.put("timeUnit", "2 weeks");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration(${timeUnit}):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "18-08-2026");
+
+        // Without format() — returns Instant
+        final QueryResult<?> epochResult = Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNotNull(epochResult.getValue());
+        assertInstanceOf(Instant.class, epochResult.getValue());
+
+        // Dynamic attribute — invalid throws at evaluation
+        attributes.put("timeUnit", "1 Monday");
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration(${timeUnit}):formatInstant('dd-MM-yyyy', 'UTC')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Invalid literal rejected at compile time
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 Monday')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1days')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('2 fortnights')}"));
+
+        // Subject is not an instant — no toInstant() call, throws at evaluation
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:plusInstantDuration('1 week')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Missing attribute returns null
+        final QueryResult<?> missingNoToInstant = Query.compile("${missing:plusInstantDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNull(missingNoToInstant.getValue());
+    }
+
+    @Test
+    public void testMinusInstantDuration() {
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("date", "04-08-2026 00:00:00");
+
+        // All units
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1000000000 nanoseconds'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "03-08-2026 23:59:59");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('30 seconds'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "03-08-2026 23:59:30");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('15 minutes'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "03-08-2026 23:45:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('2 hours'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "03-08-2026 22:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('7 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "28-07-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('2 weeks'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "21-07-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('3 months'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-05-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 year'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-08-2025");
+
+        // Non-UTC timezone
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Brisbane'):minusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Brisbane')}",
+                attributes,
+                "04-05-2026 00:00:00");
+
+        // Across daylight savings
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney'):minusInstantDuration('9 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney')}",
+                attributes,
+                "04-11-2025 01:00:00");
+
+        // Time crossing day boundary from midnight
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('25 hours'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "02-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('90 minutes'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "03-08-2026 22:30:00");
+
+        // Nanoseconds — sub-second precision and singular/plural
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 nanosecond'):formatInstant('dd-MM-yyyy HH:mm:ss.SSSSSSSSS', 'UTC')}",
+                attributes,
+                "03-08-2026 23:59:59.999999999");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 nanoseconds'):formatInstant('dd-MM-yyyy HH:mm:ss.SSSSSSSSS', 'UTC')}",
+                attributes,
+                "03-08-2026 23:59:59.999999999");
+
+        // Singular and plural
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 day'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "03-08-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "03-08-2026");
+
+        // Case-insensitive
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('2 WEEKS'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "21-07-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 Month'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-07-2026");
+
+        // Zero amount
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('0 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "04-08-2026");
+
+        // DateTime input
+        attributes.put("dt", "04-08-2026 10:30:00");
+        verifyEquals(
+                "${dt:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('3 hours'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "04-08-2026 07:30:00");
+
+        // Chaining
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 month'):plusInstantDuration('2 days'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "06-07-2026");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 year'):minusInstantDuration('1 month'):minusInstantDuration('1 day'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "03-07-2025");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('2 hours'):plusInstantDuration('30 minutes'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}",
+                attributes,
+                "03-08-2026 22:30:00");
+
+        // Leap year: Feb 29, 2024 - 1 year = Feb 28, 2023
+        attributes.put("date", "29-02-2024 00:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 year'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "28-02-2023");
+
+        // Month-end clamping: Mar 31 - 1 month = Feb 28 (non-leap)
+        attributes.put("date", "31-03-2026 00:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 month'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "28-02-2026");
+
+        // Month-end clamping: Mar 31 - 1 month = Feb 29 (leap year)
+        attributes.put("date", "31-03-2024 00:00:00");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 month'):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "29-02-2024");
+
+        // Dynamic attribute as amount
+        attributes.put("date", "04-08-2026 00:00:00");
+        attributes.put("timeUnit", "2 weeks");
+        verifyEquals(
+                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration(${timeUnit}):formatInstant('dd-MM-yyyy', 'UTC')}",
+                attributes,
+                "21-07-2026");
+
+        // Without format() — returns Instant
+        final QueryResult<?> epochResult = Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNotNull(epochResult.getValue());
+        assertInstanceOf(Instant.class, epochResult.getValue());
+
+        // Dynamic attribute — invalid throws at evaluation
+        attributes.put("timeUnit", "1 Monday");
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                                "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration(${timeUnit}):formatInstant('dd-MM-yyyy', 'UTC')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Invalid literal rejected at compile time
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 Monday')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1days')}"));
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile(
+                        "${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('2 fortnights')}"));
+
+        // Subject is not an instant — no toInstant() call, throws at evaluation
+        assertThrows(
+                AttributeExpressionLanguageException.class,
+                () -> Query.compile("${date:minusInstantDuration('1 week')}")
+                        .evaluate(new StandardEvaluationContext(attributes)));
+
+        // Missing attribute returns null
+        final QueryResult<?> missingNoToInstant = Query.compile("${missing:minusInstantDuration('1 week')}")
+                .evaluate(new StandardEvaluationContext(attributes));
+        assertNull(missingNoToInstant.getValue());
     }
 }

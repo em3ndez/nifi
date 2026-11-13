@@ -16,26 +16,34 @@
  */
 package org.apache.nifi.util;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
-import java.util.function.Predicate;
-import org.apache.nifi.components.AllowableValue;
+import org.apache.nifi.components.ConfigVerificationResult;
+import org.apache.nifi.components.DescribedValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.controller.queue.QueueSize;
+import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.migration.PropertyConfiguration;
+import org.apache.nifi.migration.RelationshipConfiguration;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.provenance.ProvenanceEventRecord;
+import org.apache.nifi.provenance.ProvenanceEventType;
 import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.state.MockStateManager;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Path;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
 
 public interface TestRunner {
 
@@ -53,12 +61,14 @@ public interface TestRunner {
     ProcessSessionFactory getProcessSessionFactory();
 
     /**
-     * @return the {@Link ProcessContext} that this <code>TestRunner</code> will
+     * @return the {@link ProcessContext} that this <code>TestRunner</code> will
      *         use to invoke the
      *         {@link Processor#onTrigger(ProcessContext, ProcessSessionFactory) onTrigger}
      *         method
      */
     ProcessContext getProcessContext();
+
+    boolean isYieldCalled();
 
     /**
      * Performs exactly the same operation as calling {@link #run(int)} with a
@@ -173,6 +183,20 @@ public interface TestRunner {
 
     /**
      * Invokes all methods on the Processor that are annotated with the
+     * {@link org.apache.nifi.annotation.lifecycle.OnUnscheduled @OnUnscheduled} annotation. If
+     * any of these methods throws an Exception, the Unit Test will fail
+     */
+    void unSchedule();
+
+    /**
+     * Invokes all methods on the Processor that are annotated with the
+     * {@link org.apache.nifi.annotation.lifecycle.OnStopped @OnStopped} annotation. If
+     * any of these methods throws an Exception, the Unit Test will fail
+     */
+    void stop();
+
+    /**
+     * Invokes all methods on the Processor that are annotated with the
      * {@link org.apache.nifi.annotation.lifecycle.OnShutdown @OnShutdown} annotation. If
      * any of these methods throws an Exception, the Unit Test will fail
      */
@@ -196,7 +220,7 @@ public interface TestRunner {
     /**
      * Updates the value of the property with the given PropertyDescriptor to
      * the specified value IF and ONLY IF the value is valid according to the
-     * descriptor's validator. Otherwise, Assert.fail() is called, causing the
+     * descriptor's validator. Otherwise, Assertions.fail() is called, causing the
      * unit test to fail
      *
      * @param propertyName name
@@ -208,7 +232,7 @@ public interface TestRunner {
     /**
      * Updates the value of the property with the given PropertyDescriptor to
      * the specified value IF and ONLY IF the value is valid according to the
-     * descriptor's validator. Otherwise, Assert.fail() is called, causing the
+     * descriptor's validator. Otherwise, Assertions.fail() is called, causing the
      * unit test to fail
      *
      * @param descriptor descriptor
@@ -220,14 +244,14 @@ public interface TestRunner {
     /**
      * Updates the value of the property with the given PropertyDescriptor to
      * the specified value IF and ONLY IF the value is valid according to the
-     * descriptor's validator. Otherwise, Assert.fail() is called, causing the
+     * descriptor's validator. Otherwise, Assertions.fail() is called, causing the
      * unit test to fail
      *
      * @param descriptor descriptor
-     * @param value allowable valu
+     * @param value allowable value
      * @return result
      */
-    ValidationResult setProperty(PropertyDescriptor descriptor, AllowableValue value);
+    ValidationResult setProperty(PropertyDescriptor descriptor, DescribedValue value);
 
     /**
      * Sets the annotation data.
@@ -306,6 +330,27 @@ public interface TestRunner {
     void assertAllFlowFiles(Relationship relationship, FlowFileValidator validator);
 
     /**
+     * Asserts that FlowFiles on a given relationship have a certain set of attributes.
+     *
+     * @param relationship The relationship on which to check the attributes of FlowFiles
+     * @param checkedAttributeNames The names of attributes that should be checked
+     * @param expectedAttributes The expected attributes of all FlowFiles
+     */
+    void assertAttributes(
+        Relationship relationship,
+        Set<String> checkedAttributeNames,
+        Set<Map<String, String>> expectedAttributes
+    );
+
+    /**
+     * Asserts that FlowFiles on a given relationship have certain contents.
+     *
+     * @param relationship The relationship on which to check the contents of FlowFiles
+     * @param expectedContent The expected contents of all FlowFiles
+     */
+    void assertContents(Relationship relationship, List<String> expectedContent);
+
+    /**
      * Assert that the number of FlowFiles transferred to the given relationship
      * is equal to the given count
      *
@@ -352,6 +397,21 @@ public interface TestRunner {
      * are valid
      */
     void assertValid();
+
+    /**
+     * Validates the currently configured set of properties/annotation data
+     * @return a Collection of ValidationResult
+     */
+    Collection<ValidationResult> validate();
+
+    /**
+     * Verifies the currently configured set of properties/annotation data
+     * @param variables the variables to use for verification
+     * @return a Collection of ConfigVerificationResult
+     */
+    List<ConfigVerificationResult> verify(Map<String, String> variables);
+
+    boolean isValid();
 
     /**
      * Assert that the currently configured set of properties/annotation data
@@ -447,7 +507,7 @@ public interface TestRunner {
      * this FlowFile to the Processor's Input Queue
      *
      * @param data source of data
-     * @param attributes to use for flow files
+     * @param attributes to use for FlowFiles
      */
     MockFlowFile enqueue(InputStream data, Map<String, String> attributes);
 
@@ -464,8 +524,8 @@ public interface TestRunner {
      * Returns a List of FlowFiles in the order in which they were transferred
      * to the given relationship
      *
-     * @param relationship to get flowfiles for
-     * @return flowfiles transferred to given relationship
+     * @param relationship to get FlowFiles for
+     * @return FlowFiles transferred to given relationship
      */
     List<MockFlowFile> getFlowFilesForRelationship(String relationship);
 
@@ -473,15 +533,15 @@ public interface TestRunner {
      * Returns a List of FlowFiles in the order in which they were transferred
      * to the given relationship
      *
-     * @param relationship to get flowfiles for
-     * @return flowfiles transferred to given relationship
+     * @param relationship to get FlowFiles for
+     * @return FlowFiles transferred to given relationship
      */
     List<MockFlowFile> getFlowFilesForRelationship(Relationship relationship);
 
     /**
      * Returns a List of FlowFiles in the order in which they were transferred that were penalized
      *
-     * @return flowfiles that were penalized
+     * @return FlowFiles that were penalized
      */
     List<MockFlowFile> getPenalizedFlowFiles();
 
@@ -491,11 +551,42 @@ public interface TestRunner {
     QueueSize getQueueSize();
 
     /**
+     * Allow for clearing the queue from all remaining FlowFiles.
+     */
+    void clearQueue();
+
+    /**
      * @param name of counter
      * @return the current value of the counter with the specified name, or null
      *         if no counter exists with the specified name
      */
     Long getCounterValue(String name);
+
+    /**
+     * Get the value recorded for the named Counter with the specified attributes
+     *
+     * @param name Counter Name
+     * @param attributes Map of keys and values associated with the Counter
+     * @return Counter value, or null when the named Counter was not used with the specified attributes
+     */
+    Long getCounterValue(String name, Map<String, String> attributes);
+
+    /**
+     * Get list of values recorded for the named Gauge
+     *
+     * @param name Gauge Name
+     * @return List of recorded values or empty when the named Gauge was not used
+     */
+    List<Double> getGaugeValues(String name);
+
+    /**
+     * Get list of values recorded for the named Gauge with the specified attributes
+     *
+     * @param name Gauge Name
+     * @param attributes Map of keys and values associated with the Gauge
+     * @return List of recorded values, or empty when the named Gauge was not used with the specified attributes
+     */
+    List<Double> getGaugeValues(String name, Map<String, String> attributes);
 
     /**
      * @return the number of FlowFiles that have been removed from the system
@@ -694,7 +785,7 @@ public interface TestRunner {
      *             {@link #addControllerService(String, ControllerService)} or
      *             {@link #addControllerService(String, ControllerService, Map)} method or
      *             if the Controller Service has been removed via the
-     *             {@link #removeControllerService(ControllerService)} method.
+     *             removeControllerService(ControllerService) method.
      *
      */
     void removeControllerService(ControllerService service);
@@ -735,7 +826,7 @@ public interface TestRunner {
      *             {@link #removeControllerService(ControllerService)} method.
      *
      */
-    ValidationResult setProperty(ControllerService service, PropertyDescriptor property, AllowableValue value);
+    ValidationResult setProperty(ControllerService service, PropertyDescriptor property, DescribedValue value);
 
     /**
      * Sets the property with the given name on the given ControllerService
@@ -797,6 +888,22 @@ public interface TestRunner {
     void assertValid(ControllerService service);
 
     /**
+     * Validates the currently configured set of properties/annotation data for
+     * the given Controller Service.
+     * @param service the service to validate
+     * @return a Collection of ValidationResult
+     */
+    Collection<ValidationResult> validate(ControllerService service);
+
+    /**
+     * Verifies the currently configured set of properties/annotation data for
+     * the given Controller Service.
+     * @param variables the variables to use for verification
+     * @return a Collection of ConfigVerificationResult
+     */
+    List<ConfigVerificationResult> verify(ControllerService service, Map<String, String> variables);
+
+    /**
      * Assert that the currently configured set of properties/annotation data
      * are NOT valid for the given Controller Service.
      *
@@ -838,13 +945,28 @@ public interface TestRunner {
      *
      * <p>
      * <b>See Also:
-     * </b>{@link PropertyDescriptor.Builder#expressionLanguageSupported(boolean)}
+     * </b>{@link PropertyDescriptor.Builder#expressionLanguageSupported(ExpressionLanguageScope)}
      * </p>
      *
      * @param validate whether there is any need to validate the EL was used
      */
     void setValidateExpressionUsage(boolean validate);
 
+    /**
+     * Specifies whether the TestRunner will allow ProcessSession.commit() to be called.
+     * By default, the value is <code>false</code>, meaning that any call to ProcessSession.commit() will throw
+     * an Exception. See JavaDocs for {@link ProcessSession#commit()} for more information
+     * @param allow whether to allow asynchronous session commits (i.e., calls to ProcessSession.commit())
+     */
+    void setAllowSynchronousSessionCommits(boolean allow);
+
+    /**
+     * Specifies whether the TestRunner will allow ProcessSession.read() multiple times for the same FlowFile while an InputStream is already open.
+     * By default, the value is <code>false</code>, meaning that any call to ProcessSession.read() for a FlowFile already being read will throw
+     * an Exception. See JavaDocs for {@link ProcessSession#read(FlowFile)} for more information
+     * @param allow whether to allow recursive reads of a FlowFile (i.e., calls to ProcessSession.read())
+     */
+    void setAllowRecursiveReads(boolean allow);
 
     /**
      * Removes the {@link PropertyDescriptor} from the {@link ProcessContext},
@@ -950,17 +1072,6 @@ public interface TestRunner {
     void setConnected(boolean isConnected);
 
     /**
-     * Sets the value of the variable with the given name to be the given value. This exposes the variable
-     * for use by the Expression Language.
-     *
-     * @param name the name of the variable to set
-     * @param value the value of the variable
-     *
-     * @throws NullPointerException if either the name or the value is null
-     */
-    void setVariable(String name, String value);
-
-    /**
      * Returns the current value of the variable with the given name
      *
      * @param name the name of the variable whose value should be returned.
@@ -968,17 +1079,42 @@ public interface TestRunner {
      *
      * @throws NullPointerException if the name is null
      */
-    String getVariableValue(String name);
+    String getEnvironmentVariableValue(String name);
 
     /**
-     * Removes the variable with the given name from this Test Runner, if it is set.
+     * Sets the value of the variable with the given name to be the given value. This exposes the variable
+     * for use by the Expression Language.
      *
-     * @param name the name of the variable to remove
-     * @return the value that was set for the variable, or <code>null</code> if the variable was not set
+     * NOTE - this method is only for testing purposes as we only support variables coming from environment
+     * and system variables. This usage is to avoid the need to set env/sys variables in the tests.
+     *
+     * @param name the name of the variable to set
+     * @param value the value of the variable
+     *
+     * @throws NullPointerException if either the name or the value is null
+     */
+    void setEnvironmentVariableValue(String name, String value);
+
+    /**
+     * Returns the current value for the given parameter name from the simulated Parameter Context
+     *
+     * @param name the name of the parameter from the Parameter Context whose value should be returned.
+     * @return the current value for the given parameter name from the simulated Parameter Context or <code>null</code> if no value is currently set
      *
      * @throws NullPointerException if the name is null
      */
-    String removeVariable(String name);
+    String getParameterContextValue(String name);
+
+    /**
+     * Sets a parameter with the given name and value into the simulated Parameter Context.
+     * This makes available the parameter to the properties of the component being tested through parameter referencing such as <code>#{name}</code>.
+     *
+     * @param parameterName the name of the parameter to set
+     * @param parameterValue the value of the parameter to set
+     *
+     * @throws NullPointerException if the name is null
+     */
+    void setParameterContextValue(final String parameterName, final String parameterValue);
 
     /**
      * Asserts that all FlowFiles meet all conditions.
@@ -1016,6 +1152,30 @@ public interface TestRunner {
      *
      * @param runSchedule Run schedule duration in milliseconds.
      */
-     void setRunSchedule(long runSchedule);
+    void setRunSchedule(long runSchedule);
 
+    /**
+     * Assert that provenance event was created with the specified event type.
+     *
+     * @param eventType Provenance event type
+     */
+    void assertProvenanceEvent(ProvenanceEventType eventType);
+
+    /**
+     * Causes the TestRunner to call the Processor's {@link Processor#migrateProperties(PropertyConfiguration)} method. The effects that are
+     * caused by calling the method are applied, as they would be in a running NiFi instance. Unlike in a running NiFi instance, though, the
+     * operations that were performed are captured so that they can be examined and assertions made about the migration that occurred.
+     *
+     * @return the results of migrating properties
+     */
+    PropertyMigrationResult migrateProperties();
+
+    /**
+     * Causes the TestRunner to call the Processor's {@link Processor#migrateRelationships(RelationshipConfiguration)} method. The effects that are
+     * caused by calling the method are applied, as they would be in a running NiFi instance. Unlike in a running NiFi instance, though, the
+     * operations that were performed are captured so that they can be examined and assertions made about the migration that occurred.
+     *
+     * @return the results of migrating relationships
+     */
+    RelationshipMigrationResult migrateRelationships();
 }

@@ -20,27 +20,31 @@ package org.apache.nifi.tests.system.pg;
 import org.apache.nifi.groups.FlowFileConcurrency;
 import org.apache.nifi.groups.FlowFileOutboundPolicy;
 import org.apache.nifi.tests.system.NiFiSystemIT;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
+import org.apache.nifi.toolkit.client.NiFiClientException;
 import org.apache.nifi.web.api.entity.ConnectionEntity;
 import org.apache.nifi.web.api.entity.FlowFileEntity;
 import org.apache.nifi.web.api.entity.PortEntity;
 import org.apache.nifi.web.api.entity.ProcessGroupEntity;
 import org.apache.nifi.web.api.entity.ProcessorEntity;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
-
+    private static final Logger logger = LoggerFactory.getLogger(SingleFlowFileConcurrencyIT.class);
 
     @Test
     public void testSingleConcurrency() throws NiFiClientException, IOException, InterruptedException {
+        logger.info("Beginning test testSingleConcurrency");
+
         final ProcessGroupEntity processGroupEntity = getClientUtil().createProcessGroup("My Group", "root");
         final PortEntity inputPort = getClientUtil().createInputPort("In", processGroupEntity.getId());
         final PortEntity outputPort = getClientUtil().createOutputPort("Out", processGroupEntity.getId());
@@ -94,11 +98,14 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
 
         // Ensure that 3 FlowFiles are queued up for Terminate
         waitForQueueCount(outputToTerminate.getId(), 3);
-    }
 
+        logger.info("Finished test testSingleConcurrency");
+    }
 
     @Test
     public void testSingleConcurrencyAndBatchOutput() throws NiFiClientException, IOException, InterruptedException {
+        logger.info("Beginning test testSingleConcurrencyAndBatchOutput");
+
         final ProcessGroupEntity processGroupEntity = getClientUtil().createProcessGroup("My Group", "root");
         final PortEntity inputPort = getClientUtil().createInputPort("In", processGroupEntity.getId());
         final PortEntity outputPort = getClientUtil().createOutputPort("Out", processGroupEntity.getId());
@@ -113,9 +120,9 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
 
         // Connect Generate -> Input Port -> Count -> Output Port -> Terminate
         // Also connect InputPort -> Out2 -> Terminate
-        final ConnectionEntity generateToInput = getClientUtil().createConnection(generate, inputPort, "success");
+        getClientUtil().createConnection(generate, inputPort, "success");
         final ConnectionEntity inputToSleep = getClientUtil().createConnection(inputPort, sleep);
-        final ConnectionEntity sleepToOutput = getClientUtil().createConnection(sleep, outputPort, "success");
+        getClientUtil().createConnection(sleep, outputPort, "success");
         final ConnectionEntity inputToSecondOut = getClientUtil().createConnection(inputPort, secondOut);
         final ConnectionEntity outputToTerminate = getClientUtil().createConnection(outputPort, terminate);
         final ConnectionEntity secondOutToTerminate = getClientUtil().createConnection(secondOut, terminate);
@@ -127,7 +134,7 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
         // Start generate so that data is created. Start Input Port so that the data is ingested.
         // Start Output Ports but not the Sleep processor. This will keep data queued up for the Sleep processor,
         // and that should prevent data from being transferred by Output Port "Out2" also.
-        getNifiClient().getProcessorClient().startProcessor(generate);
+        getClientUtil().startProcessor(generate);
         getNifiClient().getInputPortClient().startInputPort(inputPort);
         getNifiClient().getOutputPortClient().startOutputPort(outputPort);
         getNifiClient().getOutputPortClient().startOutputPort(secondOut);
@@ -136,14 +143,14 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
         assertEquals(1, getConnectionQueueSize(inputToSecondOut.getId()));
 
         // Wait 3 seconds to ensure that data is never transferred
-        for (int i=0; i < 3; i++) {
+        for (int i = 0; i < 3; i++) {
             Thread.sleep(1000L);
             assertEquals(1, getConnectionQueueSize(inputToSleep.getId()));
             assertEquals(1, getConnectionQueueSize(inputToSecondOut.getId()));
         }
 
         // Start Sleep
-        getNifiClient().getProcessorClient().startProcessor(sleep);
+        getClientUtil().startProcessor(sleep);
 
         // Data should now flow from both output ports.
         waitForQueueCount(inputToSleep.getId(), 0);
@@ -163,11 +170,14 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
         final Map<String, String> secondOutAttributes = secondOutFlowFile.getFlowFile().getAttributes();
         assertEquals("1", secondOutAttributes.get("batch.output.Out"));
         assertEquals("1", secondOutAttributes.get("batch.output.Out2"));
-    }
 
+        logger.info("Finished test testSingleConcurrencyAndBatchOutput");
+    }
 
     @Test
     public void testBatchOutputHasCorrectNumbersOnRestart() throws NiFiClientException, IOException, InterruptedException {
+        logger.info("Beginning test testBatchOutputHasCorrectNumbersOnRestart");
+
         final ProcessGroupEntity processGroupEntity = getClientUtil().createProcessGroup("My Group", "root");
         final PortEntity inputPort = getClientUtil().createInputPort("In", processGroupEntity.getId());
         final PortEntity outputPort = getClientUtil().createOutputPort("Out", processGroupEntity.getId());
@@ -180,7 +190,7 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
 
         // Connect Generate -> Input Port -> Count -> Output Port -> Terminate
         // Also connect InputPort -> Out2 -> Terminate
-        final ConnectionEntity generateToInput = getClientUtil().createConnection(generate, inputPort, "success");
+        getClientUtil().createConnection(generate, inputPort, "success");
         final ConnectionEntity inputToOutput = getClientUtil().createConnection(inputPort, outputPort);
         final ConnectionEntity inputToSecondOut = getClientUtil().createConnection(inputPort, secondOut);
         final ConnectionEntity outputToTerminate = getClientUtil().createConnection(outputPort, terminate);
@@ -192,15 +202,21 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
 
         // Start generate so that data is created. Start Input Port so that the data is ingested.
         // Start "Out" Output Ports but "Out2.". This will keep data queued up for the Out2 output port.
-        getNifiClient().getProcessorClient().startProcessor(generate);
+        getClientUtil().startProcessor(generate);
         getNifiClient().getInputPortClient().startInputPort(inputPort);
         getNifiClient().getOutputPortClient().startOutputPort(outputPort);
 
         waitForQueueCount(inputToSecondOut.getId(), 1);
         assertEquals(1, getConnectionQueueSize(inputToSecondOut.getId()));
 
+        // Stop processor so that it won't generate data upon restart
+        getNifiClient().getProcessorClient().stopProcessor(generate);
+
         // Everything is queued up at an Output Port so the first Output Port should run and its queue should become empty.
         waitForQueueCount(inputToOutput.getId(), 0);
+
+        // Wait a bit before shutting down so that nifi has a chance to save the changes to the flow
+        Thread.sleep(2000L);
 
         // Restart nifi.
         getNiFiInstance().stop();
@@ -232,6 +248,8 @@ public class SingleFlowFileConcurrencyIT extends NiFiSystemIT {
         final Map<String, String> secondOutAttributes = secondOutFlowFile.getFlowFile().getAttributes();
         assertEquals("1", secondOutAttributes.get("batch.output.Out"));
         assertEquals("1", secondOutAttributes.get("batch.output.Out2"));
+
+        logger.info("Finished test testBatchOutputHasCorrectNumbersOnRestart");
     }
 
 }

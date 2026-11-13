@@ -16,18 +16,21 @@
  */
 package org.apache.nifi.remote.cluster;
 
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.JAXBException;
+import jakarta.xml.bind.Marshaller;
+import jakarta.xml.bind.Unmarshaller;
+import jakarta.xml.bind.annotation.XmlRootElement;
+import jakarta.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
+import org.apache.nifi.xml.processing.ProcessingException;
+import org.apache.nifi.xml.processing.stream.StandardXMLStreamReaderProvider;
+import org.apache.nifi.xml.processing.stream.XMLStreamReaderProvider;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Collection;
-import javax.xml.bind.JAXBContext;
-import javax.xml.bind.JAXBException;
-import javax.xml.bind.Marshaller;
-import javax.xml.bind.Unmarshaller;
-import javax.xml.bind.annotation.XmlRootElement;
-import javax.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
-import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
-import org.apache.nifi.security.xml.XmlUtils;
+import javax.xml.transform.stream.StreamSource;
 
 @XmlRootElement
 public class ClusterNodeInformation {
@@ -65,9 +68,10 @@ public class ClusterNodeInformation {
     public static ClusterNodeInformation unmarshal(final InputStream is) throws JAXBException {
         try {
             final Unmarshaller unmarshaller = JAXB_CONTEXT.createUnmarshaller();
-            final XMLStreamReader xsr = XmlUtils.createSafeReader(is);
+            final XMLStreamReaderProvider provider = new StandardXMLStreamReaderProvider();
+            final XMLStreamReader xsr = provider.getStreamReader(new StreamSource(is));
             return (ClusterNodeInformation) unmarshaller.unmarshal(xsr);
-        } catch (XMLStreamException e) {
+        } catch (final ProcessingException e) {
             throw new JAXBException("Error unmarshalling the cluster node information", e);
         }
     }

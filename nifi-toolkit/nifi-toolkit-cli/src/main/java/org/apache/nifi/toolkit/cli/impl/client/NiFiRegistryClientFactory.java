@@ -80,8 +80,7 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
 
         if (secureUrl && (StringUtils.isBlank(truststore)
                 || StringUtils.isBlank(truststoreType)
-                || StringUtils.isBlank(truststorePasswd))
-                ) {
+                || StringUtils.isBlank(truststorePasswd))) {
             throw new MissingOptionException(CommandOption.TRUSTSTORE.getLongName() + ", " + CommandOption.TRUSTSTORE_TYPE.getLongName()
                     + ", and " + CommandOption.TRUSTSTORE_PASSWORD.getLongName() + " are required when using an https url");
         }
@@ -143,7 +142,7 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
             try {
                 Integer timeout = Integer.valueOf(connectionTimeout);
                 clientConfigBuilder.connectTimeout(timeout);
-            } catch(Exception e) {
+            } catch (Exception e) {
                 throw new MissingOptionException("connectionTimeout has to be an integer");
             }
         }
@@ -152,7 +151,7 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
             try {
                 Integer timeout = Integer.valueOf(readTimeout);
                 clientConfigBuilder.readTimeout(timeout);
-            } catch(Exception e) {
+            } catch (Exception e) {
                 throw new MissingOptionException("readTimeout has to be an integer");
             }
         }
@@ -198,12 +197,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
         }
 
         @Override
-        public BucketClient getBucketClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
-            return client.getBucketClient(requestConfig);
-        }
-
-        @Override
         public BucketClient getBucketClient(RequestConfig requestConfig) {
             return client.getBucketClient(requestConfig);
         }
@@ -212,12 +205,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
 
         @Override
         public FlowClient getFlowClient() {
-            return client.getFlowClient(requestConfig);
-        }
-
-        @Override
-        public FlowClient getFlowClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
             return client.getFlowClient(requestConfig);
         }
 
@@ -234,12 +221,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
         }
 
         @Override
-        public FlowSnapshotClient getFlowSnapshotClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
-            return client.getFlowSnapshotClient(requestConfig);
-        }
-
-        @Override
         public FlowSnapshotClient getFlowSnapshotClient(RequestConfig requestConfig) {
             return client.getFlowSnapshotClient(requestConfig);
         }
@@ -248,12 +229,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
 
         @Override
         public ItemsClient getItemsClient() {
-            return client.getItemsClient(requestConfig);
-        }
-
-        @Override
-        public ItemsClient getItemsClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
             return client.getItemsClient(requestConfig);
         }
 
@@ -270,12 +245,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
         }
 
         @Override
-        public UserClient getUserClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
-            return client.getUserClient(requestConfig);
-        }
-
-        @Override
         public UserClient getUserClient(RequestConfig requestConfig) {
             return client.getUserClient(requestConfig);
         }
@@ -284,12 +253,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
 
         @Override
         public BundleClient getBundleClient() {
-            return client.getBundleClient(requestConfig);
-        }
-
-        @Override
-        public BundleClient getBundleClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
             return client.getBundleClient(requestConfig);
         }
 
@@ -306,12 +269,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
         }
 
         @Override
-        public BundleVersionClient getBundleVersionClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
-            return client.getBundleVersionClient(requestConfig);
-        }
-
-        @Override
         public BundleVersionClient getBundleVersionClient(RequestConfig requestConfig) {
             return client.getBundleVersionClient(requestConfig);
         }
@@ -320,12 +277,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
 
         @Override
         public ExtensionRepoClient getExtensionRepoClient() {
-            return client.getExtensionRepoClient(requestConfig);
-        }
-
-        @Override
-        public ExtensionRepoClient getExtensionRepoClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
             return client.getExtensionRepoClient(requestConfig);
         }
 
@@ -342,12 +293,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
         }
 
         @Override
-        public ExtensionClient getExtensionClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
-            return client.getExtensionClient(requestConfig);
-        }
-
-        @Override
         public ExtensionClient getExtensionClient(RequestConfig requestConfig) {
             return client.getExtensionClient(requestConfig);
         }
@@ -360,12 +305,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
         }
 
         @Override
-        public TenantsClient getTenantsClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
-            return client.getTenantsClient(requestConfig);
-        }
-
-        @Override
         public TenantsClient getTenantsClient(RequestConfig requestConfig) {
             return client.getTenantsClient(requestConfig);
         }
@@ -374,12 +313,6 @@ public class NiFiRegistryClientFactory implements ClientFactory<NiFiRegistryClie
 
         @Override
         public PoliciesClient getPoliciesClient() {
-            return client.getPoliciesClient(requestConfig);
-        }
-
-        @Override
-        public PoliciesClient getPoliciesClient(String... proxiedEntities) {
-            final RequestConfig requestConfig = new ProxiedEntityRequestConfig(proxiedEntities);
             return client.getPoliciesClient(requestConfig);
         }
 

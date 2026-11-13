@@ -16,8 +16,6 @@
  */
 package org.apache.nifi.stream.io.util;
 
-import org.apache.nifi.stream.io.exception.TokenTooLargeException;
-
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -94,7 +92,7 @@ public abstract class AbstractTextDemarcator implements Closeable {
     /**
      * Will fill the current buffer from current 'index' position, expanding it
      * and or shuffling it if necessary. If buffer exceeds max buffer size a
-     * {@link TokenTooLargeException} will be thrown.
+     * {@link BufferOverflowException} will be thrown.
      *
      * @throws IOException
      *             if unable to read from the stream
@@ -130,7 +128,6 @@ public abstract class AbstractTextDemarcator implements Closeable {
         } while (bytesRead == 0);
         this.availableBytesLength = bytesRead != -1 ? this.index + bytesRead : -1;
     }
-
 
     /**
      * Validates prerequisites for constructor arguments

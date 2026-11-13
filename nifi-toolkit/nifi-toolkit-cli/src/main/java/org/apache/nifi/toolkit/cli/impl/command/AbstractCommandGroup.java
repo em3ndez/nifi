@@ -16,16 +16,18 @@
  */
 package org.apache.nifi.toolkit.cli.impl.command;
 
-import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.help.TextHelpAppendable;
 import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.Command;
 import org.apache.nifi.toolkit.cli.api.CommandGroup;
 import org.apache.nifi.toolkit.cli.api.Context;
 
+import java.io.IOException;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Base class for CommandGroups to extend from.
@@ -43,14 +45,14 @@ public abstract class AbstractCommandGroup implements CommandGroup {
 
     @Override
     public final void initialize(final Context context) {
-        Validate.notNull(context);
+        Objects.requireNonNull(context);
         this.output = context.getOutput();
         this.commands = Collections.unmodifiableList(createCommands());
         this.commands.stream().forEach(c -> c.initialize(context));
     }
 
     /**
-     * Sub-classes override to provide the appropriate commands for the given group.
+     * Subclasses override to provide the appropriate commands for the given group.
      *
      * @return the list of commands for this group
      */
@@ -69,22 +71,22 @@ public abstract class AbstractCommandGroup implements CommandGroup {
     @Override
     public void printUsage(final boolean verbose) {
         if (verbose) {
-            final PrintWriter printWriter = new PrintWriter(output);
 
-            final int width = 80;
-            final HelpFormatter hf = new HelpFormatter();
-            hf.setWidth(width);
+            final PrintWriter printWriter = new PrintWriter(output);
+            final TextHelpAppendable appendable = new TextHelpAppendable(printWriter);
+            appendable.setMaxWidth(80);
 
             commands.stream().forEach(c -> {
-                hf.printWrapped(printWriter, width, "-------------------------------------------------------------------------------");
-                hf.printWrapped(printWriter, width, "COMMAND: " + getName() + " " + c.getName());
-                hf.printWrapped(printWriter, width, "");
-                hf.printWrapped(printWriter, width, "- " + c.getDescription());
-                hf.printWrapped(printWriter, width, "");
+                try {
+                    appendable.appendParagraph("-------------------------------------------------------------------------------");
+                    appendable.appendParagraph("COMMAND: " + getName() + " " + c.getName());
+                    appendable.appendParagraph("- " + c.getDescription());
 
-                if (c.isReferencable()) {
-                    hf.printWrapped(printWriter, width, "PRODUCES BACK-REFERENCES");
-                    hf.printWrapped(printWriter, width, "");
+                    if (c.isReferencable()) {
+                        appendable.appendParagraph("PRODUCES BACK-REFERENCES");
+                    }
+                } catch (IOException e) {
+                    throw new RuntimeException("Unable to print command usage for " + c.getName(), e);
                 }
             });
 

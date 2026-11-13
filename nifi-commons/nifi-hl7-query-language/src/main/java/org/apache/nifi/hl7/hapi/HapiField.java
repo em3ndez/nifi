@@ -16,19 +16,18 @@
  */
 package org.apache.nifi.hl7.hapi;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-
-import org.apache.nifi.hl7.model.HL7Component;
-import org.apache.nifi.hl7.model.HL7Field;
-
 import ca.uhn.hl7v2.model.Composite;
 import ca.uhn.hl7v2.model.ExtraComponents;
 import ca.uhn.hl7v2.model.Primitive;
 import ca.uhn.hl7v2.model.Type;
 import ca.uhn.hl7v2.parser.EncodingCharacters;
 import ca.uhn.hl7v2.parser.PipeParser;
+import org.apache.nifi.hl7.model.HL7Component;
+import org.apache.nifi.hl7.model.HL7Field;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public class HapiField implements HL7Field, HL7Component {
 
@@ -39,8 +38,7 @@ public class HapiField implements HL7Field, HL7Component {
         this.value = PipeParser.encode(type, EncodingCharacters.defaultInstance());
 
         final List<HL7Component> componentList = new ArrayList<>();
-        if (type instanceof Composite) {
-            final Composite composite = (Composite) type;
+        if (type instanceof final Composite composite) {
 
             for (final Type component : composite.getComponents()) {
                 componentList.add(new HapiField(component));
@@ -50,8 +48,8 @@ public class HapiField implements HL7Field, HL7Component {
         final ExtraComponents extra = type.getExtraComponents();
         if (extra != null && extra.numComponents() > 0) {
             final String singleFieldValue;
-            if (type instanceof Primitive) {
-                singleFieldValue = ((Primitive) type).getValue();
+            if (type instanceof final Primitive primitive) {
+                singleFieldValue = primitive.getValue();
             } else {
                 singleFieldValue = this.value;
             }

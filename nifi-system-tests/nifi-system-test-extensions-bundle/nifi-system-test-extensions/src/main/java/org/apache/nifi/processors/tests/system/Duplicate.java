@@ -42,7 +42,7 @@ public class Duplicate extends AbstractProcessor {
         .defaultValue("2")
         .build();
 
-    public Relationship REL_SUCCESS = new Relationship.Builder()
+    public static final Relationship REL_SUCCESS = new Relationship.Builder()
         .name("success")
         .build();
 
@@ -65,11 +65,11 @@ public class Duplicate extends AbstractProcessor {
 
         final List<FlowFile> output = new ArrayList<>();
         output.add(input);
-        for (int i=0; i < context.getProperty(OUTPUT_COUNT).asInteger() - 1; i++) {
+        for (int i = 0; i < context.getProperty(OUTPUT_COUNT).asInteger() - 1; i++) {
             output.add(session.clone(input));
         }
 
         session.transfer(output, REL_SUCCESS);
-        getLogger().info("Duplicated {} to create {} FlowFiles total", new Object[] {input, output.size()});
+        getLogger().info("Duplicated {} to create {} FlowFiles total", input, output.size());
     }
 }

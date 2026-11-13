@@ -31,13 +31,13 @@ import java.util.stream.Stream;
 
 abstract class Padding extends RecordPathSegment {
 
-    public final static String DEFAULT_PADDING_STRING = "_";
+    public static final String DEFAULT_PADDING_STRING = "_";
 
-    private RecordPathSegment paddingStringPath;
-    private RecordPathSegment inputStringPath;
-    private RecordPathSegment desiredLengthPath;
+    private final RecordPathSegment paddingStringPath;
+    private final RecordPathSegment inputStringPath;
+    private final RecordPathSegment desiredLengthPath;
 
-    Padding( final String path,
+    Padding(final String path,
              final RecordPathSegment parentPath,
              final RecordPathSegment inputStringPath,
              final RecordPathSegment desiredLengthPath,
@@ -50,6 +50,7 @@ abstract class Padding extends RecordPathSegment {
         this.desiredLengthPath = desiredLengthPath;
     }
 
+    @Override
     public Stream<FieldValue> evaluate(RecordPathEvaluationContext context) {
         String pad = getPaddingString(context);
 
@@ -62,7 +63,7 @@ abstract class Padding extends RecordPathSegment {
             }
 
             int desiredLength = desiredLengthOpt.getAsInt();
-            final String value = DataTypeUtils.toString(fv.getValue(), (String) null);
+            final String value = DataTypeUtils.toString(fv.getValue(), null);
             return new StandardFieldValue(doPad(value, desiredLength, pad), fv.getField(), fv.getParent().orElse(null));
         });
     }
@@ -90,7 +91,7 @@ abstract class Padding extends RecordPathSegment {
         return OptionalInt.of(DataTypeUtils.toInteger(length, fieldName));
     }
 
-    private String getPaddingString(RecordPathEvaluationContext context){
+    private String getPaddingString(RecordPathEvaluationContext context) {
 
         if (null == paddingStringPath) {
             return DEFAULT_PADDING_STRING;
@@ -98,7 +99,7 @@ abstract class Padding extends RecordPathSegment {
 
         String padStr = RecordPathUtils.getFirstStringValue(paddingStringPath, context);
 
-        if (null != padStr && !padStr.isEmpty()){
+        if (null != padStr && !padStr.isEmpty()) {
             return padStr;
         }
         return DEFAULT_PADDING_STRING;

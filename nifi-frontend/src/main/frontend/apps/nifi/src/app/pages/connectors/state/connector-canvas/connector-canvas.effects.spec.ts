@@ -1,0 +1,3209 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { TestBed } from '@angular/core/testing';
+import { EventEmitter } from '@angular/core';
+import { provideMockActions } from '@ngrx/effects/testing';
+import { Action } from '@ngrx/store';
+import { Router } from '@angular/router';
+import { firstValueFrom, Observable, of, Subject, throwError, toArray } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+import {
+    ComponentType,
+    ComponentTypeNamePipe,
+    ConnectionDTO,
+    ConnectionEntity,
+    Position,
+    ProcessorEntity
+} from '@nifi/shared';
+import { MatDialog, MatDialogRef } from '@angular/material/dialog';
+import { ParameterContextEntity, ProcessGroupFlowEntity, UpdateConnectionRequest } from '../../../../state/shared';
+import { CreateConnection, CreateConnectionRequest } from '../../../../state/flow-shared';
+import { createParameterContextFixture } from '../../testing/parameter-context-fixture';
+import {
+    makeConnection as makeConnectionEntity,
+    makeConnectionDto,
+    makeFunnel,
+    makeLabel,
+    makeLabelDto,
+    makeProcessGroup,
+    makeProcessor,
+    makeProcessorDto,
+    makeRemoteProcessGroup
+} from '../../testing/connector-canvas-entity-fixtures';
+import { expectActionOfType } from '../../testing/expect-action-of-type';
+import type { ConnectorCanvasComponentEntity } from './index';
+import { ConnectorCanvasEffects } from './connector-canvas.effects';
+import { ConnectorService } from '../../service/connector.service';
+import { ConnectorEditService } from '../../service/connector-edit.service';
+import { ErrorHelper } from '../../../../service/error-helper.service';
+import { ClusterConnectionService } from '../../../../service/cluster-connection.service';
+import { ErrorContextKey } from '../../../../state/error';
+import { provideMockStore, MockStore } from '@ngrx/store/testing';
+import {
+    deselectAllComponents,
+    createConnectionDialogClosed,
+    createConnectionFailure,
+    createConnectionRequested,
+    createConnectionSuccess,
+    downloadFlow,
+    enterProcessGroup,
+    leaveProcessGroup,
+    loadConnectorFlow,
+    loadConnectorFlowComplete,
+    loadConnectorFlowFailure,
+    loadConnectorFlowSuccess,
+    markAuthoritativeSnapshotPending,
+    loadConnectorParameterContext,
+    loadConnectorParameterContextFailure,
+    loadConnectorParameterContextSuccess,
+    moveCanvasComponents,
+    navigateToControllerService,
+    navigateToControllerServices,
+    navigateToProvenanceForComponent,
+    navigateToQueueListing,
+    navigateWithoutTransform,
+    editConnectionDialogClosed,
+    openCreateConnectionDialog,
+    openReconnectConnectionDialog,
+    saveEditedConnection,
+    reloadConnectorFlow,
+    resetConnectorCanvasState,
+    selectComponents,
+    submitCreateConnection,
+    startConnectorCanvasPolling,
+    stopConnectorCanvasPolling,
+    updateComponentPositionSuccess,
+    updateComponentPositionsBulk,
+    updateComponentPositionsBulkComplete,
+    updateConnectionBendPoints,
+    updateConnectionBendPointsFailure,
+    updateConnectionBendPointsSuccess,
+    updateConnectionDestinationFailure,
+    updateConnectionDestinationSuccess,
+    viewComponentConfiguration
+} from './connector-canvas.actions';
+import { loadConnectorControllerServicesSuccess } from '../connector-controller-services/connector-controller-services.actions';
+import * as ErrorActions from '../../../../state/error/error.actions';
+import { queueEmptied } from '../../../../state/empty-queue/empty-queue.actions';
+import {
+    selectBreadcrumbs,
+    selectConnections,
+    selectConnectorId,
+    selectConnectorIdFromRoute,
+    selectConnectorParameterContext,
+    selectHasLoadedFlow,
+    selectLoadingStatus,
+    selectMaxConnectionZIndex,
+    selectMaxLabelZIndex,
+    selectOptimisticCacheSnapshot,
+    selectParentProcessGroupId,
+    selectPendingAuthoritativeSnapshot,
+    selectProcessGroupId,
+    selectProcessGroupIdFromRoute,
+    selectSaving
+} from './connector-canvas.selectors';
+import { selectDocumentVisibilityState } from '../../../../state/document-visibility/document-visibility.selectors';
+import { DocumentVisibility } from '../../../../state/document-visibility';
+import type { Mock } from 'vitest';
+import { selectPrioritizerTypes } from '../../../../state/extension-types/extension-types.selectors';
+import { EditConnectionComponent } from '../../../../ui/common/component-dialogs/edit-connection/edit-connection.component';
+import { CreatePort } from '../../../../ui/common/component-dialogs/create-port/create-port.component';
+import { CreateProcessGroup } from '../../../../ui/common/component-dialogs/create-process-group/create-process-group.component';
+import { CreateProcessor } from '../../../../ui/common/component-dialogs/create-processor/create-processor.component';
+import { CreateRemoteProcessGroup } from '../../../../ui/common/component-dialogs/create-remote-process-group/create-remote-process-group.component';
+import { resetConnectedStateChanged } from '../../../../state/cluster-summary/cluster-summary.actions';
+import { selectConnectedStateChanged } from '../../../../state/cluster-summary/cluster-summary.selectors';
+import { FlowService } from '../../../flow-designer/service/flow.service';
+import * as ConnectorCanvasActions from './connector-canvas.actions';
+
+describe('ConnectorCanvasEffects', () => {
+    // Setup function following SIFERS pattern
+    async function setup(
+        options: {
+            connectorId?: string | null;
+            parentProcessGroupId?: string | null;
+            processGroupId?: string | null;
+            processGroupIdFromRoute?: string | null;
+            documentVisibility?: DocumentVisibility;
+            loadingStatus?: 'pending' | 'loading' | 'success' | 'refresh-error' | 'error';
+            hasLoadedFlow?: boolean;
+            connectedStateChanged?: boolean;
+            pendingAuthoritativeSnapshot?: boolean;
+            addedCache?: string[];
+            removedCache?: string[];
+            parameterContext?: ParameterContextEntity | null;
+            parameterContextResponse?: ParameterContextEntity | null;
+            parameterContextError?: unknown;
+        } = {}
+    ) {
+        let actions$: Observable<Action>;
+
+        const connectorId = options.connectorId !== undefined ? options.connectorId : 'connector-1';
+        const parentProcessGroupId =
+            options.parentProcessGroupId !== undefined ? options.parentProcessGroupId : 'parent-pg';
+        const processGroupId = options.processGroupId !== undefined ? options.processGroupId : 'child-pg';
+        const processGroupIdFromRoute =
+            options.processGroupIdFromRoute !== undefined ? options.processGroupIdFromRoute : processGroupId;
+        const documentVisibility = options.documentVisibility ?? DocumentVisibility.Visible;
+        const loadingStatus = options.loadingStatus ?? 'success';
+
+        // Mock services
+        const mockConnectorService = {
+            downloadFlow: vi.fn(),
+            getConnectorFlow: vi.fn(),
+            getProcessGroup: vi.fn(),
+            getConnectorParameterContext: vi.fn(),
+            getControllerService: vi.fn()
+        };
+
+        if (options.parameterContextError !== undefined) {
+            mockConnectorService.getConnectorParameterContext.mockReturnValue(
+                throwError(() => options.parameterContextError)
+            );
+        } else {
+            mockConnectorService.getConnectorParameterContext.mockReturnValue(
+                of(options.parameterContextResponse ?? null)
+            );
+        }
+
+        const mockErrorHelper = {
+            getErrorString: vi.fn().mockReturnValue('Error message'),
+            handleLoadingError: vi.fn()
+        };
+        const mockConnectorEditService = {
+            updateComponent: vi.fn(),
+            moveComponents: vi.fn(),
+            getProcessGroup: vi.fn(),
+            getProcessGroupFlow: vi.fn(),
+            createConnection: vi.fn(),
+            createComponent: vi.fn(),
+            uploadProcessGroup: vi.fn(),
+            deleteComponent: vi.fn(),
+            deleteComponents: vi.fn(),
+            getComponent: vi.fn()
+        };
+        const mockClusterConnectionService = {
+            isDisconnectionAcknowledged: vi.fn().mockReturnValue(false)
+        };
+        const mockFlowService = {
+            startComponent: vi.fn().mockReturnValue(of(makeProcessor('proc-1', { revision: { version: 2 } }))),
+            stopComponent: vi.fn().mockReturnValue(of(makeProcessor('proc-1', { revision: { version: 2 } }))),
+            enableComponent: vi.fn().mockReturnValue(of(makeProcessor('proc-1', { revision: { version: 2 } }))),
+            disableComponent: vi.fn().mockReturnValue(of(makeProcessor('proc-1', { revision: { version: 2 } }))),
+            startProcessGroup: vi.fn().mockReturnValue(of({})),
+            startRemoteProcessGroupsInProcessGroup: vi.fn().mockReturnValue(of({})),
+            stopProcessGroup: vi.fn().mockReturnValue(of({})),
+            stopRemoteProcessGroupsInProcessGroup: vi.fn().mockReturnValue(of({})),
+            enableProcessGroup: vi.fn().mockReturnValue(of({})),
+            disableProcessGroup: vi.fn().mockReturnValue(of({})),
+            getProcessGroup: vi.fn().mockReturnValue(of(makeProcessGroup('pg-1'))),
+            runOnce: vi.fn().mockReturnValue(of(makeProcessor('proc-1', { revision: { version: 2 } }))),
+            terminateThreads: vi.fn().mockReturnValue(of(makeProcessor('proc-1', { revision: { version: 2 } })))
+        };
+
+        const mockRouter = {
+            navigate: vi.fn().mockResolvedValue(true)
+        };
+
+        const afterClosed$ = new Subject<unknown>();
+        const mockDialogRef = {
+            componentInstance: {} as Record<string, unknown> & {
+                parameterContext?: ParameterContextEntity | null;
+                supportsParameters?: boolean;
+                goToParameter?: (parameter: string) => void;
+                goToService: (serviceId: string) => void;
+            },
+            afterClosed: () => afterClosed$.asObservable(),
+            close: vi.fn()
+        };
+        const mockDialog = {
+            open: vi.fn().mockReturnValue(mockDialogRef),
+            closeAll: vi.fn()
+        };
+
+        await TestBed.configureTestingModule({
+            providers: [
+                ConnectorCanvasEffects,
+                provideMockActions(() => actions$),
+                provideMockStore({
+                    initialState: {},
+                    selectors: [
+                        { selector: selectConnectorIdFromRoute, value: connectorId },
+                        { selector: selectConnectorId, value: connectorId },
+                        { selector: selectParentProcessGroupId, value: parentProcessGroupId },
+                        { selector: selectProcessGroupId, value: processGroupId },
+                        { selector: selectProcessGroupIdFromRoute, value: processGroupIdFromRoute },
+                        { selector: selectConnections, value: [] },
+                        { selector: selectBreadcrumbs, value: null },
+                        { selector: selectSaving, value: false },
+                        { selector: selectMaxConnectionZIndex, value: 4 },
+                        { selector: selectMaxLabelZIndex, value: 2 },
+                        { selector: selectLoadingStatus, value: loadingStatus },
+                        { selector: selectHasLoadedFlow, value: options.hasLoadedFlow ?? false },
+                        { selector: selectConnectedStateChanged, value: options.connectedStateChanged ?? false },
+                        {
+                            selector: selectPendingAuthoritativeSnapshot,
+                            value: options.pendingAuthoritativeSnapshot ?? false
+                        },
+                        {
+                            selector: selectOptimisticCacheSnapshot,
+                            value: {
+                                addedCache: options.addedCache ?? [],
+                                removedCache: options.removedCache ?? []
+                            }
+                        },
+                        {
+                            selector: selectDocumentVisibilityState,
+                            value: { documentVisibility, changedTimestamp: 0 }
+                        },
+                        {
+                            selector: selectConnectorParameterContext,
+                            value: options.parameterContext ?? null
+                        }
+                    ]
+                }),
+                { provide: ConnectorService, useValue: mockConnectorService },
+                { provide: ConnectorEditService, useValue: mockConnectorEditService },
+                { provide: ClusterConnectionService, useValue: mockClusterConnectionService },
+                { provide: FlowService, useValue: mockFlowService },
+                { provide: ErrorHelper, useValue: mockErrorHelper },
+                { provide: Router, useValue: mockRouter },
+                { provide: MatDialog, useValue: mockDialog },
+                ComponentTypeNamePipe
+            ]
+        }).compileComponents();
+
+        const effects = TestBed.inject(ConnectorCanvasEffects);
+        const store = TestBed.inject(MockStore);
+
+        return {
+            effects,
+            store,
+            actions$: (stream: Observable<Action>) => {
+                actions$ = stream;
+            },
+            mockConnectorService,
+            mockConnectorEditService,
+            mockFlowService,
+            mockErrorHelper,
+            mockRouter,
+            mockDialog,
+            mockDialogRef,
+            afterClosed$
+        };
+    }
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    describe('create connection', () => {
+        const request: CreateConnectionRequest = {
+            source: {
+                id: 'source-1',
+                componentType: ComponentType.Funnel,
+                entity: makeFunnel('source-1')
+            },
+            destination: {
+                id: 'destination-1',
+                componentType: ComponentType.Funnel,
+                entity: makeFunnel('destination-1')
+            },
+            bends: [{ x: 10, y: 20 }]
+        };
+        const createRequest = {
+            payload: {
+                revision: { version: 0, clientId: 'local-client' },
+                disconnectedNodeAcknowledged: false,
+                component: {
+                    name: '',
+                    labelIndex: 0,
+                    source: { id: 'source-1', groupId: 'child-pg', type: 'FUNNEL' as const },
+                    destination: { id: 'destination-1', groupId: 'child-pg', type: 'FUNNEL' as const }
+                }
+            }
+        } as CreateConnection;
+
+        it('loads process-group defaults before opening the shared dialog', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            mockConnectorService.getProcessGroup.mockReturnValue(
+                of({
+                    component: {
+                        defaultFlowFileExpiration: '1 min',
+                        defaultBackPressureObjectThreshold: 123,
+                        defaultBackPressureDataSizeThreshold: '2 GB'
+                    }
+                })
+            );
+            actions$(of(createConnectionRequested({ processGroupId: 'child-pg', request })));
+
+            const result = await firstValueFrom(effects.createConnectionRequested$);
+
+            expect(mockConnectorService.getProcessGroup).toHaveBeenCalledWith('connector-1', 'child-pg');
+            expect(result).toEqual(
+                openCreateConnectionDialog({
+                    request: {
+                        request,
+                        defaults: {
+                            flowfileExpiration: '1 min',
+                            objectThreshold: 123,
+                            dataSizeThreshold: '2 GB'
+                        }
+                    }
+                })
+            );
+        });
+
+        it('wires dialog inputs and stops listening to its output after close', async () => {
+            const { effects, actions$, store, mockConnectorService, mockDialog, afterClosed$ } = await setup();
+            const createConnection = new EventEmitter<CreateConnection>();
+            mockDialog.open.mockReturnValue({
+                componentInstance: { createConnection },
+                afterClosed: () => afterClosed$.asObservable()
+            } as unknown as MatDialogRef<unknown>);
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const prioritizers = [{ type: 'org.apache.nifi.prioritizer.FirstInFirstOutPrioritizer' }];
+            store.overrideSelector(selectPrioritizerTypes, prioritizers);
+            store.refreshState();
+            mockConnectorService.getConnectorFlow.mockReturnValue(
+                of({
+                    processGroupFlow: {
+                        flow: {
+                            outputPorts: [{ id: 'output-1' }],
+                            inputPorts: [{ id: 'input-1' }]
+                        }
+                    }
+                })
+            );
+            const action = openCreateConnectionDialog({
+                request: {
+                    request,
+                    defaults: {
+                        flowfileExpiration: '0 sec',
+                        objectThreshold: 10000,
+                        dataSizeThreshold: '1 GB'
+                    }
+                }
+            });
+            const stream = new Subject<Action>();
+            actions$(stream);
+            effects.openCreateConnectionDialog$.subscribe();
+
+            stream.next(action);
+            const instance = mockDialog.open.mock.results[0].value.componentInstance;
+            expect(await firstValueFrom(instance.saving$)).toBe(false);
+            expect(await firstValueFrom(instance.breadcrumbs$)).toBeNull();
+            expect(await firstValueFrom(instance.availablePrioritizers$)).toEqual(prioritizers);
+            expect(await firstValueFrom(instance.getChildOutputPorts('source-group'))).toEqual([{ id: 'output-1' }]);
+            expect(await firstValueFrom(instance.getChildInputPorts('destination-group'))).toEqual([{ id: 'input-1' }]);
+            expect(mockConnectorService.getConnectorFlow).toHaveBeenCalledWith('connector-1', 'source-group');
+            expect(mockConnectorService.getConnectorFlow).toHaveBeenCalledWith('connector-1', 'destination-group');
+
+            createConnection.emit(createRequest);
+            expect(dispatch).toHaveBeenCalledWith(
+                submitCreateConnection({ processGroupId: 'child-pg', request: createRequest })
+            );
+
+            dispatch.mockClear();
+            afterClosed$.next(undefined);
+            expect(dispatch).toHaveBeenCalledWith(createConnectionDialogClosed());
+            dispatch.mockClear();
+            createConnection.emit(createRequest);
+            expect(dispatch).not.toHaveBeenCalled();
+        });
+
+        it('adds zIndex and returns the created connection', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const connection = makeConnectionEntity('connection-new', { revision: { version: 0 } });
+            mockConnectorEditService.createConnection.mockReturnValue(of(connection));
+            actions$(of(submitCreateConnection({ processGroupId: 'child-pg', request: createRequest })));
+
+            const result = await firstValueFrom(effects.submitCreateConnection$);
+
+            expect(mockConnectorEditService.createConnection).toHaveBeenCalledWith('child-pg', {
+                payload: {
+                    ...createRequest.payload,
+                    component: { ...createRequest.payload.component, zIndex: 5 }
+                }
+            });
+            expect(result).toEqual(createConnectionSuccess({ connection }));
+        });
+
+        it('surfaces create failures in the connection dialog error context', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.createConnection.mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 500 }))
+            );
+            actions$(of(submitCreateConnection({ processGroupId: 'child-pg', request: createRequest })));
+
+            const results = await firstValueFrom(effects.submitCreateConnection$.pipe(toArray()));
+
+            expect(results[0]).toEqual(createConnectionFailure({ error: 'Error message' }));
+            expect(results[1]).toEqual(
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Error message'],
+                        context: ErrorContextKey.CONNECTION
+                    }
+                })
+            );
+        });
+
+        it('closes the dialog and selects the new connection after success', async () => {
+            const { effects, actions$, store, mockDialog } = await setup();
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const connection = makeConnectionEntity('connection-new');
+            actions$(of(createConnectionSuccess({ connection })));
+
+            await firstValueFrom(effects.createConnectionSuccess$);
+
+            expect(mockDialog.closeAll).toHaveBeenCalled();
+            expect(dispatch).toHaveBeenCalledWith(
+                selectComponents({
+                    request: {
+                        components: [{ id: 'connection-new', componentType: ComponentType.Connection }]
+                    }
+                })
+            );
+            expect(dispatch).toHaveBeenCalledWith(ConnectorCanvasActions.loadComponentsForConnection({ connection }));
+        });
+    });
+
+    describe('loadComponentsForConnection$', () => {
+        it('reloads a processor source and an output port destination', async () => {
+            const { effects, actions$ } = await setup();
+            const connection = makeConnectionEntity('conn-1', {
+                sourceId: 'proc-1',
+                sourceType: 'PROCESSOR',
+                destinationId: 'out-1',
+                destinationType: 'OUTPUT_PORT'
+            });
+            actions$(of(ConnectorCanvasActions.loadComponentsForConnection({ connection })));
+
+            const actions = await firstValueFrom(effects.loadComponentsForConnection$.pipe(toArray()));
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'proc-1',
+                    componentType: ComponentType.Processor
+                }),
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'out-1',
+                    componentType: ComponentType.OutputPort
+                })
+            ]);
+        });
+
+        it('reloads the remote process group of a remote port and skips funnels', async () => {
+            const { effects, actions$ } = await setup();
+            const connection = makeConnectionEntity('conn-1', {
+                sourceId: 'remote-port-1',
+                sourceGroupId: 'rpg-1',
+                sourceType: 'REMOTE_OUTPUT_PORT',
+                destinationId: 'funnel-1',
+                destinationType: 'FUNNEL'
+            });
+            actions$(of(ConnectorCanvasActions.loadComponentsForConnection({ connection })));
+
+            const actions = await firstValueFrom(effects.loadComponentsForConnection$.pipe(toArray()));
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'rpg-1',
+                    componentType: ComponentType.RemoteProcessGroup
+                })
+            ]);
+        });
+
+        it('reloads the endpoints of a connection the user cannot read', async () => {
+            const { effects, actions$ } = await setup();
+            const connection = makeConnectionEntity('conn-1', {
+                permissions: { canRead: false, canWrite: true },
+                component: undefined,
+                sourceId: 'proc-1',
+                sourceType: 'PROCESSOR',
+                destinationId: 'proc-2',
+                destinationType: 'PROCESSOR'
+            });
+            actions$(of(ConnectorCanvasActions.loadComponentsForConnection({ connection })));
+
+            const actions = await firstValueFrom(effects.loadComponentsForConnection$.pipe(toArray()));
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'proc-1',
+                    componentType: ComponentType.Processor
+                }),
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'proc-2',
+                    componentType: ComponentType.Processor
+                })
+            ]);
+        });
+    });
+
+    describe('loadConnectionEndpoint$', () => {
+        it('fetches the endpoint and dispatches loadConnectionEndpointSuccess', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const remoteProcessGroup = makeRemoteProcessGroup('rpg-1');
+            mockConnectorEditService.getComponent.mockReturnValue(of(remoteProcessGroup));
+            actions$(
+                of(
+                    ConnectorCanvasActions.loadConnectionEndpoint({
+                        componentId: 'rpg-1',
+                        componentType: ComponentType.RemoteProcessGroup
+                    })
+                )
+            );
+
+            const actions = await firstValueFrom(effects.loadConnectionEndpoint$.pipe(toArray()));
+
+            expect(mockConnectorEditService.getComponent).toHaveBeenCalledWith(
+                ComponentType.RemoteProcessGroup,
+                'rpg-1'
+            );
+            expect(actions).toEqual([
+                ConnectorCanvasActions.loadConnectionEndpointSuccess({
+                    componentId: 'rpg-1',
+                    componentType: ComponentType.RemoteProcessGroup,
+                    component: remoteProcessGroup
+                })
+            ]);
+        });
+
+        it('ignores an endpoint that fails to load', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.getComponent.mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 404 }))
+            );
+            actions$(
+                of(
+                    ConnectorCanvasActions.loadConnectionEndpoint({
+                        componentId: 'proc-1',
+                        componentType: ComponentType.Processor
+                    })
+                )
+            );
+
+            const actions = await firstValueFrom(effects.loadConnectionEndpoint$.pipe(toArray()));
+
+            expect(actions).toEqual([]);
+        });
+    });
+
+    describe('reloadComponentsAfterConnectionDestinationChange$', () => {
+        async function reloadsFor(previousDestination?: { id?: string; type?: string; groupId?: string }) {
+            const { effects, actions$ } = await setup();
+            const connection = makeConnectionEntity('conn-1', { destinationType: 'FUNNEL' });
+            actions$(
+                of(updateConnectionDestinationSuccess({ connectionId: 'conn-1', connection, previousDestination }))
+            );
+            return {
+                connection,
+                actions: await firstValueFrom(effects.reloadComponentsAfterConnectionDestinationChange$.pipe(toArray()))
+            };
+        }
+
+        it('reloads the connection endpoints and a previous processor destination', async () => {
+            const { connection, actions } = await reloadsFor({ id: 'proc-1', type: 'PROCESSOR', groupId: 'child-pg' });
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.loadComponentsForConnection({ connection }),
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'proc-1',
+                    componentType: ComponentType.Processor
+                })
+            ]);
+        });
+
+        it('reloads the remote process group of a previous remote input port destination', async () => {
+            const { actions } = await reloadsFor({ id: 'remote-in-1', type: 'REMOTE_INPUT_PORT', groupId: 'rpg-1' });
+
+            expect(actions).toContainEqual(
+                ConnectorCanvasActions.loadConnectionEndpoint({
+                    componentId: 'rpg-1',
+                    componentType: ComponentType.RemoteProcessGroup
+                })
+            );
+        });
+
+        it('reloads only the connection endpoints without a previous destination', async () => {
+            const { connection, actions } = await reloadsFor();
+
+            expect(actions).toEqual([ConnectorCanvasActions.loadComponentsForConnection({ connection })]);
+        });
+
+        it('does not reload a previous funnel destination', async () => {
+            const { connection, actions } = await reloadsFor({ id: 'funnel-1', type: 'FUNNEL', groupId: 'child-pg' });
+
+            expect(actions).toEqual([ConnectorCanvasActions.loadComponentsForConnection({ connection })]);
+        });
+
+        it('captures the previous destination when a connection is reconnected on the canvas', async () => {
+            const { effects, actions$, store, mockConnectorEditService } = await setup();
+            const previousDestination = {
+                id: 'proc-1',
+                groupId: 'child-pg',
+                type: 'PROCESSOR' as const,
+                name: 'Processor',
+                running: false
+            };
+            const existing = makeConnectionEntity('conn-1', {
+                component: makeConnectionDto({ id: 'conn-1', destination: previousDestination })
+            });
+            const saved = makeConnectionEntity('conn-1', { revision: { version: 2 } });
+            store.overrideSelector(selectConnections, [existing]);
+            store.refreshState();
+            mockConnectorEditService.updateComponent.mockReturnValue(of(saved));
+            actions$(
+                of(
+                    ConnectorCanvasActions.updateConnectionDestination({
+                        processGroupId: 'child-pg',
+                        connectionId: 'conn-1',
+                        revision: { version: 1 },
+                        newDestination: {
+                            id: 'proc-2',
+                            componentType: ComponentType.Processor,
+                            entity: makeProcessor('proc-2')
+                        }
+                    })
+                )
+            );
+
+            await expect(firstValueFrom(effects.updateConnectionDestination$)).resolves.toEqual(
+                updateConnectionDestinationSuccess({ connectionId: 'conn-1', connection: saved, previousDestination })
+            );
+        });
+    });
+
+    describe('reconnect connection dialog', () => {
+        const previousDestination = { id: 'proc-1', groupId: 'child-pg', type: 'PROCESSOR' as const };
+        const connection = makeConnectionEntity('conn-1', {
+            component: makeConnectionDto({
+                id: 'conn-1',
+                parentGroupId: 'child-pg',
+                destination: previousDestination
+            })
+        });
+
+        function reconnectRequest() {
+            return {
+                type: ComponentType.Connection,
+                uri: connection.uri,
+                entity: connection,
+                newDestination: {
+                    type: ComponentType.ProcessGroup,
+                    groupId: 'pg-child',
+                    name: 'Child PG'
+                }
+            };
+        }
+
+        it('persists the selected port and keeps the previous destination', async () => {
+            const { effects, actions$, store, mockDialog, mockDialogRef, afterClosed$ } = await setup();
+            const editConnection = new EventEmitter<UpdateConnectionRequest>();
+            mockDialogRef.componentInstance = { editConnection } as typeof mockDialogRef.componentInstance;
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const stream = new Subject<Action>();
+            actions$(stream);
+            const subscription = effects.openReconnectConnectionDialog$.subscribe();
+
+            stream.next(openReconnectConnectionDialog({ request: reconnectRequest() }));
+
+            expect(mockDialog.open).toHaveBeenCalledWith(
+                EditConnectionComponent,
+                expect.objectContaining({ data: expect.objectContaining({ type: ComponentType.Connection }) })
+            );
+
+            const updateRequest: UpdateConnectionRequest = {
+                id: 'conn-1',
+                type: ComponentType.Connection,
+                uri: connection.uri,
+                payload: { revision: { version: 1 }, component: { id: 'conn-1' } },
+                errorStrategy: 'banner'
+            };
+            editConnection.emit(updateRequest);
+
+            expect(dispatch).toHaveBeenCalledWith(
+                saveEditedConnection({
+                    request: { ...updateRequest, previousDestination }
+                })
+            );
+
+            stream.next(
+                updateConnectionDestinationSuccess({
+                    connectionId: 'conn-1',
+                    connection
+                })
+            );
+            expect(mockDialogRef.close).toHaveBeenCalledWith('SAVED');
+
+            dispatch.mockClear();
+            afterClosed$.next('SAVED');
+            expect(dispatch).toHaveBeenCalledWith(
+                editConnectionDialogClosed({ connectionId: 'conn-1', cancelled: false })
+            );
+            subscription.unsubscribe();
+        });
+
+        it('saves the dialog payload and reports dialog failures in the connection context', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const saved = makeConnectionEntity('conn-1', { revision: { version: 2 } });
+            mockConnectorEditService.updateComponent.mockReturnValue(of(saved));
+            const request: UpdateConnectionRequest = {
+                id: 'conn-1',
+                type: ComponentType.Connection,
+                uri: connection.uri,
+                payload: { revision: { version: 1 }, component: { id: 'conn-1', destination: previousDestination } },
+                errorStrategy: 'banner',
+                previousDestination
+            };
+            actions$(of(saveEditedConnection({ request })));
+
+            await expect(firstValueFrom(effects.saveEditedConnection$)).resolves.toEqual(
+                updateConnectionDestinationSuccess({ connectionId: 'conn-1', connection: saved, previousDestination })
+            );
+            expect(mockConnectorEditService.updateComponent).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    id: 'conn-1',
+                    payload: expect.objectContaining({ disconnectedNodeAcknowledged: false })
+                })
+            );
+
+            mockConnectorEditService.updateComponent.mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 500 }))
+            );
+            const emitted: Action[] = [];
+            actions$(of(saveEditedConnection({ request })));
+            effects.saveEditedConnection$.subscribe((action) => emitted.push(action));
+
+            expect(emitted).toEqual([
+                updateConnectionDestinationFailure({
+                    connectionId: 'conn-1',
+                    error: 'Error message',
+                    dialogOpen: true
+                }),
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Error message'],
+                        context: ErrorContextKey.CONNECTION
+                    }
+                })
+            ]);
+        });
+    });
+
+    describe('loadConnectorFlow$', () => {
+        it('should call getConnectorFlow and dispatch loadConnectorFlowSuccess', async () => {
+            const { effects, actions$, mockConnectorService, store } = await setup({
+                connectedStateChanged: true
+            });
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const label = makeLabel('l1', { position: { x: 10, y: 20 } });
+            const flowResponse = {
+                permissions: { canRead: true, canWrite: true },
+                processGroupFlow: {
+                    id: 'pg-123',
+                    parentGroupId: 'parent-456',
+                    breadcrumb: null,
+                    flow: {
+                        labels: [label],
+                        funnels: [],
+                        inputPorts: [],
+                        outputPorts: [],
+                        remoteProcessGroups: [],
+                        processGroups: [],
+                        processors: [],
+                        connections: []
+                    }
+                }
+            };
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(of(flowResponse));
+            actions$(
+                of(
+                    loadConnectorFlow({
+                        connectorId: 'conn-a',
+                        processGroupId: 'pg-in'
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.loadConnectorFlow$);
+            expect(mockConnectorService.getConnectorFlow).toHaveBeenCalledWith('conn-a', 'pg-in');
+            expect(action).toEqual(
+                loadConnectorFlowSuccess({
+                    connectorId: 'conn-a',
+                    processGroupId: 'pg-123',
+                    processGroupRevision: null,
+                    parentProcessGroupId: 'parent-456',
+                    breadcrumb: null,
+                    permissions: { canRead: true, canWrite: true },
+                    labels: [label],
+                    funnels: [],
+                    inputPorts: [],
+                    outputPorts: [],
+                    remoteProcessGroups: [],
+                    processGroups: [],
+                    processors: [],
+                    connections: [],
+                    reconciliationSnapshot: { addedCache: [], removedCache: [] },
+                    connectedStateChanged: true
+                })
+            );
+            expect(dispatch).toHaveBeenCalledWith(markAuthoritativeSnapshotPending());
+            expect(dispatch).toHaveBeenCalledWith(resetConnectedStateChanged());
+            expect(dispatch).toHaveBeenCalledTimes(2);
+        });
+
+        it('should default flow collections when processGroupFlow.flow is missing', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const flowResponse = {
+                processGroupFlow: {
+                    id: 'pg-123',
+                    parentGroupId: null,
+                    breadcrumb: null
+                }
+            };
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(of(flowResponse));
+            actions$(
+                of(
+                    loadConnectorFlow({
+                        connectorId: 'conn-a',
+                        processGroupId: 'pg-in'
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.loadConnectorFlow$);
+            expect(action).toEqual(
+                loadConnectorFlowSuccess({
+                    connectorId: 'conn-a',
+                    processGroupId: 'pg-123',
+                    processGroupRevision: null,
+                    parentProcessGroupId: null,
+                    breadcrumb: null,
+                    permissions: null,
+                    labels: [],
+                    funnels: [],
+                    inputPorts: [],
+                    outputPorts: [],
+                    remoteProcessGroups: [],
+                    processGroups: [],
+                    processors: [],
+                    connections: [],
+                    reconciliationSnapshot: { addedCache: [], removedCache: [] },
+                    connectedStateChanged: false
+                })
+            );
+        });
+
+        it('should preserve a pending authoritative snapshot after the cluster signal has been reset', async () => {
+            const { effects, actions$, mockConnectorService } = await setup({
+                pendingAuthoritativeSnapshot: true
+            });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of({
+                    processGroupFlow: {
+                        id: 'pg-123',
+                        parentGroupId: null,
+                        breadcrumb: null
+                    }
+                })
+            );
+            actions$(of(loadConnectorFlow({ connectorId: 'conn-a', processGroupId: 'pg-in' })));
+
+            const action = await firstValueFrom(effects.loadConnectorFlow$);
+
+            expect(action).toEqual(expect.objectContaining({ connectedStateChanged: true }));
+        });
+
+        it('should mark the authoritative snapshot pending before the request completes', async () => {
+            const { effects, actions$, mockConnectorService, store } = await setup({
+                connectedStateChanged: true
+            });
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const response$ = new Subject<ProcessGroupFlowEntity>();
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(response$);
+            actions$(of(loadConnectorFlow({ connectorId: 'conn-a', processGroupId: 'pg-in' })));
+
+            const subscription = effects.loadConnectorFlow$.subscribe();
+
+            expect(dispatch).toHaveBeenCalledWith(markAuthoritativeSnapshotPending());
+            expect(dispatch).toHaveBeenCalledWith(resetConnectedStateChanged());
+            subscription.unsubscribe();
+        });
+
+        it('should capture optimistic caches when the request begins', async () => {
+            const { effects, actions$, mockConnectorService } = await setup({
+                addedCache: ['proc-created'],
+                removedCache: ['proc-deleted']
+            });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of({
+                    processGroupFlow: {
+                        id: 'pg-123',
+                        parentGroupId: null,
+                        breadcrumb: null
+                    }
+                })
+            );
+            actions$(of(loadConnectorFlow({ connectorId: 'conn-a', processGroupId: 'pg-in' })));
+
+            const action = await firstValueFrom(effects.loadConnectorFlow$);
+
+            expect(action).toEqual(
+                expect.objectContaining({
+                    reconciliationSnapshot: {
+                        addedCache: ['proc-created'],
+                        removedCache: ['proc-deleted']
+                    }
+                })
+            );
+        });
+
+        it('should dispatch loadConnectorFlowFailure when getConnectorFlow errors', async () => {
+            const { effects, actions$, mockConnectorService, mockErrorHelper } = await setup();
+            const errorResponse = new HttpErrorResponse({ error: 'Failed', status: 500, statusText: 'ISE' });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(throwError(() => errorResponse));
+            actions$(
+                of(
+                    loadConnectorFlow({
+                        connectorId: 'conn-a',
+                        processGroupId: 'pg-in'
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.loadConnectorFlow$);
+            expect(mockErrorHelper.getErrorString).toHaveBeenCalledWith(errorResponse);
+            expect(action).toEqual(
+                loadConnectorFlowFailure({
+                    errorContext: {
+                        errors: ['Error message'],
+                        context: ErrorContextKey.CONNECTORS
+                    },
+                    isRefresh: false,
+                    connectedStateChanged: false
+                })
+            );
+        });
+
+        it('should dispatch a recoverable failure and banner when a refresh fails', async () => {
+            const { effects, actions$, mockConnectorService } = await setup({
+                hasLoadedFlow: true,
+                connectedStateChanged: true
+            });
+            const errorResponse = new HttpErrorResponse({ error: 'Failed', status: 503, statusText: 'Unavailable' });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(throwError(() => errorResponse));
+            actions$(
+                of(
+                    loadConnectorFlow({
+                        connectorId: 'conn-a',
+                        processGroupId: 'pg-in'
+                    })
+                )
+            );
+
+            const emitted = await firstValueFrom(effects.loadConnectorFlow$.pipe(toArray()));
+
+            expect(emitted[0]).toEqual(
+                expect.objectContaining({
+                    type: loadConnectorFlowFailure.type,
+                    isRefresh: true,
+                    connectedStateChanged: true
+                })
+            );
+            expect(emitted[1]).toEqual(
+                expect.objectContaining({
+                    type: ErrorActions.addBannerError.type,
+                    errorContext: expect.objectContaining({ context: ErrorContextKey.CONNECTOR_CANVAS })
+                })
+            );
+        });
+    });
+
+    describe('loadConnectorFlowComplete$', () => {
+        it('should dispatch loadConnectorFlowComplete on loadConnectorFlowSuccess', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(
+                of(
+                    loadConnectorFlowSuccess({
+                        connectorId: 'c1',
+                        processGroupId: 'pg1',
+                        processGroupRevision: null,
+                        parentProcessGroupId: null,
+                        breadcrumb: null,
+                        permissions: null,
+                        labels: [],
+                        funnels: [],
+                        inputPorts: [],
+                        outputPorts: [],
+                        remoteProcessGroups: [],
+                        processGroups: [],
+                        processors: [],
+                        connections: [],
+                        reconciliationSnapshot: { addedCache: [], removedCache: [] },
+                        connectedStateChanged: false
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.loadConnectorFlowComplete$);
+            expect(action).toEqual(loadConnectorFlowComplete());
+        });
+    });
+
+    describe('downloadFlow$', () => {
+        it('should delegate the complete request to ConnectorService without dispatching another action', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const action = downloadFlow({
+                request: {
+                    connectorId: 'connector-1',
+                    processGroupId: 'process-group-1',
+                    includeReferencedServices: true
+                }
+            });
+            actions$(of(action));
+
+            const result = await firstValueFrom(effects.downloadFlow$);
+
+            expect(mockConnectorService.downloadFlow).toHaveBeenCalledWith(action.request);
+            expect(result).toBe(action);
+        });
+    });
+
+    describe('enterProcessGroup$', () => {
+        it('should navigate to the child process group canvas URL', async () => {
+            const { effects, actions$, mockRouter } = await setup({ connectorId: 'my-connector' });
+            actions$(
+                of(
+                    enterProcessGroup({
+                        request: { id: 'child-pg-99' }
+                    })
+                )
+            );
+
+            await firstValueFrom(effects.enterProcessGroup$);
+            expect(mockRouter.navigate).toHaveBeenCalledWith(['/connectors', 'my-connector', 'canvas', 'child-pg-99']);
+        });
+    });
+
+    describe('leaveProcessGroup$', () => {
+        it('should navigate to parent, then after loadConnectorFlowComplete dispatch navigateWithoutTransform', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-x',
+                parentProcessGroupId: 'parent-pg',
+                processGroupId: 'child-pg'
+            });
+            const actionSubject = new Subject<Action>();
+            actions$(actionSubject.asObservable());
+
+            const resultPromise = firstValueFrom(effects.leaveProcessGroup$);
+
+            actionSubject.next(leaveProcessGroup());
+            actionSubject.next(loadConnectorFlowComplete());
+            actionSubject.complete();
+
+            const action = await resultPromise;
+            expect(mockRouter.navigate).toHaveBeenCalledWith(['/connectors', 'conn-x', 'canvas', 'parent-pg']);
+            expect(action).toEqual(
+                navigateWithoutTransform({
+                    url: ['/connectors', 'conn-x', 'canvas', 'parent-pg', ComponentType.ProcessGroup, 'child-pg']
+                })
+            );
+        });
+
+        it('should not navigate when parent process group id is null', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-x',
+                parentProcessGroupId: null,
+                processGroupId: 'child-pg'
+            });
+            actions$(of(leaveProcessGroup()));
+
+            await expect(firstValueFrom(effects.leaveProcessGroup$)).rejects.toThrow();
+            expect(mockRouter.navigate).not.toHaveBeenCalled();
+        });
+
+        it('should not navigate when current process group id is null', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-x',
+                parentProcessGroupId: 'parent-pg',
+                processGroupId: null
+            });
+            actions$(of(leaveProcessGroup()));
+
+            await expect(firstValueFrom(effects.leaveProcessGroup$)).rejects.toThrow();
+            expect(mockRouter.navigate).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('selectComponents$', () => {
+        it('should dispatch deselectAllComponents when components array is empty', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    selectComponents({
+                        request: {
+                            components: []
+                        }
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.selectComponents$);
+            expect(action).toEqual(deselectAllComponents());
+        });
+
+        it('should dispatch navigateWithoutTransform with single component URL', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    selectComponents({
+                        request: {
+                            components: [{ id: 'proc-1', componentType: ComponentType.Processor }]
+                        }
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.selectComponents$);
+            expect(action).toEqual(
+                navigateWithoutTransform({
+                    url: ['/connectors', 'conn-1', 'canvas', 'pg-root', ComponentType.Processor, 'proc-1']
+                })
+            );
+        });
+
+        it('should dispatch navigateWithoutTransform with bulk URL for multiple components', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    selectComponents({
+                        request: {
+                            components: [
+                                { id: 'proc-1', componentType: ComponentType.Processor },
+                                { id: 'conn-2', componentType: ComponentType.Connection }
+                            ]
+                        }
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.selectComponents$);
+            expect(action).toEqual(
+                navigateWithoutTransform({
+                    url: ['/connectors', 'conn-1', 'canvas', 'pg-root', 'bulk', 'proc-1,conn-2']
+                })
+            );
+        });
+    });
+
+    describe('deselectAllComponents$', () => {
+        it('should dispatch navigateWithoutTransform with base canvas URL', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(of(deselectAllComponents()));
+
+            const action = await firstValueFrom(effects.deselectAllComponents$);
+            expect(action).toEqual(
+                navigateWithoutTransform({
+                    url: ['/connectors', 'conn-1', 'canvas', 'pg-root']
+                })
+            );
+        });
+    });
+
+    describe('navigateWithoutTransform$', () => {
+        it('should call router.navigate with replaceUrl', async () => {
+            const { effects, actions$, mockRouter } = await setup();
+            const url = ['/connectors', 'conn-1', 'canvas', 'pg-root', 'Processor', 'proc-1'];
+            actions$(of(navigateWithoutTransform({ url })));
+
+            await firstValueFrom(effects.navigateWithoutTransform$);
+            expect(mockRouter.navigate).toHaveBeenCalledWith(url, { replaceUrl: true });
+        });
+    });
+
+    describe('viewComponentConfiguration$', () => {
+        const baseEntity = makeProcessor('comp-1', {
+            component: makeProcessorDto({ id: 'comp-1', name: 'My Component' })
+        });
+
+        async function dispatchView(componentType: ComponentType, entity: ConnectorCanvasComponentEntity = baseEntity) {
+            const { effects, actions$, mockDialog } = await setup();
+            actions$(of(viewComponentConfiguration({ request: { entity, componentType } })));
+            await firstValueFrom(effects.viewComponentConfiguration$);
+            return { mockDialog };
+        }
+
+        it('opens the processor dialog with read-only permissions and the entity uri', async () => {
+            const { mockDialog } = await dispatchView(ComponentType.Processor);
+            expect(mockDialog.open).toHaveBeenCalledTimes(1);
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.Processor);
+            expect(config.data.uri).toBe(baseEntity.uri);
+            expect(config.data.entity.permissions.canWrite).toBe(false);
+            expect(config.data.entity.permissions.canRead).toBe(true);
+            expect(config.data.entity.operatePermissions.canWrite).toBe(false);
+            expect(config.data.entity.operatePermissions.canRead).toBe(true);
+            expect(config.id).toBe(baseEntity.id);
+        });
+
+        it('opens the connection dialog with the breadcrumbs observable wired', async () => {
+            const { effects, actions$, mockDialog } = await setup();
+            const componentInstance: Record<string, unknown> = {};
+            (mockDialog.open as Mock).mockReturnValue({ componentInstance });
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Connection }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.Connection);
+            expect(componentInstance['breadcrumbs$']).toBeDefined();
+            expect(componentInstance['availablePrioritizers$']).toBeDefined();
+            expect(componentInstance['getChildInputPorts']).toBeInstanceOf(Function);
+            expect(componentInstance['getChildOutputPorts']).toBeInstanceOf(Function);
+        });
+
+        it('opens the input port dialog with read-only permissions', async () => {
+            const { mockDialog } = await dispatchView(ComponentType.InputPort);
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.InputPort);
+            expect(config.data.entity.permissions.canWrite).toBe(false);
+        });
+
+        it('opens the output port dialog with read-only permissions', async () => {
+            const { mockDialog } = await dispatchView(ComponentType.OutputPort);
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.OutputPort);
+            expect(config.data.entity.permissions.canWrite).toBe(false);
+        });
+
+        it('opens the label dialog with read-only permissions', async () => {
+            const { mockDialog } = await dispatchView(ComponentType.Label);
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.Label);
+            expect(config.data.entity.permissions.canWrite).toBe(false);
+        });
+
+        it('opens the process group dialog with the current user observable wired', async () => {
+            const { effects, actions$, mockDialog } = await setup();
+            const componentInstance: Record<string, unknown> = {};
+            (mockDialog.open as Mock).mockReturnValue({ componentInstance });
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.ProcessGroup }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.ProcessGroup);
+            expect(componentInstance['currentUser$']).toBeDefined();
+            expect(componentInstance['parameterContexts']).toEqual([]);
+        });
+
+        it('opens the remote process group dialog with read-only permissions', async () => {
+            const { mockDialog } = await dispatchView(ComponentType.RemoteProcessGroup);
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.type).toBe(ComponentType.RemoteProcessGroup);
+            expect(config.data.entity.permissions.canWrite).toBe(false);
+        });
+
+        it('does not open a dialog for unsupported component types', async () => {
+            const { mockDialog } = await dispatchView(ComponentType.Funnel);
+            expect(mockDialog.open).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            ['connection', ComponentType.Connection, makeConnectionEntity('comp-1')],
+            ['label', ComponentType.Label, makeLabel('comp-1', { component: makeLabelDto({ id: 'comp-1' }) })],
+            ['process group', ComponentType.ProcessGroup, makeProcessGroup('comp-1')],
+            // Funnel has no configuration dialog, so the processor dialog carries the entity.
+            ['funnel', ComponentType.Processor, makeFunnel('comp-1')]
+        ] as const)('does not fabricate operatePermissions on a %s', async (_kind, componentType, entity) => {
+            const { mockDialog } = await dispatchView(componentType, entity);
+            const [, config] = (mockDialog.open as Mock).mock.calls[0];
+            expect(config.data.entity.operatePermissions).toBeUndefined();
+            expect(config.data.entity.permissions.canWrite).toBe(false);
+        });
+
+        it('wires parameter context onto the EditProcessor dialog when one is bound', async () => {
+            const parameterContext = createParameterContextFixture({
+                component: { id: 'pc-1', name: 'Bound PC', parameters: [] }
+            });
+            const { effects, actions$, mockDialogRef } = await setup({ parameterContext });
+
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Processor }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            expect(mockDialogRef.componentInstance.parameterContext).toBe(parameterContext);
+            // Read-only mode in nifi-frontend deliberately does NOT set supportsParameters
+            // on EditProcessor (EditProcessor lacks that input). Pin this behavior.
+            expect(mockDialogRef.componentInstance.supportsParameters).toBeUndefined();
+            // The property table hides "Go to Parameter" when this callback is undefined,
+            // while still rendering parameter values in the value tip.
+            expect(mockDialogRef.componentInstance.goToParameter).toBeUndefined();
+        });
+
+        it('leaves parameterContext undefined on the EditProcessor dialog when no PC is bound', async () => {
+            const { effects, actions$, mockDialogRef } = await setup({ parameterContext: null });
+
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Processor }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            expect(mockDialogRef.componentInstance.parameterContext).toBeUndefined();
+            expect(mockDialogRef.componentInstance.goToParameter).toBeUndefined();
+        });
+
+        it('wires goToService to fetch via the connector-scoped API and navigate to the controller service', async () => {
+            const { effects, actions$, store, mockConnectorService, mockDialogRef } = await setup();
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+            mockConnectorService.getControllerService = vi
+                .fn()
+                .mockReturnValue(
+                    of({ id: 'svc-1', parentGroupId: 'pg-cs', component: { parentGroupId: 'pg-cs', id: 'svc-1' } })
+                );
+            mockDialogRef.close = vi.fn();
+
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Processor }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            expect(mockDialogRef.componentInstance.goToService).toBeInstanceOf(Function);
+            mockDialogRef.componentInstance.goToService('svc-1');
+
+            expect(mockConnectorService.getControllerService).toHaveBeenCalledWith('connector-1', 'svc-1');
+            expect(mockDialogRef.close).toHaveBeenCalled();
+            expect(dispatchSpy).toHaveBeenCalledWith(
+                navigateToControllerService({
+                    processGroupId: 'pg-cs',
+                    serviceId: 'svc-1'
+                })
+            );
+        });
+
+        it('dispatches a banner error when goToService fails to fetch the controller service', async () => {
+            const { effects, actions$, store, mockConnectorService, mockDialogRef, mockErrorHelper } = await setup();
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+            const errorResponse = new HttpErrorResponse({ status: 404, statusText: 'Not Found' });
+            mockConnectorService.getControllerService = vi.fn().mockReturnValue(throwError(() => errorResponse));
+
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Processor }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            mockDialogRef.componentInstance.goToService('svc-missing');
+
+            expect(mockErrorHelper.getErrorString).toHaveBeenCalledWith(errorResponse);
+            expect(dispatchSpy).toHaveBeenCalledWith(
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Error message'],
+                        context: ErrorContextKey.CONNECTOR_CANVAS
+                    }
+                })
+            );
+        });
+
+        it('dispatches a banner error when the target service has no parent group', async () => {
+            const { effects, actions$, store, mockConnectorService, mockDialogRef } = await setup();
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+            mockConnectorService.getControllerService = vi.fn().mockReturnValue(of({ id: 'svc-1' }));
+
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Processor }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            mockDialogRef.componentInstance.goToService('svc-1');
+
+            expect(dispatchSpy).toHaveBeenCalledWith(
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Unable to determine the Controller Service parent group.'],
+                        context: ErrorContextKey.CONNECTOR_CANVAS
+                    }
+                })
+            );
+            expect(dispatchSpy).not.toHaveBeenCalledWith(
+                expect.objectContaining({ type: navigateToControllerService.type })
+            );
+            expect(mockDialogRef.close).not.toHaveBeenCalled();
+        });
+
+        it('dispatches a banner error when goToService cannot resolve the connector id', async () => {
+            const { effects, actions$, store, mockConnectorService, mockDialogRef } = await setup({
+                connectorId: null
+            });
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+            mockConnectorService.getControllerService = vi.fn();
+
+            actions$(
+                of(
+                    viewComponentConfiguration({
+                        request: { entity: baseEntity, componentType: ComponentType.Processor }
+                    })
+                )
+            );
+            await firstValueFrom(effects.viewComponentConfiguration$);
+
+            mockDialogRef.componentInstance.goToService('svc-1');
+
+            expect(mockConnectorService.getControllerService).not.toHaveBeenCalled();
+            expect(dispatchSpy).toHaveBeenCalledWith(
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Unable to determine Connector id for navigation.'],
+                        context: ErrorContextKey.CONNECTOR_CANVAS
+                    }
+                })
+            );
+        });
+    });
+
+    describe('navigateToProvenanceForComponent$', () => {
+        it('should navigate to /provenance with componentId query param and back navigation state', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    navigateToProvenanceForComponent({
+                        id: 'proc-1',
+                        componentType: ComponentType.Processor
+                    })
+                )
+            );
+
+            await firstValueFrom(effects.navigateToProvenanceForComponent$);
+
+            expect(mockRouter.navigate).toHaveBeenCalledWith(['/provenance'], {
+                queryParams: { componentId: 'proc-1' },
+                state: {
+                    backNavigation: {
+                        route: ['/connectors', 'conn-1', 'canvas', 'pg-root', ComponentType.Processor, 'proc-1'],
+                        routeBoundary: ['/provenance'],
+                        context: 'Processor'
+                    }
+                }
+            });
+        });
+
+        it('should use the supplied component type in the back navigation route for a funnel', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    navigateToProvenanceForComponent({
+                        id: 'funnel-1',
+                        componentType: ComponentType.Funnel
+                    })
+                )
+            );
+
+            await firstValueFrom(effects.navigateToProvenanceForComponent$);
+
+            expect(mockRouter.navigate).toHaveBeenCalledWith(['/provenance'], {
+                queryParams: { componentId: 'funnel-1' },
+                state: {
+                    backNavigation: {
+                        route: ['/connectors', 'conn-1', 'canvas', 'pg-root', ComponentType.Funnel, 'funnel-1'],
+                        routeBoundary: ['/provenance'],
+                        context: 'Funnel'
+                    }
+                }
+            });
+        });
+    });
+
+    describe('navigateToQueueListing$', () => {
+        it('should navigate to /queue/:connectionId with back navigation to the originating connection', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(of(navigateToQueueListing({ request: { connectionId: 'conn-listing-1' } })));
+
+            await firstValueFrom(effects.navigateToQueueListing$);
+
+            expect(mockRouter.navigate).toHaveBeenCalledWith(['/queue', 'conn-listing-1'], {
+                state: {
+                    backNavigation: {
+                        route: [
+                            '/connectors',
+                            'conn-1',
+                            'canvas',
+                            'pg-root',
+                            ComponentType.Connection,
+                            'conn-listing-1'
+                        ],
+                        routeBoundary: ['/queue', 'conn-listing-1'],
+                        context: 'connection'
+                    }
+                }
+            });
+        });
+    });
+
+    describe('navigateToControllerServices$', () => {
+        it('should navigate to controller services using the supplied process group when provided', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(of(navigateToControllerServices({ processGroupId: 'pg-target' })));
+
+            await firstValueFrom(effects.navigateToControllerServices$);
+
+            expect(mockRouter.navigate).toHaveBeenCalledWith(
+                ['/connectors', 'conn-1', 'canvas', 'pg-target', 'controller-services'],
+                {
+                    state: {
+                        backNavigation: {
+                            route: ['/connectors', 'conn-1', 'canvas', 'pg-root'],
+                            routeBoundary: ['/connectors', 'conn-1', 'canvas', 'pg-target', 'controller-services'],
+                            context: 'process group'
+                        }
+                    }
+                }
+            );
+        });
+    });
+
+    describe('navigateToControllerService$', () => {
+        it('should navigate to a deep-linked controller service with back navigation to the canvas', async () => {
+            const { effects, actions$, mockRouter } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(of(navigateToControllerService({ processGroupId: 'pg-target', serviceId: 'svc-1' })));
+
+            await firstValueFrom(effects.navigateToControllerService$);
+
+            expect(mockRouter.navigate).toHaveBeenCalledWith(
+                ['/connectors', 'conn-1', 'canvas', 'pg-target', 'controller-services', 'svc-1'],
+                {
+                    state: {
+                        backNavigation: {
+                            route: ['/connectors', 'conn-1', 'canvas', 'pg-root'],
+                            routeBoundary: [
+                                '/connectors',
+                                'conn-1',
+                                'canvas',
+                                'pg-target',
+                                'controller-services',
+                                'svc-1'
+                            ],
+                            context: 'process group'
+                        }
+                    }
+                }
+            );
+        });
+    });
+
+    describe('refreshAfterQueueEmptied$', () => {
+        it('should dispatch loadConnectorFlow when the queueEmptied source is connector-canvas', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    queueEmptied({
+                        connectionId: 'conn-listing-1',
+                        processGroupId: null,
+                        source: 'connector-canvas'
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.refreshAfterQueueEmptied$);
+
+            expect(result).toEqual(
+                loadConnectorFlow({
+                    connectorId: 'conn-1',
+                    processGroupId: 'pg-root'
+                })
+            );
+        });
+
+        it('should dispatch loadConnectorFlow when all queues are emptied for a process group with connector-canvas source', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    queueEmptied({
+                        connectionId: null,
+                        processGroupId: 'pg-root',
+                        source: 'connector-canvas'
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.refreshAfterQueueEmptied$);
+
+            expect(result).toEqual(
+                loadConnectorFlow({
+                    connectorId: 'conn-1',
+                    processGroupId: 'pg-root'
+                })
+            );
+        });
+
+        it('should ignore queueEmptied events from the flow designer', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-1',
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    queueEmptied({
+                        connectionId: 'conn-listing-1',
+                        processGroupId: null,
+                        source: 'flow-designer'
+                    })
+                )
+            );
+
+            let emitted: Action | undefined;
+            effects.refreshAfterQueueEmptied$.subscribe((action) => {
+                emitted = action;
+            });
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+            expect(emitted).toBeUndefined();
+        });
+
+        it('should not dispatch when the connectorId route param is missing', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: null,
+                processGroupIdFromRoute: 'pg-root'
+            });
+            actions$(
+                of(
+                    queueEmptied({
+                        connectionId: 'conn-listing-1',
+                        processGroupId: null,
+                        source: 'connector-canvas'
+                    })
+                )
+            );
+
+            let emitted: Action | undefined;
+            effects.refreshAfterQueueEmptied$.subscribe((action) => {
+                emitted = action;
+            });
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+            expect(emitted).toBeUndefined();
+        });
+    });
+
+    describe('reloadConnectorFlow$', () => {
+        it('should dispatch loadConnectorFlow with the connector and process group ids from state', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-state',
+                processGroupId: 'pg-state'
+            });
+            actions$(of(reloadConnectorFlow()));
+
+            const action = await firstValueFrom(effects.reloadConnectorFlow$);
+            expect(action).toEqual(
+                loadConnectorFlow({
+                    connectorId: 'conn-state',
+                    processGroupId: 'pg-state'
+                })
+            );
+        });
+
+        it('should not dispatch loadConnectorFlow when the connector id is empty', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: '',
+                processGroupId: 'pg-state'
+            });
+            actions$(of(reloadConnectorFlow()));
+
+            let emitted: Action | undefined;
+            effects.reloadConnectorFlow$.subscribe((action) => {
+                emitted = action;
+            });
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+            expect(emitted).toBeUndefined();
+        });
+
+        it('should not dispatch loadConnectorFlow when the process group id is null', async () => {
+            const { effects, actions$ } = await setup({
+                connectorId: 'conn-state',
+                processGroupId: null
+            });
+            actions$(of(reloadConnectorFlow()));
+
+            let emitted: Action | undefined;
+            effects.reloadConnectorFlow$.subscribe((action) => {
+                emitted = action;
+            });
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+            expect(emitted).toBeUndefined();
+        });
+
+        describe('throttleTime', () => {
+            beforeEach(() => {
+                vi.useFakeTimers();
+            });
+
+            afterEach(() => {
+                vi.useRealTimers();
+            });
+
+            async function flushPromises(): Promise<void> {
+                await Promise.resolve();
+                await Promise.resolve();
+            }
+
+            it('should collapse rapid back-to-back reloadConnectorFlow dispatches into a single loadConnectorFlow within the throttle window', async () => {
+                const { effects, actions$ } = await setup({
+                    connectorId: 'conn-state',
+                    processGroupId: 'pg-state'
+                });
+                const actionSubject = new Subject<Action>();
+                actions$(actionSubject.asObservable());
+
+                const emitted: Action[] = [];
+                const subscription = effects.reloadConnectorFlow$.subscribe((action) => {
+                    emitted.push(action);
+                });
+
+                // Three reloadConnectorFlow dispatches inside the 1s throttle window:
+                // throttleTime defaults to leading-only, so only the first should produce
+                // a loadConnectorFlow. The remaining two are dropped.
+                actionSubject.next(reloadConnectorFlow());
+                actionSubject.next(reloadConnectorFlow());
+                actionSubject.next(reloadConnectorFlow());
+
+                await flushPromises();
+
+                expect(emitted).toEqual([
+                    loadConnectorFlow({
+                        connectorId: 'conn-state',
+                        processGroupId: 'pg-state'
+                    })
+                ]);
+
+                // After the throttle window expires the next dispatch is allowed through.
+                await vi.advanceTimersByTimeAsync(1500);
+                actionSubject.next(reloadConnectorFlow());
+                await flushPromises();
+
+                expect(emitted).toEqual([
+                    loadConnectorFlow({
+                        connectorId: 'conn-state',
+                        processGroupId: 'pg-state'
+                    }),
+                    loadConnectorFlow({
+                        connectorId: 'conn-state',
+                        processGroupId: 'pg-state'
+                    })
+                ]);
+
+                subscription.unsubscribe();
+            });
+        });
+    });
+
+    describe('document visibility wake-up', () => {
+        it('should dispatch reloadConnectorFlow when the document becomes visible after being hidden longer than the polling interval', async () => {
+            const { store } = await setup();
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+
+            // Simulate the tab being foregrounded after the polling cadence elapsed.
+            // The lastReload field starts at 0 in the freshly constructed effects, so
+            // any changedTimestamp greater than the 30 second threshold satisfies the
+            // wake-up filter.
+            store.overrideSelector(selectDocumentVisibilityState, {
+                documentVisibility: DocumentVisibility.Visible,
+                changedTimestamp: 31 * 1000
+            });
+            store.refreshState();
+
+            expect(dispatchSpy).toHaveBeenCalledWith(reloadConnectorFlow());
+        });
+
+        it('should not dispatch reloadConnectorFlow when the document becomes visible within the polling interval', async () => {
+            const { store } = await setup();
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+
+            store.overrideSelector(selectDocumentVisibilityState, {
+                documentVisibility: DocumentVisibility.Visible,
+                changedTimestamp: 5 * 1000
+            });
+            store.refreshState();
+
+            expect(dispatchSpy).not.toHaveBeenCalledWith(reloadConnectorFlow());
+        });
+
+        it('should not dispatch reloadConnectorFlow when the document transitions to hidden', async () => {
+            const { store } = await setup();
+            const dispatchSpy = vi.spyOn(store, 'dispatch');
+
+            store.overrideSelector(selectDocumentVisibilityState, {
+                documentVisibility: DocumentVisibility.Hidden,
+                changedTimestamp: 60 * 1000
+            });
+            store.refreshState();
+
+            expect(dispatchSpy).not.toHaveBeenCalledWith(reloadConnectorFlow());
+        });
+    });
+
+    describe('startConnectorCanvasPolling$', () => {
+        beforeEach(() => {
+            vi.useFakeTimers();
+        });
+
+        afterEach(() => {
+            vi.useRealTimers();
+        });
+
+        async function flushPromises(): Promise<void> {
+            await Promise.resolve();
+            await Promise.resolve();
+        }
+
+        it('should dispatch reloadConnectorFlow on each polling tick while the document is visible', async () => {
+            const { effects, actions$ } = await setup();
+            const actionSubject = new Subject<Action>();
+            actions$(actionSubject.asObservable());
+
+            const emitted: Action[] = [];
+            const subscription = effects.startConnectorCanvasPolling$.subscribe((action) => {
+                emitted.push(action);
+            });
+
+            actionSubject.next(startConnectorCanvasPolling());
+
+            await vi.advanceTimersByTimeAsync(30000);
+            await flushPromises();
+            await vi.advanceTimersByTimeAsync(30000);
+            await flushPromises();
+
+            subscription.unsubscribe();
+
+            expect(emitted).toEqual([reloadConnectorFlow(), reloadConnectorFlow()]);
+        });
+
+        it('should suppress reloadConnectorFlow while the document is hidden', async () => {
+            const { effects, actions$ } = await setup({
+                documentVisibility: DocumentVisibility.Hidden
+            });
+            const actionSubject = new Subject<Action>();
+            actions$(actionSubject.asObservable());
+
+            const emitted: Action[] = [];
+            const subscription = effects.startConnectorCanvasPolling$.subscribe((action) => {
+                emitted.push(action);
+            });
+
+            actionSubject.next(startConnectorCanvasPolling());
+
+            await vi.advanceTimersByTimeAsync(60000);
+            await flushPromises();
+
+            subscription.unsubscribe();
+
+            expect(emitted).toEqual([]);
+        });
+
+        it('should suppress reloadConnectorFlow while a load is already in flight', async () => {
+            const { effects, actions$ } = await setup({ loadingStatus: 'loading' });
+            const actionSubject = new Subject<Action>();
+            actions$(actionSubject.asObservable());
+
+            const emitted: Action[] = [];
+            const subscription = effects.startConnectorCanvasPolling$.subscribe((action) => {
+                emitted.push(action);
+            });
+
+            actionSubject.next(startConnectorCanvasPolling());
+
+            await vi.advanceTimersByTimeAsync(30000);
+            await flushPromises();
+
+            subscription.unsubscribe();
+
+            expect(emitted).toEqual([]);
+        });
+
+        it('should stop polling once stopConnectorCanvasPolling is dispatched', async () => {
+            const { effects, actions$ } = await setup();
+            const actionSubject = new Subject<Action>();
+            actions$(actionSubject.asObservable());
+
+            const emitted: Action[] = [];
+            const subscription = effects.startConnectorCanvasPolling$.subscribe((action) => {
+                emitted.push(action);
+            });
+
+            actionSubject.next(startConnectorCanvasPolling());
+
+            await vi.advanceTimersByTimeAsync(30000);
+            await flushPromises();
+            expect(emitted).toEqual([reloadConnectorFlow()]);
+
+            actionSubject.next(stopConnectorCanvasPolling());
+
+            await vi.advanceTimersByTimeAsync(60000);
+            await flushPromises();
+
+            subscription.unsubscribe();
+
+            // No additional emissions after stop.
+            expect(emitted).toEqual([reloadConnectorFlow()]);
+        });
+    });
+
+    describe('loadConnectorParameterContextOnLoadSuccess$', () => {
+        function flowSuccessAction(connectorId: string, processGroupId: string | null) {
+            return loadConnectorFlowSuccess({
+                connectorId,
+                processGroupId,
+                processGroupRevision: null,
+                parentProcessGroupId: null,
+                breadcrumb: null,
+                permissions: null,
+                labels: [],
+                funnels: [],
+                inputPorts: [],
+                outputPorts: [],
+                remoteProcessGroups: [],
+                processGroups: [],
+                processors: [],
+                connections: [],
+                reconciliationSnapshot: { addedCache: [], removedCache: [] },
+                connectedStateChanged: false
+            });
+        }
+
+        function controllerServicesSuccessAction(connectorId: string, processGroupId: string) {
+            return loadConnectorControllerServicesSuccess({
+                response: {
+                    connectorId,
+                    processGroupId,
+                    controllerServices: [],
+                    breadcrumb: null,
+                    loadedTimestamp: '2024-01-01T00:00:00.000Z'
+                }
+            });
+        }
+
+        it('should dispatch loadConnectorParameterContext scoped to CONNECTOR_CANVAS after flow load success', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(of(flowSuccessAction('connector-123', 'pg-abc')));
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$);
+            expect(result).toEqual(
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            );
+        });
+
+        it('should dispatch loadConnectorParameterContext scoped to CONTROLLER_SERVICES after controller services load success (deep link)', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(of(controllerServicesSuccessAction('connector-123', 'pg-abc')));
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$);
+            expect(result).toEqual(
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONTROLLER_SERVICES
+                })
+            );
+        });
+
+        it('should not dispatch when processGroupId is null', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(of(flowSuccessAction('connector-123', null)));
+
+            const emitted = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$.pipe(toArray()));
+
+            expect(emitted).toEqual([]);
+        });
+
+        it('should dispatch only once when polling refires loadConnectorFlowSuccess for the same process group', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(
+                of(
+                    flowSuccessAction('connector-123', 'pg-abc'),
+                    flowSuccessAction('connector-123', 'pg-abc'),
+                    flowSuccessAction('connector-123', 'pg-abc')
+                )
+            );
+
+            const emitted = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$.pipe(toArray()));
+
+            expect(emitted).toEqual([
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            ]);
+        });
+
+        it('should dedupe canvas → controller-services transition within the same process group', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(
+                of(
+                    flowSuccessAction('connector-123', 'pg-abc'),
+                    controllerServicesSuccessAction('connector-123', 'pg-abc')
+                )
+            );
+
+            const emitted = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$.pipe(toArray()));
+
+            expect(emitted).toEqual([
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            ]);
+        });
+
+        it('should dispatch again when the process group changes', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(
+                of(
+                    flowSuccessAction('connector-123', 'pg-abc'),
+                    flowSuccessAction('connector-123', 'pg-abc'),
+                    flowSuccessAction('connector-123', 'pg-xyz')
+                )
+            );
+
+            const emitted = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$.pipe(toArray()));
+
+            expect(emitted).toEqual([
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                }),
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-xyz',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            ]);
+        });
+
+        it('should dispatch again when the connector changes even if the process group id is the same', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(of(flowSuccessAction('connector-123', 'pg-abc'), flowSuccessAction('connector-456', 'pg-abc')));
+
+            const emitted = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$.pipe(toArray()));
+
+            expect(emitted).toEqual([
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                }),
+                loadConnectorParameterContext({
+                    connectorId: 'connector-456',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            ]);
+        });
+
+        it('should re-arm distinctUntilChanged after resetConnectorCanvasState so the same connector/PG can re-fetch', async () => {
+            // NgRx effects are app-singleton-scoped, so the inner distinctUntilChanged must be
+            // rebuilt when the canvas tears down (component ngOnDestroy → resetConnectorCanvasState).
+            // Without this, navigating away from a connector and back into the same one would
+            // silently suppress the parameter-context re-fetch.
+            const { effects, actions$ } = await setup();
+            actions$(
+                of(
+                    flowSuccessAction('connector-123', 'pg-abc'),
+                    resetConnectorCanvasState(),
+                    flowSuccessAction('connector-123', 'pg-abc')
+                )
+            );
+
+            const emitted = await firstValueFrom(effects.loadConnectorParameterContextOnLoadSuccess$.pipe(toArray()));
+
+            expect(emitted).toEqual([
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                }),
+                loadConnectorParameterContext({
+                    connectorId: 'connector-123',
+                    processGroupId: 'pg-abc',
+                    errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            ]);
+        });
+    });
+
+    describe('loadConnectorParameterContext$', () => {
+        const parameterContext = createParameterContextFixture();
+
+        it('should dispatch success with the parameter context returned by the service', async () => {
+            const { effects, actions$, mockConnectorService } = await setup({
+                parameterContextResponse: parameterContext
+            });
+            actions$(
+                of(
+                    loadConnectorParameterContext({
+                        connectorId: 'connector-123',
+                        processGroupId: 'pg-abc',
+                        errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContext$);
+
+            expect(mockConnectorService.getConnectorParameterContext).toHaveBeenCalledWith('connector-123', 'pg-abc');
+            expect(result).toEqual(loadConnectorParameterContextSuccess({ parameterContext }));
+        });
+
+        it('should dispatch success with null when the service returns null (HTTP 204)', async () => {
+            const { effects, actions$ } = await setup({ parameterContextResponse: null });
+            actions$(
+                of(
+                    loadConnectorParameterContext({
+                        connectorId: 'connector-123',
+                        processGroupId: 'pg-abc',
+                        errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContext$);
+            expect(result).toEqual(loadConnectorParameterContextSuccess({ parameterContext: null }));
+        });
+
+        it('should dispatch failure using the errorContext carried on the action', async () => {
+            const errorResponse = new HttpErrorResponse({ error: 'boom', status: 500, statusText: 'ISE' });
+            const { effects, actions$ } = await setup({ parameterContextError: errorResponse });
+            actions$(
+                of(
+                    loadConnectorParameterContext({
+                        connectorId: 'connector-123',
+                        processGroupId: 'pg-abc',
+                        errorContext: ErrorContextKey.CONNECTOR_CANVAS
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContext$);
+
+            expect(result).toEqual(
+                loadConnectorParameterContextFailure({
+                    errorContext: {
+                        errors: ['Error message'],
+                        context: ErrorContextKey.CONNECTOR_CANVAS
+                    }
+                })
+            );
+        });
+
+        it('should propagate CONTROLLER_SERVICES error context for CS-triggered loads', async () => {
+            const errorResponse = new HttpErrorResponse({ error: 'boom', status: 500, statusText: 'ISE' });
+            const { effects, actions$ } = await setup({ parameterContextError: errorResponse });
+            actions$(
+                of(
+                    loadConnectorParameterContext({
+                        connectorId: 'connector-123',
+                        processGroupId: 'pg-abc',
+                        errorContext: ErrorContextKey.CONTROLLER_SERVICES
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContext$);
+
+            expect(result).toEqual(
+                loadConnectorParameterContextFailure({
+                    errorContext: {
+                        errors: ['Error message'],
+                        context: ErrorContextKey.CONTROLLER_SERVICES
+                    }
+                })
+            );
+        });
+    });
+
+    describe('loadConnectorParameterContextFailure$', () => {
+        it('should dispatch addBannerError with the failure error context', async () => {
+            const { effects, actions$ } = await setup();
+            const errorContext = {
+                errors: ['Unable to load parameter context'],
+                context: ErrorContextKey.CONNECTORS
+            };
+            actions$(of(loadConnectorParameterContextFailure({ errorContext })));
+
+            const result = await firstValueFrom(effects.loadConnectorParameterContextFailure$);
+
+            expect(result).toEqual(ErrorActions.addBannerError({ errorContext }));
+        });
+    });
+
+    describe('loadConnectorFlow$ — position sanitization (NIFI-16025)', () => {
+        function makeEntity(id: string, x: number, y: number, readable = true): ProcessorEntity {
+            return makeProcessor(id, {
+                position: { x, y },
+                component: readable ? makeProcessorDto({ id, position: { x, y } }) : undefined
+            });
+        }
+
+        function makeConnectionWithBends(
+            id: string,
+            bendX: number,
+            bendY: number,
+            componentBendX = bendX,
+            componentBendY = bendY
+        ): ConnectionEntity {
+            return makeConnectionEntity(id, {
+                bends: [{ x: bendX, y: bendY }],
+                component: makeConnectionDto({ id, bends: [{ x: componentBendX, y: componentBendY }] })
+            });
+        }
+
+        function makeFlowResponse(
+            overrides: { processors?: ProcessorEntity[]; connections?: ConnectionEntity[] } = {}
+        ): ProcessGroupFlowEntity {
+            return {
+                permissions: { canRead: true, canWrite: true },
+                revision: { version: 0 },
+                processGroupFlow: {
+                    id: 'pg-123',
+                    breadcrumb: {
+                        id: 'pg-123',
+                        permissions: { canRead: true, canWrite: true },
+                        versionedFlowState: '',
+                        breadcrumb: { id: 'pg-123', name: 'Process Group' }
+                    },
+                    resolvedExecutionEngine: 'STANDARD',
+                    flow: {
+                        labels: [],
+                        funnels: [],
+                        inputPorts: [],
+                        outputPorts: [],
+                        remoteProcessGroups: [],
+                        processGroups: [],
+                        processors: overrides.processors ?? [],
+                        connections: overrides.connections ?? []
+                    }
+                }
+            };
+        }
+
+        it('passes in-bounds positions through unchanged', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const entity = makeEntity('p-1', 100, 200);
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ processors: [entity] }))
+            );
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.processors[0].position).toEqual({ x: 100, y: 200 });
+        });
+
+        it('preserves an unreadable processor without adding a component body', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const entity = makeEntity('p-unreadable', 100, 200, false);
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ processors: [entity] }))
+            );
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.processors[0].component).toBeUndefined();
+            expect(action.processors[0].position).toEqual({ x: 100, y: 200 });
+        });
+
+        it('clamps catastrophic-finite processor positions to (0, 0)', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const entity = makeEntity('p-corrupt', 7.490388061926315e307, 0);
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ processors: [entity] }))
+            );
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.processors[0].position).toEqual({ x: 0, y: 0 });
+            expect(warnSpy).toHaveBeenCalled();
+            warnSpy.mockRestore();
+        });
+
+        it('does not sanitize a nonexistent connection position', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const connection = makeConnectionWithBends('conn-valid', 100, 200, 300, 400);
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ connections: [connection] }))
+            );
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.connections[0]).not.toHaveProperty('position');
+            expect(action.connections[0].bends[0]).toEqual({ x: 100, y: 200 });
+            expect(action.connections[0].component!.bends[0]).toEqual({ x: 300, y: 400 });
+            expect(warnSpy).not.toHaveBeenCalled();
+            warnSpy.mockRestore();
+        });
+
+        it('clamps top-level and nested catastrophic-finite connection bends to (0, 0)', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const connection: ConnectionEntity & { position: Position } = {
+                ...makeConnectionWithBends('conn-bad', 9e307, 0, 0, 8e307),
+                position: { x: 7e307, y: 0 }
+            };
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ connections: [connection] }))
+            );
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.connections[0].bends[0]).toEqual({ x: 0, y: 0 });
+            expect(action.connections[0].component!.bends[0]).toEqual({ x: 0, y: 0 });
+            expect((action.connections[0] as ConnectionEntity & { position: Position }).position).toEqual({
+                x: 7e307,
+                y: 0
+            });
+            expect(warnSpy).toHaveBeenCalledTimes(1);
+            expect(warnSpy).toHaveBeenCalledWith(
+                expect.stringContaining('Component Connection bend conn-bad:bend:0 has an out-of-range position'),
+                { x: 9e307, y: 0 },
+                expect.stringContaining('falling back to (0, 0)')
+            );
+            warnSpy.mockRestore();
+        });
+
+        it('clamps entity bends on an unreadable connection and leaves component unset', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const connection = makeConnectionEntity('conn-unreadable', {
+                permissions: { canRead: false, canWrite: false },
+                bends: [{ x: 9e307, y: 0 }],
+                component: undefined
+            });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ connections: [connection] }))
+            );
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.connections[0].component).toBeUndefined();
+            expect(action.connections[0].bends[0]).toEqual({ x: 0, y: 0 });
+            expect(warnSpy).toHaveBeenCalledTimes(1);
+            warnSpy.mockRestore();
+        });
+
+        it('treats an omitted connection bends list as empty', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const { bends: _omitted, ...connectionWithoutBends } = makeConnectionEntity('conn-missing-bends', {
+                component: makeConnectionDto({ id: 'conn-missing-bends', bends: [{ x: 5, y: 6 }] })
+            });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ connections: [connectionWithoutBends as ConnectionEntity] }))
+            );
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.connections[0].bends).toEqual([]);
+            expect(action.connections[0].component!.bends[0]).toEqual({ x: 5, y: 6 });
+        });
+
+        it('treats an omitted component bends list as empty', async () => {
+            const { effects, actions$, mockConnectorService } = await setup();
+            const dto = makeConnectionDto({ id: 'conn-missing-component-bends' });
+            const { bends: _omitted, ...dtoWithoutBends } = dto;
+            const connection = makeConnectionEntity('conn-missing-component-bends', {
+                bends: [{ x: 10, y: 20 }],
+                component: dtoWithoutBends as ConnectionDTO
+            });
+            (mockConnectorService.getConnectorFlow as Mock).mockReturnValue(
+                of(makeFlowResponse({ connections: [connection] }))
+            );
+            actions$(of(loadConnectorFlow({ connectorId: 'c-1', processGroupId: 'pg-1' })));
+
+            const action = expectActionOfType(
+                await firstValueFrom(effects.loadConnectorFlow$),
+                loadConnectorFlowSuccess
+            );
+            expect(action.connections[0].bends[0]).toEqual({ x: 10, y: 20 });
+            expect(action.connections[0].component!.bends).toEqual([]);
+        });
+    });
+
+    describe('canvas mutation persistence', () => {
+        it('does not reload a stale process group when a move fails after navigation', async () => {
+            const { effects, actions$, store, mockConnectorEditService } = await setup();
+            const actionSubject = new Subject<Action>();
+            const moveSubject = new Subject<unknown>();
+            mockConnectorEditService.moveComponents.mockReturnValue(moveSubject);
+            actions$(actionSubject);
+
+            const emitted: Action[] = [];
+            const subscription = effects.moveCanvasComponents$.subscribe((action) => emitted.push(action));
+            actionSubject.next(
+                moveCanvasComponents({
+                    processGroupId: 'child-pg',
+                    targetGroupId: 'target-pg',
+                    components: [
+                        {
+                            id: 'processor-1',
+                            type: ComponentType.Processor,
+                            revision: { version: 1 }
+                        }
+                    ]
+                })
+            );
+
+            store.overrideSelector(selectConnectorId, 'connector-2');
+            store.overrideSelector(selectProcessGroupId, 'other-pg');
+            store.refreshState();
+            moveSubject.error(new HttpErrorResponse({ status: 409 }));
+
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            subscription.unsubscribe();
+
+            expect(emitted.map((action) => action.type)).toEqual([
+                '[Connector Canvas] Move Canvas Components Failure',
+                '[Error] Add Banner Error'
+            ]);
+        });
+
+        it('persists the gesture baseline revision for a single bend update', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const connection = makeConnectionEntity('connection-1', { revision: { version: 8 } });
+            mockConnectorEditService.updateComponent.mockReturnValue(of(connection));
+            actions$(
+                of(
+                    updateConnectionBendPoints({
+                        processGroupId: 'child-pg',
+                        update: {
+                            id: 'connection-1',
+                            bends: [{ x: 10, y: 20 }],
+                            revision: { version: 7, clientId: 'local-client' }
+                        }
+                    })
+                )
+            );
+
+            const result = await firstValueFrom(effects.updateConnectionBendPoints$);
+
+            expect(mockConnectorEditService.updateComponent).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    payload: expect.objectContaining({
+                        revision: { version: 7, clientId: 'local-client' }
+                    })
+                })
+            );
+            expect(result).toEqual(updateConnectionBendPointsSuccess({ connectionId: 'connection-1', connection }));
+        });
+
+        it('emits per-item outcomes and completion for bulk persistence', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const processor = makeProcessor('processor-1', { revision: { version: 4 } });
+            mockConnectorEditService.updateComponent.mockReturnValueOnce(of(processor));
+            actions$(
+                of(
+                    updateComponentPositionsBulk({
+                        processGroupId: 'child-pg',
+                        updates: [
+                            {
+                                componentId: 'processor-1',
+                                componentType: ComponentType.Processor,
+                                position: { x: 30, y: 40 },
+                                revision: { version: 3, clientId: 'local-client' }
+                            }
+                        ],
+                        delta: { x: 5, y: 5 }
+                    })
+                )
+            );
+
+            const results = await firstValueFrom(effects.updateComponentPositionsBulk$.pipe(toArray()));
+
+            expect(results).toContainEqual(
+                updateComponentPositionSuccess({
+                    componentId: 'processor-1',
+                    componentType: ComponentType.Processor,
+                    component: processor
+                })
+            );
+            expect(results.at(-1)?.type).toBe(updateComponentPositionsBulkComplete.type);
+        });
+
+        it('emits a revert action and banner on persistence failure', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.updateComponent.mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 409 }))
+            );
+            actions$(
+                of(
+                    updateConnectionBendPoints({
+                        processGroupId: 'child-pg',
+                        update: {
+                            id: 'connection-1',
+                            bends: [],
+                            revision: { version: 2, clientId: 'local-client' }
+                        }
+                    })
+                )
+            );
+
+            const results = await firstValueFrom(effects.updateConnectionBendPoints$.pipe(toArray()));
+
+            expect(results[0]).toEqual(
+                updateConnectionBendPointsFailure({ connectionId: 'connection-1', error: 'Error message' })
+            );
+            expect(results[1].type).toBe(ErrorActions.addBannerError.type);
+        });
+    });
+
+    describe('component run status', () => {
+        it('starts a component and emits the returned entity', async () => {
+            const { effects, actions$, mockFlowService } = await setup();
+            const request = {
+                id: 'proc-1',
+                type: ComponentType.Processor,
+                revision: { version: 1 },
+                errorStrategy: 'banner' as const
+            };
+            actions$(of(ConnectorCanvasActions.startComponent({ request })));
+
+            const result = await firstValueFrom(effects.startComponent$);
+
+            expect(mockFlowService.startComponent).toHaveBeenCalledWith(request);
+            expect(result.type).toBe(ConnectorCanvasActions.startComponentSuccess.type);
+        });
+
+        it('surfaces a run-status failure through the connector error context', async () => {
+            const { effects, actions$, mockFlowService } = await setup();
+            mockFlowService.startComponent.mockReturnValue(throwError(() => new HttpErrorResponse({ status: 409 })));
+            actions$(
+                of(
+                    ConnectorCanvasActions.startComponent({
+                        request: {
+                            id: 'proc-1',
+                            type: ComponentType.Processor,
+                            revision: { version: 1 },
+                            errorStrategy: 'banner'
+                        }
+                    })
+                )
+            );
+
+            const results = await firstValueFrom(effects.startComponent$.pipe(toArray()));
+
+            expect(results[0]).toEqual(
+                ConnectorCanvasActions.startComponentFailure({
+                    componentId: 'proc-1',
+                    error: 'Error message'
+                })
+            );
+            expect(results[1].type).toBe(ErrorActions.addBannerError.type);
+        });
+
+        it('stops, enables, and disables components through FlowService', async () => {
+            const { effects, actions$, mockFlowService } = await setup();
+            const request = {
+                id: 'proc-1',
+                type: ComponentType.Processor,
+                revision: { version: 1 },
+                errorStrategy: 'banner' as const
+            };
+
+            actions$(of(ConnectorCanvasActions.stopComponent({ request })));
+            expect((await firstValueFrom(effects.stopComponent$)).type).toBe(
+                ConnectorCanvasActions.stopComponentSuccess.type
+            );
+
+            actions$(of(ConnectorCanvasActions.enableComponent({ request })));
+            expect((await firstValueFrom(effects.enableComponent$)).type).toBe(
+                ConnectorCanvasActions.enableComponentSuccess.type
+            );
+
+            actions$(of(ConnectorCanvasActions.disableComponent({ request })));
+            expect((await firstValueFrom(effects.disableComponent$)).type).toBe(
+                ConnectorCanvasActions.disableComponentSuccess.type
+            );
+
+            expect(mockFlowService.stopComponent).toHaveBeenCalledWith(request);
+            expect(mockFlowService.enableComponent).toHaveBeenCalledWith(request);
+            expect(mockFlowService.disableComponent).toHaveBeenCalledWith(request);
+        });
+
+        it('runs once and terminates threads through FlowService', async () => {
+            const { effects, actions$, mockFlowService } = await setup();
+            const runOnceRequest = { id: 'proc-1', revision: { version: 1 } };
+            const terminateRequest = { id: 'proc-1', uri: '/processors/proc-1' };
+
+            actions$(of(ConnectorCanvasActions.runOnceComponent({ request: runOnceRequest })));
+            expect((await firstValueFrom(effects.runOnceComponent$)).type).toBe(
+                ConnectorCanvasActions.runOnceComponentSuccess.type
+            );
+
+            actions$(of(ConnectorCanvasActions.terminateComponentThreads({ request: terminateRequest })));
+            expect((await firstValueFrom(effects.terminateComponentThreads$)).type).toBe(
+                ConnectorCanvasActions.terminateComponentThreadsSuccess.type
+            );
+
+            expect(mockFlowService.runOnce).toHaveBeenCalledWith(runOnceRequest);
+            expect(mockFlowService.terminateThreads).toHaveBeenCalledWith(terminateRequest);
+        });
+    });
+    describe('component create', () => {
+        const baseRequest = {
+            revision: { version: 0 as const, clientId: 'client-1' },
+            position: { x: 10, y: 20 }
+        };
+
+        it.each([
+            [ComponentType.Processor, ConnectorCanvasActions.openNewProcessorDialog.type],
+            [ComponentType.InputPort, ConnectorCanvasActions.openNewPortDialog.type],
+            [ComponentType.OutputPort, ConnectorCanvasActions.openNewPortDialog.type],
+            [ComponentType.ProcessGroup, ConnectorCanvasActions.openNewProcessGroupDialog.type],
+            [ComponentType.RemoteProcessGroup, ConnectorCanvasActions.openNewRemoteProcessGroupDialog.type],
+            [ComponentType.Funnel, ConnectorCanvasActions.createFunnel.type],
+            [ComponentType.Label, ConnectorCanvasActions.createLabel.type]
+        ])('routes a %s drop to %s', async (type, expectedType) => {
+            const { effects, actions$ } = await setup();
+            actions$(of(ConnectorCanvasActions.createComponentRequest({ request: { ...baseRequest, type } })));
+
+            const action = await firstValueFrom(effects.createComponentRequest$);
+
+            expect(action.type).toBe(expectedType);
+        });
+
+        it('clears dragging when no process group is loaded', async () => {
+            const { effects, actions$, store } = await setup();
+            store.overrideSelector(selectProcessGroupId, null);
+            store.refreshState();
+            actions$(
+                of(
+                    ConnectorCanvasActions.createComponentRequest({
+                        request: { ...baseRequest, type: ComponentType.Funnel }
+                    })
+                )
+            );
+
+            const actions = await firstValueFrom(effects.createComponentRequest$.pipe(toArray()));
+
+            expect(actions).toEqual([ConnectorCanvasActions.setDragging({ dragging: false })]);
+        });
+
+        it('clears dragging and banners an unsupported component type', async () => {
+            const { effects, actions$ } = await setup();
+            actions$(
+                of(
+                    ConnectorCanvasActions.createComponentRequest({
+                        request: { ...baseRequest, type: ComponentType.Connection }
+                    })
+                )
+            );
+
+            const actions = await firstValueFrom(effects.createComponentRequest$.pipe(toArray()));
+
+            expect(actions[0]).toEqual(ConnectorCanvasActions.setDragging({ dragging: false }));
+            expect(actions[1]).toEqual(
+                ErrorActions.addBannerError({
+                    errorContext: {
+                        errors: ['Unsupported component type: Connection'],
+                        context: ErrorContextKey.CONNECTOR_CANVAS
+                    }
+                })
+            );
+        });
+
+        it('creates a processor from the processor dialog', async () => {
+            const { effects, actions$, store, mockDialog, mockDialogRef, afterClosed$ } = await setup();
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const createProcessor = new EventEmitter<unknown>();
+            mockDialogRef.componentInstance['createProcessor'] = createProcessor;
+            const request = { ...baseRequest, type: ComponentType.Processor } as const;
+            actions$(of(ConnectorCanvasActions.openNewProcessorDialog({ request: { request } })));
+
+            effects.openNewProcessorDialog$.subscribe();
+            const createRequest = {
+                ...request,
+                processorType: 'org.example.Processor',
+                processorBundle: { group: 'g', artifact: 'a', version: '1' }
+            } as const;
+            createProcessor.emit(createRequest);
+            afterClosed$.next(undefined);
+
+            expect(mockDialog.open).toHaveBeenCalledWith(
+                CreateProcessor,
+                expect.objectContaining({ data: { request } })
+            );
+            expect(dispatch).toHaveBeenCalledWith(
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: createRequest,
+                    processGroupId: 'child-pg',
+                    errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            );
+            expect(dispatch).toHaveBeenCalledWith(ConnectorCanvasActions.setDragging({ dragging: false }));
+        });
+
+        it('creates an output port from the port dialog', async () => {
+            const { effects, actions$, store, mockDialog, mockDialogRef } = await setup({ parentProcessGroupId: null });
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const createPort = new EventEmitter<unknown>();
+            mockDialogRef.componentInstance['createPort'] = createPort;
+            const request = { ...baseRequest, type: ComponentType.OutputPort } as const;
+            actions$(of(ConnectorCanvasActions.openNewPortDialog({ request })));
+
+            effects.openNewPortDialog$.subscribe();
+            const createRequest = { ...request, name: 'out', allowRemoteAccess: false } as const;
+            createPort.emit(createRequest);
+
+            expect(mockDialog.open).toHaveBeenCalledWith(CreatePort, expect.objectContaining({ data: request }));
+            expect(mockDialogRef.componentInstance['isRootProcessGroup']).toBe(true);
+            expect(dispatch).toHaveBeenCalledWith(
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: createRequest,
+                    processGroupId: 'child-pg',
+                    errorContextKey: ErrorContextKey.PORT
+                })
+            );
+        });
+
+        it('hides parameter contexts and routes create and upload from the process group dialog', async () => {
+            const { effects, actions$, store, mockDialog, mockDialogRef } = await setup();
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const createProcessGroup = new EventEmitter<unknown>();
+            const uploadProcessGroup = new EventEmitter<unknown>();
+            mockDialogRef.componentInstance['createProcessGroup'] = createProcessGroup;
+            mockDialogRef.componentInstance['uploadProcessGroup'] = uploadProcessGroup;
+            const request = { ...baseRequest, type: ComponentType.ProcessGroup } as const;
+            actions$(
+                of(ConnectorCanvasActions.openNewProcessGroupDialog({ request: { request, parameterContexts: [] } }))
+            );
+
+            effects.openNewProcessGroupDialog$.subscribe();
+            const createRequest = { ...request, name: 'Group', parameterContextId: null } as const;
+            createProcessGroup.emit(createRequest);
+            const uploadRequest = {
+                ...request,
+                name: 'Uploaded',
+                flowDefinition: new File(['{}'], 'flow.json')
+            } as const;
+            uploadProcessGroup.emit(uploadRequest);
+
+            expect(mockDialog.open).toHaveBeenCalledWith(CreateProcessGroup, expect.anything());
+            expect(mockDialogRef.componentInstance['supportsParameters']).toBe(false);
+            expect(dispatch).toHaveBeenCalledWith(
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: createRequest,
+                    processGroupId: 'child-pg',
+                    errorContextKey: ErrorContextKey.PROCESS_GROUP
+                })
+            );
+            expect(dispatch).toHaveBeenCalledWith(
+                ConnectorCanvasActions.uploadProcessGroup({ request: uploadRequest, processGroupId: 'child-pg' })
+            );
+        });
+
+        it('creates a remote process group from the remote process group dialog', async () => {
+            const { effects, actions$, store, mockDialog, mockDialogRef } = await setup();
+            const dispatch = vi.spyOn(store, 'dispatch');
+            const createRemoteProcessGroup = new EventEmitter<unknown>();
+            mockDialogRef.componentInstance['createRemoteProcessGroup'] = createRemoteProcessGroup;
+            const request = { ...baseRequest, type: ComponentType.RemoteProcessGroup } as const;
+            actions$(of(ConnectorCanvasActions.openNewRemoteProcessGroupDialog({ request })));
+
+            effects.openNewRemoteProcessGroupDialog$.subscribe();
+            const createRequest = {
+                ...request,
+                targetUris: 'https://remote/nifi',
+                transportProtocol: 'HTTP',
+                localNetworkInterface: '',
+                proxyHost: '',
+                proxyPort: '',
+                proxyUser: '',
+                proxyPassword: '',
+                communicationsTimeout: '30 sec',
+                yieldDuration: '10 sec'
+            } as const;
+            createRemoteProcessGroup.emit(createRequest);
+
+            expect(mockDialog.open).toHaveBeenCalledWith(
+                CreateRemoteProcessGroup,
+                expect.objectContaining({ data: request })
+            );
+            expect(dispatch).toHaveBeenCalledWith(
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: createRequest,
+                    processGroupId: 'child-pg',
+                    errorContextKey: ErrorContextKey.REMOTE_PROCESS_GROUP
+                })
+            );
+        });
+
+        it('creates a funnel without a dialog', async () => {
+            const { effects, actions$ } = await setup();
+            const request = { ...baseRequest, type: ComponentType.Funnel } as const;
+            actions$(of(ConnectorCanvasActions.createFunnel({ request })));
+
+            const action = await firstValueFrom(effects.createFunnel$);
+
+            expect(action).toEqual(
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: { ...request, type: ComponentType.Funnel },
+                    processGroupId: 'child-pg',
+                    errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            );
+        });
+
+        it('creates a label above the existing labels', async () => {
+            const { effects, actions$ } = await setup();
+            const request = { ...baseRequest, type: ComponentType.Label } as const;
+            actions$(of(ConnectorCanvasActions.createLabel({ request })));
+
+            const action = await firstValueFrom(effects.createLabel$);
+
+            expect(action).toEqual(
+                ConnectorCanvasActions.createCanvasComponent({
+                    request: { ...request, type: ComponentType.Label, zIndex: 3 },
+                    processGroupId: 'child-pg',
+                    errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                })
+            );
+        });
+
+        it('dispatches success with the created component', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const response = { type: ComponentType.Funnel, payload: makeFunnel('funnel-new') } as const;
+            mockConnectorEditService.createComponent.mockReturnValue(of(response));
+            const request = { ...baseRequest, type: ComponentType.Funnel } as const;
+            actions$(
+                of(
+                    ConnectorCanvasActions.createCanvasComponent({
+                        request,
+                        processGroupId: 'child-pg',
+                        errorContextKey: ErrorContextKey.CONNECTOR_CANVAS
+                    })
+                )
+            );
+
+            const action = await firstValueFrom(effects.createCanvasComponent$);
+
+            expect(mockConnectorEditService.createComponent).toHaveBeenCalledWith('child-pg', request);
+            expect(action).toEqual(ConnectorCanvasActions.createCanvasComponentSuccess({ response }));
+        });
+
+        it('routes a create failure to the request error context', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.createComponent.mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 409 }))
+            );
+            actions$(
+                of(
+                    ConnectorCanvasActions.createCanvasComponent({
+                        request: {
+                            ...baseRequest,
+                            type: ComponentType.InputPort,
+                            name: 'in',
+                            allowRemoteAccess: false
+                        },
+                        processGroupId: 'child-pg',
+                        errorContextKey: ErrorContextKey.PORT
+                    })
+                )
+            );
+
+            const actions = await firstValueFrom(effects.createCanvasComponent$.pipe(toArray()));
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.createCanvasComponentFailure({
+                    error: 'Error message',
+                    errorContextKey: ErrorContextKey.PORT
+                }),
+                ErrorActions.addBannerError({
+                    errorContext: { errors: ['Error message'], context: ErrorContextKey.PORT }
+                })
+            ]);
+        });
+
+        it('closes dialogs and selects the new component after a successful create', async () => {
+            const { effects, actions$, store, mockDialog } = await setup();
+            const dispatch = vi.spyOn(store, 'dispatch');
+            actions$(
+                of(
+                    ConnectorCanvasActions.createCanvasComponentSuccess({
+                        response: { type: ComponentType.Funnel, payload: makeFunnel('funnel-new') }
+                    })
+                )
+            );
+
+            await firstValueFrom(effects.createCanvasComponentSuccess$);
+
+            expect(mockDialog.closeAll).toHaveBeenCalled();
+            expect(dispatch).toHaveBeenCalledWith(
+                selectComponents({
+                    request: {
+                        components: [{ id: 'funnel-new', componentType: ComponentType.Funnel }]
+                    }
+                })
+            );
+        });
+
+        it.each([
+            [ErrorContextKey.CONNECTOR_CANVAS, 1],
+            [ErrorContextKey.PORT, 0]
+        ])('closes dialogs after a %s create failure %i time(s)', async (errorContextKey, closeCount) => {
+            const { effects, actions$, mockDialog } = await setup();
+            actions$(of(ConnectorCanvasActions.createCanvasComponentFailure({ error: 'boom', errorContextKey })));
+
+            effects.createCanvasComponentFailure$.subscribe();
+
+            expect(mockDialog.closeAll).toHaveBeenCalledTimes(closeCount);
+        });
+
+        it('adds an uploaded process group to the canvas', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const payload = makeProcessGroup('pg-uploaded');
+            mockConnectorEditService.uploadProcessGroup.mockReturnValue(of(payload));
+            const request = {
+                ...baseRequest,
+                type: ComponentType.ProcessGroup,
+                name: 'Uploaded',
+                flowDefinition: new File(['{}'], 'flow.json')
+            } as const;
+            actions$(of(ConnectorCanvasActions.uploadProcessGroup({ request, processGroupId: 'child-pg' })));
+
+            const actions = await firstValueFrom(effects.uploadProcessGroup$.pipe(toArray()));
+
+            const response = { type: ComponentType.ProcessGroup, payload } as const;
+            expect(mockConnectorEditService.uploadProcessGroup).toHaveBeenCalledWith('child-pg', request);
+            expect(actions).toEqual([
+                ConnectorCanvasActions.createCanvasComponentSuccess({ response }),
+                ConnectorCanvasActions.uploadProcessGroupSuccess({ response })
+            ]);
+        });
+    });
+
+    describe('component delete', () => {
+        const processor = { id: 'proc-1', type: ComponentType.Processor, revision: { version: 1, clientId: 'c' } };
+        const remoteProcessGroup = {
+            id: 'rpg-1',
+            type: ComponentType.RemoteProcessGroup,
+            revision: { version: 3, clientId: 'c' }
+        };
+
+        it('deletes a single existing remote process group directly', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.deleteComponent.mockReturnValue(of({}));
+            actions$(of(ConnectorCanvasActions.deleteSelectedComponents({ request: [remoteProcessGroup] })));
+
+            const action = await firstValueFrom(effects.deleteSelectedComponents$);
+
+            expect(mockConnectorEditService.deleteComponent).toHaveBeenCalledWith(remoteProcessGroup);
+            expect(mockConnectorEditService.deleteComponents).not.toHaveBeenCalled();
+            expect(action).toEqual(
+                ConnectorCanvasActions.deleteSelectedComponentsSuccess({
+                    ids: [{ id: 'rpg-1', type: ComponentType.RemoteProcessGroup }]
+                })
+            );
+        });
+
+        it('deletes a multi-selection through a snippet', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.deleteComponents.mockReturnValue(of({}));
+            const request = [processor, remoteProcessGroup];
+            actions$(of(ConnectorCanvasActions.deleteSelectedComponents({ request })));
+
+            await firstValueFrom(effects.deleteSelectedComponents$);
+
+            expect(mockConnectorEditService.deleteComponents).toHaveBeenCalledWith(request, 'child-pg');
+            expect(mockConnectorEditService.deleteComponent).not.toHaveBeenCalled();
+        });
+
+        it('drops a second delete while the first is in flight', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            const inFlight = new Subject<unknown>();
+            mockConnectorEditService.deleteComponent.mockReturnValue(inFlight);
+            const deleteRequest = ConnectorCanvasActions.deleteSelectedComponents({ request: [processor] });
+            actions$(of(deleteRequest, deleteRequest));
+
+            const emitted: Action[] = [];
+            const subscription = effects.deleteSelectedComponents$.subscribe((action) => emitted.push(action));
+            inFlight.next({});
+            inFlight.complete();
+            subscription.unsubscribe();
+
+            expect(mockConnectorEditService.deleteComponent).toHaveBeenCalledTimes(1);
+            expect(emitted).toEqual([
+                ConnectorCanvasActions.deleteSelectedComponentsSuccess({
+                    ids: [{ id: 'proc-1', type: ComponentType.Processor }]
+                })
+            ]);
+        });
+
+        it('reloads the endpoints of a single deleted connection', async () => {
+            const { effects, actions$, store, mockConnectorEditService } = await setup();
+            const connection = makeConnectionEntity('conn-1');
+            store.overrideSelector(selectConnections, [connection]);
+            store.refreshState();
+            mockConnectorEditService.deleteComponent.mockReturnValue(of({}));
+            actions$(
+                of(
+                    ConnectorCanvasActions.deleteSelectedComponents({
+                        request: [{ id: 'conn-1', type: ComponentType.Connection, revision: { version: 1 } }]
+                    })
+                )
+            );
+
+            const actions = await firstValueFrom(effects.deleteSelectedComponents$.pipe(toArray()));
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.deleteSelectedComponentsSuccess({
+                    ids: [{ id: 'conn-1', type: ComponentType.Connection }]
+                }),
+                ConnectorCanvasActions.loadComponentsForConnection({ connection })
+            ]);
+        });
+
+        it('banners and reloads the flow when a delete fails', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup();
+            mockConnectorEditService.deleteComponent.mockReturnValue(
+                throwError(() => new HttpErrorResponse({ status: 409 }))
+            );
+            actions$(of(ConnectorCanvasActions.deleteSelectedComponents({ request: [processor] })));
+
+            const actions = await firstValueFrom(effects.deleteSelectedComponents$.pipe(toArray()));
+
+            expect(actions).toEqual([
+                ConnectorCanvasActions.deleteSelectedComponentsFailure({ error: 'Error message' }),
+                ErrorActions.addBannerError({
+                    errorContext: { errors: ['Error message'], context: ErrorContextKey.CONNECTOR_CANVAS }
+                }),
+                ConnectorCanvasActions.loadConnectorFlow({ connectorId: 'connector-1', processGroupId: 'child-pg' })
+            ]);
+        });
+
+        it('ignores a delete before the process group is known', async () => {
+            const { effects, actions$, mockConnectorEditService } = await setup({ processGroupId: null });
+            actions$(of(ConnectorCanvasActions.deleteSelectedComponents({ request: [processor] })));
+
+            const actions = await firstValueFrom(effects.deleteSelectedComponents$.pipe(toArray()));
+
+            expect(actions).toEqual([]);
+            expect(mockConnectorEditService.deleteComponent).not.toHaveBeenCalled();
+        });
+    });
+});

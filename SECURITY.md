@@ -39,10 +39,8 @@ While researching, we'd like to ask you to refrain from:
 
 ## Reporting Methods
 
-NiFi accepts reports in multiple ways:
-
-* Send an email to [security@nifi.apache.org](mailto:security@nifi.apache.org). This is a private list monitored by the [PMC](https://nifi.apache.org/people.html). For sensitive disclosures, the GPG key fingerprint is *1230 3BB8 1F22 E11C 8725 926A AFF2 B368 23B9 44E9*.
-* NiFi has a [HackerOne](https://hackerone.com/apache_nifi) project page. HackerOne provides a triaged process for researchers and organizations to collaboratively report and resolve security vulnerabilities.
+* NiFi Security Mailing List: [security@nifi.apache.org](mailto:security@nifi.apache.org)
+  * Members of the [Project Management Committee](https://nifi.apache.org/people.html) monitor this private mailing list and respond to disclosures
 
 ## Publishing
 
@@ -52,3 +50,9 @@ Apache NiFi follows the [ASF Project Security For Committers](https://www.apache
 * The [Apache NiFi Security Page](https://nifi.apache.org/security.html)
 
 Thank you for helping keep Apache NiFi and our users safe!
+
+## Threat Model
+
+What the project treats as in scope and out of scope, the security
+properties it provides and disclaims, the adversary model, and how
+findings are triaged are documented in the project [Security Model](https://nifi.apache.org/documentation/security/#security-model).

@@ -16,16 +16,17 @@
  */
 package org.apache.nifi.toolkit.cli.impl.command.nifi.registry;
 
+import org.apache.commons.cli.MissingOptionException;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.toolkit.cli.api.CommandException;
 import org.apache.nifi.toolkit.cli.api.Context;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClientException;
 import org.apache.nifi.toolkit.cli.impl.command.CommandOption;
 import org.apache.nifi.toolkit.cli.impl.command.nifi.AbstractNiFiCommand;
 import org.apache.nifi.toolkit.cli.impl.result.nifi.RegistryClientIDResult;
-import org.apache.nifi.web.api.dto.RegistryDTO;
-import org.apache.nifi.web.api.entity.RegistryClientsEntity;
+import org.apache.nifi.toolkit.client.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.web.api.dto.FlowRegistryClientDTO;
+import org.apache.nifi.web.api.entity.FlowRegistryClientsEntity;
 
 import java.io.IOException;
 import java.util.Properties;
@@ -41,44 +42,25 @@ public class GetRegistryClientId extends AbstractNiFiCommand<RegistryClientIDRes
 
     @Override
     public String getDescription() {
-        return "Returns the id of the first registry client found with the given name or url. " +
-                "Only one of name or url can be specified.";
+        return "Returns the id of the first registry client found with the given name.";
     }
 
     @Override
     protected void doInitialize(final Context context) {
         addOption(CommandOption.REGISTRY_CLIENT_NAME.createOption());
-        addOption(CommandOption.REGISTRY_CLIENT_URL.createOption());
     }
 
     @Override
     public RegistryClientIDResult doExecute(final NiFiClient client, final Properties properties)
-            throws NiFiClientException, IOException, CommandException {
-        final String regClientName = getArg(properties, CommandOption.REGISTRY_CLIENT_NAME);
-        final String regClientUrl = getArg(properties, CommandOption.REGISTRY_CLIENT_URL);
-
-        if (!StringUtils.isBlank(regClientName) && !StringUtils.isBlank(regClientUrl)) {
-            throw new CommandException("Name and URL cannot be specified at the same time");
-        }
-
-        if (StringUtils.isBlank(regClientName) && StringUtils.isBlank(regClientUrl)) {
-            throw new CommandException("Name or URL must be specified");
-        }
-
-        final RegistryClientsEntity registries = client.getControllerClient().getRegistryClients();
-
-        RegistryDTO registry;
+            throws NiFiClientException, IOException, CommandException, MissingOptionException {
+        final String regClientName = getRequiredArg(properties, CommandOption.REGISTRY_CLIENT_NAME);
+        final FlowRegistryClientsEntity registries = client.getControllerClient().getRegistryClients();
+        FlowRegistryClientDTO registry = null;
 
         if (!StringUtils.isBlank(regClientName)) {
             registry = registries.getRegistries().stream()
                     .map(r -> r.getComponent())
                     .filter(r -> r.getName().equalsIgnoreCase(regClientName.trim()))
-                    .findFirst()
-                    .orElse(null);
-        } else {
-            registry = registries.getRegistries().stream()
-                    .map(r -> r.getComponent())
-                    .filter(r -> r.getUri().equalsIgnoreCase(regClientUrl.trim()))
                     .findFirst()
                     .orElse(null);
         }

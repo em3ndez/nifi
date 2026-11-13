@@ -18,8 +18,11 @@
 package org.apache.nifi.serialization.record.type;
 
 import org.apache.nifi.serialization.record.DataType;
+import org.apache.nifi.serialization.record.RecordFieldRemovalPath;
 import org.apache.nifi.serialization.record.RecordFieldType;
+import org.apache.nifi.serialization.record.RecordSchema;
 
+import java.util.List;
 import java.util.Objects;
 
 public class MapDataType extends DataType {
@@ -53,11 +56,30 @@ public class MapDataType extends DataType {
     }
 
     @Override
+    public void removePath(final RecordFieldRemovalPath path) {
+        if (path.length() == 0) {
+            return;
+        }
+        getValueType().removePath(path.tail());
+    }
+
+    @Override
+    public boolean isRecursive(final List<RecordSchema> schemas) {
+        // allow for null valueType during scheme inference
+        return getValueType() != null && getValueType().isRecursive(schemas);
+    }
+
+    @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof MapDataType)) return false;
-        if (!super.equals(o)) return false;
-        MapDataType that = (MapDataType) o;
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof final MapDataType that)) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
         return valuesNullable == that.valuesNullable
                 && Objects.equals(getValueType(), that.getValueType());
     }

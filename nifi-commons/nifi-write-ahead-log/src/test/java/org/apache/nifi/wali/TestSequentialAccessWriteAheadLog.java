@@ -17,15 +17,16 @@
 
 package org.apache.nifi.wali;
 
-import org.junit.Assert;
-import org.junit.Ignore;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TestName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.wali.DummyRecord;
 import org.wali.DummyRecordSerde;
 import org.wali.SerDeFactory;
 import org.wali.SingletonSerDeFactory;
+import org.wali.SyncListener;
 import org.wali.UpdateType;
 import org.wali.WriteAheadRepository;
 
@@ -35,6 +36,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.text.NumberFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -42,23 +44,25 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestSequentialAccessWriteAheadLog {
-    @Rule
-    public TestName testName = new TestName();
 
+    private static final Logger logger = LoggerFactory.getLogger(TestSequentialAccessWriteAheadLog.class);
 
     @Test
-    public void testUpdateWithExternalFile() throws IOException {
+    public void testUpdateWithExternalFile(TestInfo testInfo) throws IOException {
         final DummyRecordSerde serde = new DummyRecordSerde();
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(serde);
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo, serde);
 
         final List<DummyRecord> records = new ArrayList<>();
         for (int i = 0; i < 350_000; i++) {
@@ -71,7 +75,7 @@ public class TestSequentialAccessWriteAheadLog {
 
         assertEquals(1, serde.getExternalFileReferences().size());
 
-        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo();
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
         final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
 
         // ensure that we get the same records back, but the order may be different, so wrap both collections
@@ -80,9 +84,9 @@ public class TestSequentialAccessWriteAheadLog {
     }
 
     @Test
-    public void testUpdateWithExternalFileFollowedByInlineUpdate() throws IOException {
+    public void testUpdateWithExternalFileFollowedByInlineUpdate(TestInfo testInfo) throws IOException {
         final DummyRecordSerde serde = new DummyRecordSerde();
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(serde);
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo, serde);
 
         final List<DummyRecord> records = new ArrayList<>();
         for (int i = 0; i < 350_000; i++) {
@@ -98,7 +102,7 @@ public class TestSequentialAccessWriteAheadLog {
 
         assertEquals(1, serde.getExternalFileReferences().size());
 
-        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo();
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
         final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
 
         // ensure that we get the same records back, but the order may be different, so wrap both collections
@@ -109,8 +113,8 @@ public class TestSequentialAccessWriteAheadLog {
     }
 
     @Test
-    public void testRecoverWithNoCheckpoint() throws IOException {
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo();
+    public void testRecoverWithNoCheckpoint(TestInfo testInfo) throws IOException {
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo);
 
         final List<DummyRecord> records = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
@@ -121,7 +125,7 @@ public class TestSequentialAccessWriteAheadLog {
         repo.update(records, false);
         repo.shutdown();
 
-        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo();
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
         final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
 
         // ensure that we get the same records back, but the order may be different, so wrap both collections
@@ -130,8 +134,8 @@ public class TestSequentialAccessWriteAheadLog {
     }
 
     @Test
-    public void testRecoverWithNoJournalUpdates() throws IOException {
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo();
+    public void testRecoverWithNoJournalUpdates(TestInfo testInfo) throws IOException {
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo);
 
         final List<DummyRecord> records = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
@@ -143,7 +147,7 @@ public class TestSequentialAccessWriteAheadLog {
         repo.checkpoint();
         repo.shutdown();
 
-        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo();
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
         final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
 
         // ensure that we get the same records back, but the order may be different, so wrap both collections
@@ -152,8 +156,8 @@ public class TestSequentialAccessWriteAheadLog {
     }
 
     @Test
-    public void testRecoverWithMultipleCheckpointsBetweenJournalUpdate() throws IOException {
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo();
+    public void testRecoverWithMultipleCheckpointsBetweenJournalUpdate(TestInfo testInfo) throws IOException {
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo);
 
         final List<DummyRecord> records = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
@@ -173,7 +177,7 @@ public class TestSequentialAccessWriteAheadLog {
 
         repo.shutdown();
 
-        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo();
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
         final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
 
         // what we expect is the same as what we updated with, except we don't want the DummyRecord for CREATE 4
@@ -187,29 +191,34 @@ public class TestSequentialAccessWriteAheadLog {
         assertEquals(expected, new HashSet<>(recovered));
     }
 
-    private SequentialAccessWriteAheadLog<DummyRecord> createRecoveryRepo() throws IOException {
-        final File targetDir = new File("target");
-        final File storageDir = new File(targetDir, testName.getMethodName());
-
+    private SequentialAccessWriteAheadLog<DummyRecord> createRecoveryRepo(TestInfo testInfo) throws IOException {
         final DummyRecordSerde serde = new DummyRecordSerde();
         final SerDeFactory<DummyRecord> serdeFactory = new SingletonSerDeFactory<>(serde);
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = new SequentialAccessWriteAheadLog<>(storageDir, serdeFactory);
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = new SequentialAccessWriteAheadLog<>(getStorageDirectory(testInfo), serdeFactory);
 
         return repo;
     }
 
-    private SequentialAccessWriteAheadLog<DummyRecord> createWriteRepo() throws IOException {
-        return createWriteRepo(new DummyRecordSerde());
+    private SequentialAccessWriteAheadLog<DummyRecord> createWriteRepo(TestInfo testInfo) throws IOException {
+        return createWriteRepo(testInfo, new DummyRecordSerde());
     }
 
-    private SequentialAccessWriteAheadLog<DummyRecord> createWriteRepo(final DummyRecordSerde serde) throws IOException {
-        final File targetDir = new File("target");
-        final File storageDir = new File(targetDir, testName.getMethodName());
+    private SequentialAccessWriteAheadLog<DummyRecord> createWriteRepo(final TestInfo testInfo, final DummyRecordSerde serde) throws IOException {
+        return createWriteRepo(testInfo, serde, null);
+    }
+
+    private SequentialAccessWriteAheadLog<DummyRecord> createWriteRepo(final TestInfo testInfo, final DummyRecordSerde serde, final Long maxJournalBytes) throws IOException {
+        return createWriteRepo(testInfo, serde, maxJournalBytes, SyncListener.NOP_SYNC_LISTENER);
+    }
+
+    private SequentialAccessWriteAheadLog<DummyRecord> createWriteRepo(final TestInfo testInfo, final DummyRecordSerde serde, final Long maxJournalBytes,
+            final SyncListener syncListener) throws IOException {
+        final File storageDir = getStorageDirectory(testInfo);
         deleteRecursively(storageDir);
         assertTrue(storageDir.mkdirs());
 
         final SerDeFactory<DummyRecord> serdeFactory = new SingletonSerDeFactory<>(serde);
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = new SequentialAccessWriteAheadLog<>(storageDir, serdeFactory);
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = new SequentialAccessWriteAheadLog<>(storageDir, serdeFactory, syncListener, maxJournalBytes);
 
         final Collection<DummyRecord> recovered = repo.recoverRecords();
         assertNotNull(recovered);
@@ -218,14 +227,112 @@ public class TestSequentialAccessWriteAheadLog {
         return repo;
     }
 
+    private File getStorageDirectory(final TestInfo testInfo) {
+        return new File("target", testInfo.getTestMethod().get().getName());
+    }
+
+    private List<File> getJournalFiles(final TestInfo testInfo) {
+        final File[] journalFiles = new File(getStorageDirectory(testInfo), "journals").listFiles(file -> file.getName().endsWith(".journal"));
+        assertNotNull(journalFiles);
+
+        return Arrays.asList(journalFiles);
+    }
+
+    @Test
+    public void testMaximumJournalSizeMustBePositive() {
+        final SerDeFactory<DummyRecord> serdeFactory = new SingletonSerDeFactory<>(new DummyRecordSerde());
+        final File storageDir = new File("target", "testMaximumJournalSizeMustBePositive");
+
+        assertThrows(IllegalArgumentException.class, () -> new SequentialAccessWriteAheadLog<>(storageDir, serdeFactory, SyncListener.NOP_SYNC_LISTENER, 0L));
+        assertThrows(IllegalArgumentException.class, () -> new SequentialAccessWriteAheadLog<>(storageDir, serdeFactory, SyncListener.NOP_SYNC_LISTENER, -1L));
+    }
+
+    @Test
+    public void testJournalRolledOverWhenMaximumJournalSizeReached(final TestInfo testInfo) throws IOException {
+        // Determine how much storage the journal consumes for its header and for a single-record update, so that the maximum journal
+        // size can be set to a value that is reached by a known number of updates.
+        final SequentialAccessWriteAheadLog<DummyRecord> sizingRepo = createWriteRepo(testInfo);
+        final File sizingJournalFile = getJournalFiles(testInfo).getFirst();
+        final long headerBytes = sizingJournalFile.length();
+        sizingRepo.update(Collections.singleton(new DummyRecord("0", UpdateType.CREATE)), false);
+        final long updateBytes = sizingJournalFile.length() - headerBytes;
+        sizingRepo.shutdown();
+
+        final int updatesPerJournal = 3;
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo, new DummyRecordSerde(), headerBytes + updatesPerJournal * updateBytes);
+        final File firstJournalFile = getJournalFiles(testInfo).getFirst();
+
+        for (int i = 0; i < updatesPerJournal - 1; i++) {
+            repo.update(Collections.singleton(new DummyRecord(String.valueOf(i), UpdateType.CREATE)), false);
+            assertEquals(List.of(firstJournalFile), getJournalFiles(testInfo));
+        }
+
+        repo.update(Collections.singleton(new DummyRecord(String.valueOf(updatesPerJournal - 1), UpdateType.CREATE)), false);
+
+        final List<File> rolledOverJournalFiles = getJournalFiles(testInfo);
+        assertEquals(1, rolledOverJournalFiles.size());
+
+        final File secondJournalFile = rolledOverJournalFiles.getFirst();
+        assertNotEquals(firstJournalFile, secondJournalFile);
+        assertFalse(firstJournalFile.exists());
+        assertEquals(headerBytes, secondJournalFile.length());
+
+        repo.shutdown();
+
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
+        final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
+        assertEquals(updatesPerJournal, recovered.size());
+        recoveryRepo.shutdown();
+    }
+
+    @Test
+    public void testUpdateSucceedsWhenAutomaticCheckpointFails(final TestInfo testInfo) throws IOException {
+        final SequentialAccessWriteAheadLog<DummyRecord> sizingRepo = createWriteRepo(testInfo);
+        final File sizingJournalFile = getJournalFiles(testInfo).getFirst();
+        final long headerBytes = sizingJournalFile.length();
+        sizingRepo.update(Collections.singleton(new DummyRecord("0", UpdateType.CREATE)), false);
+        final long updateBytes = sizingJournalFile.length() - headerBytes;
+        sizingRepo.shutdown();
+
+        final AtomicBoolean failCheckpoint = new AtomicBoolean(false);
+        final SyncListener failingCheckpointListener = new SyncListener() {
+            @Override
+            public void onSync(final int partitionIndex) {
+            }
+
+            @Override
+            public void onGlobalSync() {
+                if (failCheckpoint.get()) {
+                    throw new RuntimeException("Injected checkpoint failure");
+                }
+            }
+        };
+
+        final int updatesPerJournal = 3;
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo, new DummyRecordSerde(), headerBytes + updatesPerJournal * updateBytes, failingCheckpointListener);
+        failCheckpoint.set(true);
+
+        for (int i = 0; i < updatesPerJournal; i++) {
+            repo.update(Collections.singleton(new DummyRecord(String.valueOf(i), UpdateType.CREATE)), false);
+        }
+
+        repo.shutdown();
+
+        failCheckpoint.set(false);
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
+        final Collection<DummyRecord> recovered = recoveryRepo.recoverRecords();
+        assertEquals(updatesPerJournal, recovered.size());
+        recoveryRepo.shutdown();
+    }
+
     /**
      * This test is designed to update the repository in several different wants, testing CREATE, UPDATE, SWAP IN, SWAP OUT, and DELETE
      * update types, as well as testing updates with single records and with multiple records in a transaction. It also verifies that we
      * are able to checkpoint, then update journals, and then recover updates to both the checkpoint and the journals.
      */
     @Test
-    public void testUpdateThenRecover() throws IOException {
-        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo();
+    public void testUpdateThenRecover(TestInfo testInfo) throws IOException {
+        final SequentialAccessWriteAheadLog<DummyRecord> repo = createWriteRepo(testInfo);
 
         final DummyRecord firstCreate = new DummyRecord("0", UpdateType.CREATE);
         repo.update(Collections.singleton(firstCreate), false);
@@ -276,7 +383,7 @@ public class TestSequentialAccessWriteAheadLog {
 
         repo.shutdown();
 
-        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo();
+        final SequentialAccessWriteAheadLog<DummyRecord> recoveryRepo = createRecoveryRepo(testInfo);
         final Collection<DummyRecord> recoveredRecords = recoveryRepo.recoverRecords();
 
         // We should now have records:
@@ -307,9 +414,8 @@ public class TestSequentialAccessWriteAheadLog {
         recoveryRepo.shutdown();
     }
 
-
     @Test
-    @Ignore("For manual performance testing")
+    @EnabledIfSystemProperty(named = "nifi.test.performance", matches = "true", disabledReason = "For manual performance testing")
     public void testUpdatePerformance() throws IOException, InterruptedException {
         final Path path = Paths.get("target/sequential-access-repo");
         deleteRecursively(path.toFile());
@@ -332,24 +438,16 @@ public class TestSequentialAccessWriteAheadLog {
 
         for (int j = 0; j < 2; j++) {
             for (int i = 0; i < numThreads; i++) {
-                final Thread t = new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        final List<DummyRecord> batch = new ArrayList<>();
-                        for (int i = 0; i < updateCountPerThread / batchSize; i++) {
-                            batch.clear();
-                            for (int j = 0; j < batchSize; j++) {
-                                final DummyRecord record = new DummyRecord(String.valueOf(i), UpdateType.CREATE);
-                                batch.add(record);
-                            }
-
-                            try {
-                                repo.update(batch, false);
-                            } catch (Throwable t) {
-                                t.printStackTrace();
-                                Assert.fail(t.toString());
-                            }
+                final Thread t = new Thread(() -> {
+                    final List<DummyRecord> batch = new ArrayList<>();
+                    for (int i1 = 0; i1 < updateCountPerThread / batchSize; i1++) {
+                        batch.clear();
+                        for (int j1 = 0; j1 < batchSize; j1++) {
+                            final DummyRecord record = new DummyRecord(String.valueOf(i1), UpdateType.CREATE);
+                            batch.add(record);
                         }
+
+                        assertThrows(Throwable.class, () -> repo.update(batch, false));
                     }
                 });
 
@@ -379,11 +477,11 @@ public class TestSequentialAccessWriteAheadLog {
             final String bps = NumberFormat.getInstance().format(bytesPerSecond);
 
             if (j == 0) {
-                System.out.println(millis + " ms to insert " + updateCountPerThread * numThreads + " updates using " + numThreads
-                    + " threads, *as a warmup!*  " + eps + " events per second, " + bps + " bytes per second");
+                logger.info("{} ms to insert {} updates using {} threads, *as a warmup!* {} events per second, {} bytes per second",
+                        millis, updateCountPerThread * numThreads, numThreads, eps, bps);
             } else {
-                System.out.println(millis + " ms to insert " + updateCountPerThread * numThreads + " updates using " + numThreads
-                    + " threads, " + eps + " events per second, " + bps + " bytes per second");
+                logger.info("{} ms to insert {} updates using {} threads, {} events per second, {} bytes per second",
+                        millis, updateCountPerThread * numThreads, numThreads, eps, bps);
             }
         }
     }

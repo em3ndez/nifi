@@ -16,30 +16,29 @@
  */
 package org.apache.nifi.toolkit.cli.impl.result.nifi;
 
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.ResultType;
 import org.apache.nifi.toolkit.cli.impl.result.AbstractWritableResult;
-import org.apache.nifi.web.api.dto.RegistryDTO;
+import org.apache.nifi.web.api.dto.FlowRegistryClientDTO;
 
 import java.io.PrintStream;
+import java.util.Objects;
 
-public class RegistryClientIDResult extends AbstractWritableResult<RegistryDTO> {
+public class RegistryClientIDResult extends AbstractWritableResult<FlowRegistryClientDTO> {
 
-    private final RegistryDTO registryDTO;
+    private final FlowRegistryClientDTO flowRegistryClientDTO;
 
-    public RegistryClientIDResult(final ResultType resultType, final RegistryDTO registryDTO) {
+    public RegistryClientIDResult(final ResultType resultType, final FlowRegistryClientDTO flowRegistryClientDTO) {
         super(resultType);
-        this.registryDTO = registryDTO;
-        Validate.notNull(this.registryDTO);
+        this.flowRegistryClientDTO = Objects.requireNonNull(flowRegistryClientDTO);
     }
 
     @Override
     protected void writeSimpleResult(final PrintStream output) {
-        output.println(registryDTO.getId());
+        output.println(flowRegistryClientDTO.getId());
     }
 
     @Override
-    public RegistryDTO getResult() {
-        return registryDTO;
+    public FlowRegistryClientDTO getResult() {
+        return flowRegistryClientDTO;
     }
 }

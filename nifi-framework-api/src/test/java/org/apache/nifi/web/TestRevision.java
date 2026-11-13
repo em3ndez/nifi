@@ -16,30 +16,31 @@
  */
 package org.apache.nifi.web;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  *
  */
 public class TestRevision {
 
-    @Test(expected = IllegalArgumentException.class)
-    public void testNullVersion() throws Exception {
-        new Revision(null, "client-id", "component-id");
-    }
-
-    @Test(expected = IllegalArgumentException.class)
-    public void testNullComponentId() throws Exception {
-        new Revision(0l, "client-id", null);
+    @Test
+    public void testNullVersion() {
+        assertThrows(IllegalArgumentException.class, () -> new Revision(null, "client-id", "component-id"));
     }
 
     @Test
-    public void testIncrementRevision() throws Exception {
+    public void testNullComponentId() {
+        assertThrows(IllegalArgumentException.class, () -> new Revision(0L, "client-id", null));
+    }
+
+    @Test
+    public void testIncrementRevision() {
         final String clientId = "client-id";
         final String componentId = "component-id";
-        final Revision revision = new Revision(0l, clientId, componentId);
+        final Revision revision = new Revision(0L, clientId, componentId);
         final Revision updatedRevision = revision.incrementRevision(clientId);
         assertEquals(1, updatedRevision.getVersion().longValue());
         assertEquals(clientId, updatedRevision.getClientId());
@@ -47,11 +48,11 @@ public class TestRevision {
     }
 
     @Test
-    public void testIncrementRevisionNewClient() throws Exception {
+    public void testIncrementRevisionNewClient() {
         final String clientId = "client-id";
         final String newClientId = "new-client-id";
         final String componentId = "component-id";
-        final Revision revision = new Revision(0l, clientId, componentId);
+        final Revision revision = new Revision(0L, clientId, componentId);
         final Revision updatedRevision = revision.incrementRevision(newClientId);
         assertEquals(1, updatedRevision.getVersion().longValue());
         assertEquals(newClientId, updatedRevision.getClientId());

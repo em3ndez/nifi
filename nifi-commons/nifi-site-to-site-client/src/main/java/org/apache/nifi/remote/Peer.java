@@ -16,12 +16,12 @@
  */
 package org.apache.nifi.remote;
 
+import org.apache.nifi.remote.protocol.CommunicationsSession;
+
 import java.io.IOException;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
-
-import org.apache.nifi.remote.protocol.CommunicationsSession;
 
 public class Peer implements Communicant {
 
@@ -117,11 +117,10 @@ public class Peer implements Communicant {
         if (obj == this) {
             return true;
         }
-        if (!(obj instanceof Peer)) {
+        if (!(obj instanceof final Peer other)) {
             return false;
         }
 
-        final Peer other = (Peer) obj;
         return this.url.equals(other.url);
     }
 

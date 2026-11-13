@@ -16,17 +16,302 @@
  */
 package org.apache.nifi.tests.system.parameters;
 
-import org.apache.nifi.tests.system.SpawnedClusterNiFiInstanceFactory;
 import org.apache.nifi.tests.system.NiFiInstanceFactory;
+import org.apache.nifi.toolkit.client.NiFiClientException;
+import org.apache.nifi.util.file.FileUtils;
+import org.apache.nifi.web.api.entity.AssetEntity;
+import org.apache.nifi.web.api.entity.AssetsEntity;
+import org.apache.nifi.web.api.entity.ConnectionEntity;
+import org.apache.nifi.web.api.entity.ControllerServiceEntity;
+import org.apache.nifi.web.api.entity.ControllerServicesEntity;
+import org.apache.nifi.web.api.entity.ParameterContextEntity;
+import org.apache.nifi.web.api.entity.ParameterContextUpdateRequestEntity;
+import org.apache.nifi.web.api.entity.ProcessorEntity;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Repeats all tests in ParameterContextIT but in a clustered mode
  */
 public class ClusteredParameterContextIT extends ParameterContextIT {
+    private static final Logger logger = LoggerFactory.getLogger(ClusteredParameterContextIT.class);
+
     @Override
-    protected NiFiInstanceFactory getInstanceFactory() {
-        return new SpawnedClusterNiFiInstanceFactory(
-            "src/test/resources/conf/clustered/node1/bootstrap.conf",
-            "src/test/resources/conf/clustered/node2/bootstrap.conf");
+    public NiFiInstanceFactory getInstanceFactory() {
+        return createTwoNodeInstanceFactory();
+    }
+
+    @Test
+    public void testSynchronizeAssets() throws NiFiClientException, IOException, InterruptedException {
+        waitForAllNodesConnected();
+
+        final Map<String, String> paramValues = Map.of("name", "foo", "fileToIngest", "", "anotherFileToIngest", "");
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testSynchronizeAssets", paramValues);
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", paramContext);
+
+        // Create a Processor and update it to reference Parameter "name"
+        final ProcessorEntity ingest = getClientUtil().createProcessor("IngestFile");
+        getClientUtil().updateProcessorProperties(ingest, Map.of("Filename", "#{fileToIngest}", "Delete File", "false"));
+        getClientUtil().updateProcessorSchedulingPeriod(ingest, "10 mins");
+
+        // Create an asset and update both parameters to reference the same asset
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetFile);
+
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("fileToIngest", List.of(asset.getAsset().getId()), "anotherFileToIngest", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+        final ConnectionEntity connection = getClientUtil().createConnection(ingest, terminate, "success");
+        waitForValidProcessor(ingest.getId());
+
+        getClientUtil().startProcessor(ingest);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+        final String contents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertEquals("Hello, World!", contents);
+
+        // Check that the file exists in the assets directory.
+        final File node1Dir = getNiFiInstance().getNodeInstance(1).getInstanceDirectory();
+        final File node1AssetsDir = new File(node1Dir, "assets");
+        final File node1ContextDir = new File(node1AssetsDir, paramContext.getId());
+        assertTrue(node1ContextDir.exists());
+
+        final File node2Dir = getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2AssetsDir = new File(node2Dir, "assets");
+        final File node2ContextDir = new File(node2AssetsDir, paramContext.getId());
+        assertTrue(node2ContextDir.exists());
+
+        // List assets and verify the expected asset is returned
+        final AssetsEntity assetListing = assertAssetListing(paramContext.getId(), 1);
+        assertAssetExists(asset, assetListing);
+
+        // Stop node2
+        disconnectNode(2);
+        getNiFiInstance().getNodeInstance(2).stop();
+
+        // Delete node2's assets
+        FileUtils.deleteFilesInDir(node2AssetsDir, (dir, name) -> true, null, true, true);
+        assertTrue(node2AssetsDir.delete());
+        assertFalse(node2AssetsDir.exists());
+
+        // Start node2 again
+        getNiFiInstance().getNodeInstance(2).start(true);
+        reconnectNode(2);
+        waitForAllNodesConnected();
+
+        // Verify node2 asset directories are back
+        assertTrue(node2AssetsDir.exists());
+        assertTrue(node2ContextDir.exists());
+
+        final File[] node2AssetFiles = node2ContextDir.listFiles();
+        assertNotNull(node2AssetFiles);
+        assertEquals(1, node2AssetFiles.length);
+
+        // Ensure ingest processor is valid
+        waitForValidProcessor(ingest.getId());
+
+        getClientUtil().stopProcessor(ingest);
+        getClientUtil().waitForStoppedProcessor(ingest.getId());
+    }
+
+    @Test
+    public void testSynchronizeAssetsAfterChangingReferences() throws NiFiClientException, IOException, InterruptedException {
+        waitForAllNodesConnected();
+
+        final Map<String, String> paramValues = Map.of("name", "foo", "filesToIngest", "");
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testSynchronizeAssetsAfterChangingReferences", paramValues);
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", paramContext);
+
+        // Create a Processor and update it to reference Parameter "name"
+        final ProcessorEntity generateFlowFile = getClientUtil().createProcessor("GenerateFlowFile");
+        getClientUtil().updateProcessorProperties(generateFlowFile, Map.of("Text", "#{filesToIngest}"));
+        getClientUtil().updateProcessorSchedulingPeriod(generateFlowFile, "10 mins");
+
+        // Create two assets and update the parameter to reference the assets
+        final AssetEntity asset1 = createAsset(paramContext.getId(), new File("src/test/resources/sample-assets/helloworld.txt"));
+        final AssetEntity asset2 = createAsset(paramContext.getId(), new File("src/test/resources/sample-assets/helloworld2.txt"));
+        final List<String> assetIds = List.of(asset1.getAsset().getId(), asset2.getAsset().getId());
+
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(paramContext, Map.of("filesToIngest", assetIds));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Connect the Generate processor to a Terminate processor and generate FlowFiles
+        final ProcessorEntity terminate = getClientUtil().createProcessor("TerminateFlowFile");
+        final ConnectionEntity connection = getClientUtil().createConnection(generateFlowFile, terminate, "success");
+        waitForValidProcessor(generateFlowFile.getId());
+
+        getClientUtil().startProcessor(generateFlowFile);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+
+        // Verify FlowFiles reference both assets
+        final String flowFileContents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertTrue(flowFileContents.contains(asset1.getAsset().getName()));
+        assertTrue(flowFileContents.contains(asset2.getAsset().getName()));
+
+        // Verify the contents of the assets directory for each node
+        final File node1Dir = getNiFiInstance().getNodeInstance(1).getInstanceDirectory();
+        final File node1AssetsDir = new File(node1Dir, "assets");
+        final File node1ContextDir = new File(node1AssetsDir, paramContext.getId());
+        assertTrue(node1ContextDir.exists());
+
+        final File node2Dir = getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2AssetsDir = new File(node2Dir, "assets");
+        final File node2ContextDir = new File(node2AssetsDir, paramContext.getId());
+        assertTrue(node2ContextDir.exists());
+
+        // List assets and verify the expected asset is returned
+        final AssetsEntity assetListing = assertAssetListing(paramContext.getId(), 2);
+        assertAssetExists(asset1, assetListing);
+
+        // Stop node2
+        disconnectNode(2);
+        getNiFiInstance().getNodeInstance(2).stop();
+
+        // Delete node2's assets
+        FileUtils.deleteFilesInDir(node2AssetsDir, (dir, name) -> true, null, true, true);
+        assertTrue(node2AssetsDir.delete());
+        assertFalse(node2AssetsDir.exists());
+
+        // Modify the parameter context on node1 to only reference asset1
+        final ParameterContextEntity retrievedContext = getNifiClient().getParamContextClient().getParamContext(paramContext.getId(), false);
+        final ParameterContextUpdateRequestEntity changeAssetsUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                retrievedContext, Map.of("filesToIngest", List.of(asset1.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), changeAssetsUpdateRequest.getRequest().getRequestId());
+
+        // Start node2 again
+        getNiFiInstance().getNodeInstance(2).start(true);
+        reconnectNode(2);
+        waitForAllNodesConnected();
+
+        // Verify node2 asset directories are back
+        assertTrue(node2AssetsDir.exists());
+        assertTrue(node2ContextDir.exists());
+
+        // Stop generate processor and clear queue
+        getClientUtil().stopProcessor(generateFlowFile);
+        getClientUtil().waitForStoppedProcessor(generateFlowFile.getId());
+
+        getClientUtil().startProcessor(terminate);
+        waitForQueueCount(connection.getId(), 0);
+
+        getClientUtil().stopProcessor(terminate);
+        getClientUtil().waitForStoppedProcessor(terminate.getId());
+
+        // Start generate again
+        getClientUtil().startProcessor(generateFlowFile);
+        waitForQueueCount(connection.getId(), getNumberOfNodes());
+
+        // Verify FlowFiles only reference the first asset
+        final String flowFile1Contents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 0);
+        assertTrue(flowFile1Contents.contains(asset1.getAsset().getName()));
+        assertFalse(flowFile1Contents.contains(asset2.getAsset().getName()));
+
+        final String flowFile2Contents = getClientUtil().getFlowFileContentAsUtf8(connection.getId(), 1);
+        assertTrue(flowFile2Contents.contains(asset1.getAsset().getName()));
+        assertFalse(flowFile2Contents.contains(asset2.getAsset().getName()));
+
+        getClientUtil().stopProcessor(generateFlowFile);
+        getClientUtil().waitForStoppedProcessor(generateFlowFile.getId());
+    }
+
+    @Test
+    public void testSynchronizeAssetsWithModifyClasspathService() throws NiFiClientException, IOException, InterruptedException {
+        waitForAllNodesConnected();
+
+        // Create a parameter context with one parameter
+        final Map<String, String> paramValues = Map.of("classpathResource", "");
+        final ParameterContextEntity paramContext = getClientUtil().createParameterContext("testSynchronizeAssetsWithModifyClasspathService", paramValues);
+
+        // Set the Parameter Context on the root Process Group
+        setParameterContext("root", paramContext);
+
+        // Create an asset and update the parameter to reference the asset
+        final File assetFile = new File("src/test/resources/sample-assets/helloworld.txt");
+        final AssetEntity asset = createAsset(paramContext.getId(), assetFile);
+
+        final ParameterContextUpdateRequestEntity referenceAssetUpdateRequest = getClientUtil().updateParameterAssetReferences(
+                paramContext, Map.of("classpathResource", List.of(asset.getAsset().getId())));
+        getClientUtil().waitForParameterContextRequestToComplete(paramContext.getId(), referenceAssetUpdateRequest.getRequest().getRequestId());
+
+        // Stop node2 so we can set up the flow on node1 first
+        logger.info("Disconnecting node 2");
+        disconnectNode(2);
+        getNiFiInstance().getNodeInstance(2).stop();
+
+        // Delete node2's assets directory to ensure it's empty
+        final File node2Dir = getNiFiInstance().getNodeInstance(2).getInstanceDirectory();
+        final File node2AssetsDir = new File(node2Dir, "assets");
+        if (node2AssetsDir.exists()) {
+            FileUtils.deleteFilesInDir(node2AssetsDir, (dir, name) -> true, null, true, true);
+            assertTrue(node2AssetsDir.delete());
+        }
+        assertFalse(node2AssetsDir.exists());
+
+        // Create an instance of ModifyClasspathService and use the parameter as the value of the Resources property
+        final ControllerServiceEntity modifyClasspathService = getClientUtil().createControllerService("ModifyClasspathService");
+        getClientUtil().updateControllerServiceProperties(modifyClasspathService, Map.of("Resources", "#{classpathResource}"));
+
+        // Enable the service
+        final ControllerServiceEntity serviceToEnable = getNifiClient().getControllerServicesClient().getControllerService(modifyClasspathService.getId());
+        getClientUtil().enableControllerService(serviceToEnable);
+
+        // Wait for the service to be enabled and verify its state
+        getClientUtil().waitForControllerServiceState("root", "ENABLED", List.of(modifyClasspathService.getId()));
+        assertControllerServiceEnabled(modifyClasspathService.getId());
+
+        logger.info("Starting node 2...");
+
+        // Start node2
+        getNiFiInstance().getNodeInstance(2).start(true);
+        //reconnectNode(2);
+        waitForAllNodesConnected();
+
+        // Verify node2 asset directories are recreated
+        assertTrue(node2AssetsDir.exists());
+        final File node2ContextDir = new File(node2AssetsDir, paramContext.getId());
+        assertTrue(node2ContextDir.exists());
+
+        final File[] node2AssetFiles = node2ContextDir.listFiles();
+        assertNotNull(node2AssetFiles);
+        assertEquals(1, node2AssetFiles.length);
+
+        logger.info("Verifying controller service is still ENABLED...");
+
+        // Verify the controller service is still ENABLED after node2 joins
+        getClientUtil().waitForControllerServiceState("root", "ENABLED", List.of(modifyClasspathService.getId()));
+        assertControllerServiceEnabled(modifyClasspathService.getId());
+
+        logger.info("Starting clean up...");
+
+        // Clean up - disable the service
+        final ControllerServiceEntity serviceToDisable = getNifiClient().getControllerServicesClient().getControllerService(modifyClasspathService.getId());
+        getClientUtil().disableControllerService(serviceToDisable);
+        getClientUtil().waitForControllerServiceState("root", "DISABLED", List.of(modifyClasspathService.getId()));
+    }
+
+    private void assertControllerServiceEnabled(final String serviceId) throws NiFiClientException, IOException {
+        final ControllerServicesEntity servicesEntity = getNifiClient().getFlowClient().getControllerServices("root");
+        final ControllerServiceEntity service = servicesEntity.getControllerServices().stream()
+                .filter(s -> s.getId().equals(serviceId))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(service, "Controller service not found: " + serviceId);
+        assertEquals("ENABLED", service.getComponent().getState(), "Controller service should be ENABLED");
     }
 }

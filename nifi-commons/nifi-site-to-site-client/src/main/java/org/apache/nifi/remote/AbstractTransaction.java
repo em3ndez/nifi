@@ -16,12 +16,10 @@
  */
 package org.apache.nifi.remote;
 
-import org.apache.nifi.events.EventReporter;
 import org.apache.nifi.remote.codec.FlowFileCodec;
 import org.apache.nifi.remote.exception.ProtocolException;
 import org.apache.nifi.remote.io.CompressionInputStream;
 import org.apache.nifi.remote.io.CompressionOutputStream;
-import org.apache.nifi.remote.protocol.CommunicationsSession;
 import org.apache.nifi.remote.protocol.DataPacket;
 import org.apache.nifi.remote.protocol.Response;
 import org.apache.nifi.remote.protocol.ResponseCode;
@@ -48,7 +46,7 @@ public abstract class AbstractTransaction implements Transaction {
     private final CRC32 crc = new CRC32();
     private final boolean compress;
     protected final FlowFileCodec codec;
-    protected final EventReporter eventReporter;
+    protected final SiteToSiteEventReporter eventReporter;
     protected final int protocolVersion;
     private final int penaltyMillis;
     protected final String destinationId;
@@ -59,7 +57,7 @@ public abstract class AbstractTransaction implements Transaction {
     private long contentBytes = 0;
 
     public AbstractTransaction(final Peer peer, final TransferDirection direction, final boolean useCompression,
-                               final FlowFileCodec codec, final EventReporter eventReporter, final int protocolVersion,
+                               final FlowFileCodec codec, final SiteToSiteEventReporter eventReporter, final int protocolVersion,
                                final int penaltyMillis, final String destinationId) {
         this.peer = peer;
         this.state = TransactionState.TRANSACTION_STARTED;
@@ -166,12 +164,17 @@ public abstract class AbstractTransaction implements Transaction {
         }
     }
 
-    abstract protected Response readTransactionResponse() throws IOException;
+    protected abstract Response readTransactionResponse() throws IOException;
 
     protected final void writeTransactionResponse(ResponseCode response) throws IOException {
         writeTransactionResponse(response, null);
     }
-    abstract protected void writeTransactionResponse(ResponseCode response, String explanation) throws IOException;
+
+    protected void writeTransactionResponse(ResponseCode response, String explanation) throws IOException {
+        writeTransactionResponse(response, explanation, true);
+    }
+
+    protected abstract void writeTransactionResponse(ResponseCode response, String explanation, boolean flush) throws IOException;
 
     @Override
     public final void confirm() throws IOException {
@@ -188,7 +191,6 @@ public abstract class AbstractTransaction implements Transaction {
                             + "; Transaction can only be confirmed when state is " + TransactionState.DATA_EXCHANGED);
                 }
 
-                final CommunicationsSession commsSession = peer.getCommunicationsSession();
                 if (direction == TransferDirection.RECEIVE) {
                     if (dataAvailable) {
                         throw new IllegalStateException("Cannot complete transaction because the sender has already sent more data than client has consumed.");
@@ -357,7 +359,7 @@ public abstract class AbstractTransaction implements Transaction {
                 }
 
                 if (transfers > 0) {
-                    writeTransactionResponse(ResponseCode.CONTINUE_TRANSACTION);
+                    writeTransactionResponse(ResponseCode.CONTINUE_TRANSACTION, null, false);
                 }
 
                 logger.debug("{} Sending data to {}", this, peer);

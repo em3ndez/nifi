@@ -1,0 +1,211 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { createFeatureSelector, createSelector } from '@ngrx/store';
+import { ComponentType, ConnectionEntity, Position, selectRouteParams } from '@nifi/shared';
+import { SelectionTarget } from '../../../../ui/common/canvas/utils/selection.utils';
+import { ConnectorCanvasState, connectorCanvasFeatureKey } from './index';
+
+export const selectConnectorCanvasState = createFeatureSelector<ConnectorCanvasState>(connectorCanvasFeatureKey);
+
+// Route selectors - pattern: /connectors/:id/canvas/:processGroupId
+export const selectConnectorIdFromRoute = createSelector(selectRouteParams, (params) => {
+    return params?.['id'] ?? null;
+});
+
+export const selectProcessGroupIdFromRoute = createSelector(selectRouteParams, (params) => {
+    return params?.['processGroupId'] ?? null;
+});
+
+// Flow data selectors
+export const selectLabels = createSelector(selectConnectorCanvasState, (state) => state.labels);
+
+export const selectProcessors = createSelector(selectConnectorCanvasState, (state) => state.processors);
+
+export const selectFunnels = createSelector(selectConnectorCanvasState, (state) => state.funnels);
+
+export const selectInputPorts = createSelector(selectConnectorCanvasState, (state) => state.inputPorts);
+
+export const selectOutputPorts = createSelector(selectConnectorCanvasState, (state) => state.outputPorts);
+
+export const selectAllPorts = createSelector(selectInputPorts, selectOutputPorts, (inputPorts, outputPorts) => [
+    ...inputPorts,
+    ...outputPorts
+]);
+
+export const selectRemoteProcessGroups = createSelector(
+    selectConnectorCanvasState,
+    (state) => state.remoteProcessGroups
+);
+
+export const selectProcessGroups = createSelector(selectConnectorCanvasState, (state) => state.processGroups);
+
+export const selectConnections = createSelector(selectConnectorCanvasState, (state) =>
+    // Deep copy connections to prevent state mutation
+    state.connections.map((conn: ConnectionEntity) => ({
+        ...conn,
+        bends: conn.bends ? [...conn.bends.map((bend: Position) => ({ ...bend }))] : []
+    }))
+);
+
+export const selectMaxConnectionZIndex = createSelector(selectConnectorCanvasState, (state) =>
+    state.connections.reduce((max, connection) => Math.max(max, connection.zIndex ?? 0), 0)
+);
+
+export const selectMaxLabelZIndex = createSelector(selectConnectorCanvasState, (state) =>
+    state.labels.reduce((max, label) => Math.max(max, label.zIndex ?? 0), 0)
+);
+
+export const selectConnectorId = createSelector(selectConnectorCanvasState, (state) => state.connectorId);
+
+export const selectProcessGroupId = createSelector(selectConnectorCanvasState, (state) => state.processGroupId);
+
+export const selectProcessGroupRevision = createSelector(
+    selectConnectorCanvasState,
+    (state) => state.processGroupRevision
+);
+
+export const selectParentProcessGroupId = createSelector(
+    selectConnectorCanvasState,
+    (state) => state.parentProcessGroupId
+);
+
+export const selectLoadingStatus = createSelector(selectConnectorCanvasState, (state) => state.loadingStatus);
+
+export const selectHasLoadedFlow = createSelector(selectConnectorCanvasState, (state) => state.hasLoadedFlow);
+
+export const selectOptimisticCacheSnapshot = createSelector(selectConnectorCanvasState, (state) => ({
+    addedCache: state.addedCache,
+    removedCache: state.removedCache
+}));
+
+export const selectPendingAuthoritativeSnapshot = createSelector(
+    selectConnectorCanvasState,
+    (state) => state.pendingAuthoritativeSnapshot
+);
+
+export const selectError = createSelector(selectConnectorCanvasState, (state) => state.error);
+
+export const selectSaving = createSelector(selectConnectorCanvasState, (state) => state.saving);
+
+/**
+ * Flow-level permissions for the current process group, from
+ * `ProcessGroupFlowEntity.permissions` on `loadConnectorFlowSuccess`.
+ */
+export const selectConnectorCanvasPermissions = createSelector(
+    selectConnectorCanvasState,
+    (state) => state.permissions
+);
+
+/** True while the user is dragging a palette chip toward the canvas. */
+export const selectConnectorCanvasDragging = createSelector(selectConnectorCanvasState, (state) => state.dragging);
+
+export const selectRegistryClients = createSelector(selectConnectorCanvasState, (state) => state.registryClients);
+
+export const selectBreadcrumbs = createSelector(selectConnectorCanvasState, (state) => state.breadcrumb);
+
+export const selectSkipTransform = createSelector(selectConnectorCanvasState, (state) => state.skipTransform);
+
+export const selectConnectorParameterContext = createSelector(
+    selectConnectorCanvasState,
+    (state) => state.parameterContext
+);
+
+// Entity-by-id factory selectors for provenance eligibility checks
+export const selectProcessor = (id: string) =>
+    createSelector(selectProcessors, (processors) => processors.find((processor) => processor.id === id));
+
+export const selectInputPort = (id: string) =>
+    createSelector(selectInputPorts, (ports) => ports.find((port) => port.id === id));
+
+export const selectOutputPort = (id: string) =>
+    createSelector(selectOutputPorts, (ports) => ports.find((port) => port.id === id));
+
+export const selectConnection = (id: string) =>
+    createSelector(selectConnections, (connections) => connections.find((connection) => connection.id === id));
+
+export const selectRemoteProcessGroup = (id: string) =>
+    createSelector(selectRemoteProcessGroups, (remoteProcessGroups) =>
+        remoteProcessGroups.find((remoteProcessGroup) => remoteProcessGroup.id === id)
+    );
+
+export const selectProcessGroup = (id: string) =>
+    createSelector(selectProcessGroups, (processGroups) =>
+        processGroups.find((processGroup) => processGroup.id === id)
+    );
+
+export const selectFunnel = (id: string) =>
+    createSelector(selectFunnels, (funnels) => funnels.find((funnel) => funnel.id === id));
+
+export const selectConnectorCanvasSelectedComponents = createSelector(
+    selectRouteParams,
+    selectProcessors,
+    selectInputPorts,
+    selectOutputPorts,
+    selectProcessGroups,
+    selectRemoteProcessGroups,
+    selectFunnels,
+    selectLabels,
+    selectConnections,
+    (
+        params,
+        processors,
+        inputPorts,
+        outputPorts,
+        processGroups,
+        remoteProcessGroups,
+        funnels,
+        labels,
+        connections
+    ): SelectionTarget[] => {
+        if (!params) {
+            return [];
+        }
+
+        let ids: string[];
+        if (params['type'] && params['componentId']) {
+            ids = [params['componentId']];
+        } else if (params['ids']) {
+            ids = (params['ids'] as string).split(',').filter(Boolean);
+        } else {
+            return [];
+        }
+
+        const byId = new Map<string, SelectionTarget>();
+        processors.forEach((entity) => byId.set(entity.id, { entity, ui: { componentType: ComponentType.Processor } }));
+        inputPorts.forEach((entity) => byId.set(entity.id, { entity, ui: { componentType: ComponentType.InputPort } }));
+        outputPorts.forEach((entity) =>
+            byId.set(entity.id, { entity, ui: { componentType: ComponentType.OutputPort } })
+        );
+        processGroups.forEach((entity) =>
+            byId.set(entity.id, { entity, ui: { componentType: ComponentType.ProcessGroup } })
+        );
+        remoteProcessGroups.forEach((entity) =>
+            byId.set(entity.id, { entity, ui: { componentType: ComponentType.RemoteProcessGroup } })
+        );
+        funnels.forEach((entity) => byId.set(entity.id, { entity, ui: { componentType: ComponentType.Funnel } }));
+        labels.forEach((entity) => byId.set(entity.id, { entity, ui: { componentType: ComponentType.Label } }));
+        connections.forEach((entity) =>
+            byId.set(entity.id, { entity, ui: { componentType: ComponentType.Connection } })
+        );
+
+        return ids.flatMap((id) => {
+            const target = byId.get(id);
+            return target ? [target] : [];
+        });
+    }
+);

@@ -16,14 +16,14 @@
  */
 package org.apache.nifi.toolkit.cli.impl.context;
 
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.registry.client.NiFiRegistryClient;
 import org.apache.nifi.toolkit.cli.api.ClientFactory;
 import org.apache.nifi.toolkit.cli.api.Context;
 import org.apache.nifi.toolkit.cli.api.Session;
-import org.apache.nifi.toolkit.cli.impl.client.nifi.NiFiClient;
+import org.apache.nifi.toolkit.client.NiFiClient;
 
 import java.io.PrintStream;
+import java.util.Objects;
 
 /**
  * Context for the CLI which will be passed to each command.
@@ -37,16 +37,11 @@ public class StandardContext implements Context {
     private final boolean isInteractive;
 
     private StandardContext(final Builder builder) {
-        this.niFiClientFactory = builder.niFiClientFactory;
-        this.niFiRegistryClientFactory = builder.niFiRegistryClientFactory;
-        this.session = builder.session;
-        this.output = builder.output;
+        this.niFiClientFactory = Objects.requireNonNull(builder.niFiClientFactory);
+        this.niFiRegistryClientFactory = Objects.requireNonNull(builder.niFiRegistryClientFactory);
+        this.session = Objects.requireNonNull(builder.session);
+        this.output = Objects.requireNonNull(builder.output);
         this.isInteractive = builder.isInteractive;
-
-        Validate.notNull(this.niFiClientFactory);
-        Validate.notNull(this.niFiRegistryClientFactory);
-        Validate.notNull(this.session);
-        Validate.notNull(this.output);
     }
 
     @Override
@@ -73,7 +68,6 @@ public class StandardContext implements Context {
     public boolean isInteractive() {
         return isInteractive;
     }
-
 
     public static class Builder {
         private ClientFactory<NiFiClient> niFiClientFactory;

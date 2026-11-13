@@ -20,7 +20,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
-import com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector;
+import com.fasterxml.jackson.module.jakarta.xmlbind.JakartaXmlBindAnnotationIntrospector;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -29,9 +29,8 @@ public class JacksonUtils {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     static {
-        MAPPER.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-        MAPPER.setDefaultPropertyInclusion(JsonInclude.Value.construct(JsonInclude.Include.NON_NULL, JsonInclude.Include.NON_NULL));
-        MAPPER.setAnnotationIntrospector(new JaxbAnnotationIntrospector(MAPPER.getTypeFactory()));
+        MAPPER.setDefaultPropertyInclusion(JsonInclude.Include.NON_NULL);
+        MAPPER.setAnnotationIntrospector(new JakartaXmlBindAnnotationIntrospector(MAPPER.getTypeFactory()));
         MAPPER.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
 

@@ -24,28 +24,14 @@
             <fileMode>0664</fileMode>
             <useTransitiveFiltering>true</useTransitiveFiltering>
             <includes>
-                <include>nifi-bootstrap</include>
-                <include>slf4j-api</include>
-                <include>logback-classic</include>
-                <include>nifi-api</include>
-            </includes>
-        </dependencySet>
-
-        <!-- Write out the bootstrap libs for java11 to its own dir -->
-        <!-- TODO: remove this dependency set once minimum Java version is 11 -->
-        <dependencySet>
-            <scope>runtime</scope>
-            <useProjectArtifact>false</useProjectArtifact>
-            <outputDirectory>lib/java11</outputDirectory>
-            <directoryMode>0770</directoryMode>
-            <fileMode>0664</fileMode>
-            <useTransitiveFiltering>true</useTransitiveFiltering>
-            <includes>
-                <include>javax.xml.bind:jaxb-api</include>
-                <include>com.sun.xml.bind:jaxb-impl</include>
-                <include>com.sun.xml.bind:jaxb-core</include>
-                <include>javax.activation:javax.activation-api</include>
-                <include>javax.annotation:javax.annotation-api</include>
+                <include>*:nifi-bootstrap</include>
+                <include>*:slf4j-api</include>
+                <include>*:logback-classic</include>
+                <include>*:logback-core</include>
+                <include>*:nifi-api</include>
+                <include>*:nifi-per-process-group-logging</include>
+                <include>*:nifi-single-user-utils</include>
+                <include>*:nifi-flow-encryptor</include>
             </includes>
         </dependencySet>
 
@@ -72,7 +58,7 @@
             <fileMode>0664</fileMode>
             <useTransitiveFiltering>true</useTransitiveFiltering>
             <includes>
-                <include>nifi-resources</include>
+                <include>*:nifi-resources</include>
             </includes>
             <unpack>true</unpack>
             <unpackOptions>
@@ -92,7 +78,7 @@
             <fileMode>0770</fileMode>
             <useTransitiveFiltering>true</useTransitiveFiltering>
             <includes>
-                <include>nifi-resources</include>
+                <include>*:nifi-resources</include>
             </includes>
             <unpack>true</unpack>
             <unpackOptions>
@@ -110,7 +96,7 @@
             <outputDirectory>docs/</outputDirectory>
             <useTransitiveFiltering>true</useTransitiveFiltering>
             <includes>
-                <include>nifi-docs</include>
+                <include>*:nifi-docs</include>
             </includes>
             <unpack>true</unpack>
             <unpackOptions>
@@ -121,6 +107,62 @@
                     <exclude>NOTICE</exclude>
                 </excludes>
             </unpackOptions>
+        </dependencySet>
+
+        <!-- Write out the python framework contents -->
+        <dependencySet>
+            <scope>runtime</scope>
+            <useProjectArtifact>false</useProjectArtifact>
+            <outputDirectory>python/</outputDirectory>
+            <useStrictFiltering>true</useStrictFiltering>
+            <useTransitiveDependencies>false</useTransitiveDependencies>
+            <includes>
+                <include>*:nifi-python-framework</include>
+            </includes>
+            <unpack>true</unpack>
+            <unpackOptions>
+                <filtered>false</filtered>
+                <excludes>
+                    <!-- LICENSE and NOTICE both covered by top-level -->
+                    <exclude>LICENSE</exclude>
+                    <exclude>NOTICE</exclude>
+                    <exclude>META-INF</exclude>
+                    <exclude>META-INF/**/*</exclude>
+                </excludes>
+            </unpackOptions>
+        </dependencySet>
+
+        <!-- Write out the python api contents -->
+        <dependencySet>
+            <scope>runtime</scope>
+            <useProjectArtifact>false</useProjectArtifact>
+            <outputDirectory>python/api</outputDirectory>
+            <useStrictFiltering>true</useStrictFiltering>
+            <useTransitiveDependencies>false</useTransitiveDependencies>
+            <includes>
+                <include>*:nifi-python-extension-api</include>
+            </includes>
+            <unpack>true</unpack>
+            <unpackOptions>
+                <filtered>false</filtered>
+                <excludes>
+                    <!-- LICENSE and NOTICE both covered by top-level -->
+                    <exclude>LICENSE</exclude>
+                    <exclude>NOTICE</exclude>
+                    <exclude>META-INF</exclude>
+                    <exclude>META-INF/**/*</exclude>
+                </excludes>
+            </unpackOptions>
+        </dependencySet>
+
+        <!-- NAR bundles -->
+        <dependencySet>
+            <outputDirectory>lib</outputDirectory>
+            <useProjectArtifact>false</useProjectArtifact>
+            <useTransitiveDependencies>false</useTransitiveDependencies>
+            <includes>
+                <include>org.apache.nifi:*:nar</include>
+            </includes>
         </dependencySet>
     </dependencySets>
     <fileSets>
@@ -134,7 +176,7 @@
     </fileSets>
     <files>
         <file>
-            <source>./README.md</source>
+            <source>../README.md</source>
             <outputDirectory>./</outputDirectory>
             <destName>README</destName>
             <fileMode>0644</fileMode>

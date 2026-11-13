@@ -20,17 +20,20 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
+@Deprecated(since = "2.12.0", forRemoval = true)
 public class FlowFileUnpackagerV2 implements FlowFileUnpackager {
 
-    private final byte readBuffer[] = new byte[8192];
+    private final byte[] readBuffer = new byte[8192];
     private Map<String, String> nextAttributes = null;
     private boolean haveReadSomething = false;
 
     @Override
-    public boolean hasMoreData() throws IOException {
+    public boolean hasMoreData() {
         return nextAttributes != null || !haveReadSomething;
     }
 
@@ -41,7 +44,7 @@ public class FlowFileUnpackagerV2 implements FlowFileUnpackager {
             return null;
         }
         if (numAttributes == 0) {
-            throw new IOException("flow files cannot have zero attributes");
+            throw new IOException("FlowFiles cannot have zero attributes");
         }
         for (int i = 0; i < numAttributes; i++) { //read each attribute key/value pair
             final String key = readString(in);
@@ -77,7 +80,7 @@ public class FlowFileUnpackagerV2 implements FlowFileUnpackager {
         }
         final byte[] bytes = new byte[numBytes];
         fillBuffer(in, bytes, numBytes);
-        return new String(bytes, "UTF-8");
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
     private void fillBuffer(final InputStream in, final byte[] buffer, final int length) throws IOException {
@@ -108,14 +111,8 @@ public class FlowFileUnpackagerV2 implements FlowFileUnpackager {
 
     protected long readLong(final InputStream in) throws IOException {
         fillBuffer(in, readBuffer, 8);
-        return (((long) readBuffer[0] << 56)
-                + ((long) (readBuffer[1] & 255) << 48)
-                + ((long) (readBuffer[2] & 255) << 40)
-                + ((long) (readBuffer[3] & 255) << 32)
-                + ((long) (readBuffer[4] & 255) << 24)
-                + ((readBuffer[5] & 255) << 16)
-                + ((readBuffer[6] & 255) << 8)
-                + ((readBuffer[7] & 255)));
+        final ByteBuffer byteBuffer = ByteBuffer.wrap(readBuffer);
+        return byteBuffer.getLong();
     }
 
     private Integer readFieldLength(final InputStream in) throws IOException {

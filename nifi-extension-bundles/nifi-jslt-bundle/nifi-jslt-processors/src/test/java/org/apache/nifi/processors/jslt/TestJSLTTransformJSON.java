@@ -1,0 +1,388 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.processors.jslt;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.opentest4j.AssertionFailedError;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Stream;
+
+import static org.apache.nifi.processors.jslt.JSLTTransformJSON.TransformationStrategy.ENTIRE_FLOWFILE;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class TestJSLTTransformJSON {
+
+    private static final Path RESOURCE_DIR = Paths.get("src/test/resources");
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    @TempDir
+    private static Path tempDir;
+
+    private TestRunner runner;
+
+    @BeforeEach
+    public void setup() {
+        runner = TestRunners.newTestRunner(JSLTTransformJSON.class);
+    }
+
+    @Test
+    public void testBadInput() {
+        final String inputFlowFile = "I am not JSON";
+        final String transform = getResource("simpleTransform.json");
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.PRETTY_PRINT, Boolean.TRUE.toString());
+        runner.enqueue(inputFlowFile);
+
+        runner.run();
+
+        runner.assertTransferCount(JSLTTransformJSON.REL_SUCCESS, 0);
+        runner.assertTransferCount(JSLTTransformJSON.REL_FAILURE, 1);
+    }
+
+    @Test
+    public void testInvalidJSLTTransform() {
+        final String invalidTransform = "invalid";
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, invalidTransform);
+        runner.assertNotValid();
+    }
+
+    @Test
+    public void testMultipleLetStatementsOnDifferentLinesDoNotCollide() {
+        final String transformWithMultilines = """
+                let id = .value.id
+                let client_name = replace(.value.client_name, "-[^-]+$", ""){
+                "id": $id,
+                "name": $client_name
+                }
+                """;
+
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transformWithMultilines);
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+        final String json = """
+                {
+                    "value" : {
+                        "id" : "jdoe",
+                        "client_name": "John"
+                    }
+                }
+                """;
+        runner.enqueue(json);
+
+        runner.run();
+        runner.assertTransferCount(JSLTTransformJSON.REL_SUCCESS, 1);
+    }
+
+    @Test
+    public void testImprovedInvalidTransformReadMessage() {
+        final Path nonExistentTransformFile = tempDir.resolve("transform.json");
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, nonExistentTransformFile.toString());
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+
+        final String json = """
+                {
+                    "userId" : "jdoe",
+                    "firstName": "John"
+                }
+                """;
+        runner.enqueue(json);
+
+        final AssertionFailedError assertionFailedError = assertThrows(AssertionFailedError.class, () -> runner.run());
+        assertTrue(assertionFailedError.getMessage().contains("'JSLT Transformation' is invalid because") && assertionFailedError.getMessage().contains("file"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("singleLineCommentArgs")
+    public void testJSLTTransformWithSingleLineComment(String transform) {
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+
+        final String json = """
+                {
+                    "userId" : "jdoe",
+                    "firstName": "John"
+                }
+                """;
+        runner.enqueue(json);
+
+        runner.run();
+        runner.assertTransferCount(JSLTTransformJSON.REL_SUCCESS, 1);
+    }
+
+    private static Stream<Arguments> singleLineCommentArgs() throws IOException {
+        final String transformWithSingleLineComment = """
+                // This is a single line comment in JSLT
+                {
+                "id": .userId,
+                "name": .firstName
+                }
+                """;
+
+        final Path transformFile = tempDir.resolve("transformWithComment.json");
+        Files.writeString(transformFile, transformWithSingleLineComment);
+
+        return Stream.of(
+                Arguments.argumentSet("File", transformFile.toString()),
+                Arguments.argumentSet("Text", transformWithSingleLineComment)
+        );
+    }
+
+    @Test
+    public void testTransformFilePath() {
+        final URL transformUrl = Objects.requireNonNull(getClass().getResource("/simpleTransform.json"));
+        final String transformPath = transformUrl.getPath();
+
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transformPath);
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+        runner.setProperty(JSLTTransformJSON.PRETTY_PRINT, Boolean.TRUE.toString());
+
+        final String json = getResource("input.json");
+        runner.enqueue(json);
+
+        assertRunSuccess();
+    }
+
+    @Test
+    public void testSimpleJSLT() {
+        runTransform("input.json", "simpleTransform.json", "simpleOutput.json");
+    }
+
+    @Test
+    public void testTransform() {
+        runTransform("input.json", "dynamicKeyTransform.json", "dynamicKeyTransformOutput.json");
+    }
+
+    // This test verifies the capability of JSLT to perform a "cardinality ONE" operation (i.e. get first element if array) like JOLT has
+    @Test
+    public void testCardinality() {
+        runTransform("input.json", "cardinalityTransform.json", "cardinalityOutput.json");
+    }
+
+    @Test
+    public void testExpressionLanguageTransform() {
+        final String inputFlowFile = getResource("input.json");
+        final String transform = getResource("expressionLanguageTransform.json");
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+        runner.assertValid();
+        runner.setProperty(JSLTTransformJSON.PRETTY_PRINT, Boolean.TRUE.toString());
+        Map<String, String> attrs = new HashMap<>();
+        attrs.put("rating.range", "RatingRange");
+        attrs.put("rating.quality", ".rating.quality.value");
+        runner.enqueue(inputFlowFile, attrs);
+
+        final MockFlowFile flowFile = assertRunSuccess();
+        final String expectedOutput = getResource("simpleOutput.json");
+        assertContentEquals(flowFile, expectedOutput);
+    }
+
+    @Test
+    public void testArrayJSLT() {
+        runTransform("inputArray.json", "arrayTransform.json", "arrayOutput.json");
+    }
+
+    @Test
+    public void testArrayJSLTPerObject() {
+        final String transform = getResource("arrayTransformPerObject.json");
+        final String json = getResource("inputArray.json");
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.PRETTY_PRINT, Boolean.TRUE.toString());
+        runner.enqueue(json);
+
+        final MockFlowFile flowFile = assertRunSuccess();
+
+        final String expectedOutput = getResource("arrayOutput.json");
+        assertContentEquals(flowFile, expectedOutput);
+    }
+
+    @Test
+    public void testJSLTNoOutput() throws IOException {
+        final String input = "{\"a\":1}";
+        final String transform = ".b";
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+        runner.setProperty(JSLTTransformJSON.PRETTY_PRINT, Boolean.TRUE.toString());
+        runner.enqueue(input);
+
+        final MockFlowFile flowFile = assertRunSuccess();
+        flowFile.assertContentEquals(new byte[0]);
+    }
+
+    @Test
+    public void testTransformWithNullValueRemoved() {
+        runner.setProperty(JSLTTransformJSON.RESULT_FILTER, ". != null and . != {} and . != []");
+        runTransform("inputWithNull.json", "simpleTransform.json", "simpleOutputWithoutNull.json");
+    }
+
+    @Test
+    public void testTransformWithNullValueIncluded() {
+        runner.setProperty(JSLTTransformJSON.RESULT_FILTER, ". != {} and . != []");
+        runTransform("inputWithNull.json", "simpleTransform.json", "simpleOutputWithNull.json");
+    }
+
+    @Test
+    public void testTransformWithNoFilter() {
+        runner.setProperty(JSLTTransformJSON.RESULT_FILTER, "true");
+        runTransform("inputWithNull.json", "simpleTransform.json", "simpleOutputWithNull.json");
+    }
+
+    @ParameterizedTest
+    @MethodSource("multilineArgs")
+    public void testSimpleJSLTOnMultilineJson(String singleJsonFile, String transformFile, String expectedOutFile) throws IOException {
+        final String newLine = "\n";
+        final String singleLine = minifyJson(singleJsonFile);
+        final int numberOfLines = 3;
+        final String multilineJson = String.join(newLine, Collections.nCopies(numberOfLines, singleLine));
+        final String transform = getResource(transformFile);
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.INPUT_FORMAT, JSLTTransformJSON.InputFormat.JSON_LINES);
+        runner.enqueue(multilineJson);
+
+        runner.run();
+        runner.assertTransferCount(JSLTTransformJSON.REL_SUCCESS, 1);
+        runner.assertTransferCount(JSLTTransformJSON.REL_FAILURE, 0);
+
+        final String expectedLine = minifyJson(expectedOutFile);
+        final MockFlowFile flowFile = runner.getFlowFilesForRelationship(JSLTTransformJSON.REL_SUCCESS).getFirst();
+
+        final String[] lines = flowFile.getContent().split(newLine);
+        assertEquals(numberOfLines, lines.length);
+
+        for (String line : lines) {
+            final JsonNode actual = OBJECT_MAPPER.readTree(line);
+            final JsonNode expected = OBJECT_MAPPER.readTree(expectedLine);
+            assertEquals(expected, actual);
+        }
+    }
+
+    private static Stream<Arguments> multilineArgs() {
+        return Stream.of(
+                Arguments.argumentSet("JSON Object", "input.json", "simpleTransform.json", "simpleOutput.json"),
+                Arguments.argumentSet("JSON Array", "inputArray.json", "arrayTransform.json", "arrayOutput.json")
+        );
+    }
+
+    @Test
+    public void testJsonLinesSkipsNullTransformationResults() {
+        final String input = """
+            {"id":1,"event":"deposit","amount":10}
+            {"id":2,"event":"payment_updated","amount":10}
+            {"id":3,"event":"deposit","amount":25}
+            {"id":4,"event":"payment_updated","amount":25}
+            {"id":5,"event":"deposit","amount":40}
+            """;
+
+        runner.setProperty(JSLTTransformJSON.INPUT_FORMAT, JSLTTransformJSON.InputFormat.JSON_LINES);
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM,
+                """
+                    if (.event == "deposit") {"id": .id, "amount": .amount}""");
+
+        runner.enqueue(input);
+        runner.run();
+
+        runner.assertTransferCount(JSLTTransformJSON.REL_SUCCESS, 1);
+        runner.assertTransferCount(JSLTTransformJSON.REL_FAILURE, 0);
+
+        final MockFlowFile flowFile = runner.getFlowFilesForRelationship(JSLTTransformJSON.REL_SUCCESS).getFirst();
+        final String expectedJson = """
+                {"id":1,"amount":10}
+                {"id":3,"amount":25}
+                {"id":5,"amount":40}
+                """.trim();
+
+        assertEquals(expectedJson, flowFile.getContent());
+    }
+
+    // This test verifies transformCache cleanup does not throw an exception
+    @Test
+    public void testShutdown() {
+        runner.stop();
+    }
+
+    private void runTransform(final String inputFileName, final String transformFileName, final String outputFileName) {
+        setTransformEnqueueJson(transformFileName, inputFileName);
+
+        final MockFlowFile flowFile = assertRunSuccess();
+
+        final String expectedOutput = getResource(outputFileName);
+        assertContentEquals(flowFile, expectedOutput);
+    }
+
+    private void assertContentEquals(final MockFlowFile flowFile, final String expectedJson) {
+        try {
+            final JsonNode flowFileNode = OBJECT_MAPPER.readTree(flowFile.getContent());
+            final JsonNode expectedNode = OBJECT_MAPPER.readTree(expectedJson);
+            assertEquals(expectedNode, flowFileNode);
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private void setTransformEnqueueJson(final String transformFileName, final String jsonFileName) {
+        final String transform = getResource(transformFileName);
+        final String json = getResource(jsonFileName);
+        runner.setProperty(JSLTTransformJSON.JSLT_TRANSFORM, transform);
+        runner.setProperty(JSLTTransformJSON.TRANSFORMATION_STRATEGY, ENTIRE_FLOWFILE.getValue());
+        runner.setProperty(JSLTTransformJSON.PRETTY_PRINT, Boolean.TRUE.toString());
+        runner.enqueue(json);
+    }
+
+    private MockFlowFile assertRunSuccess() {
+        runner.run();
+        runner.assertTransferCount(JSLTTransformJSON.REL_SUCCESS, 1);
+        runner.assertTransferCount(JSLTTransformJSON.REL_FAILURE, 0);
+        return runner.getFlowFilesForRelationship(JSLTTransformJSON.REL_SUCCESS).getFirst();
+    }
+
+    private String minifyJson(final String fileName) throws IOException {
+        final String originalJson = getResource(fileName);
+        final Object jsonObject = OBJECT_MAPPER.readValue(originalJson, Object.class);
+        final String minifiedJson = OBJECT_MAPPER.writeValueAsString(jsonObject);
+
+        return minifiedJson;
+    }
+
+    private String getResource(final String fileName) {
+        final Path resource = RESOURCE_DIR.resolve(fileName);
+        try {
+            return Files.readString(resource);
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+}

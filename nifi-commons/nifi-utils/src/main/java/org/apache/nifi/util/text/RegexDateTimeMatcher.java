@@ -60,11 +60,11 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
         for (int patternsToUse = subPatterns.size() - 1; patternsToUse >= 0; patternsToUse--) {
             final StringBuilder sb = new StringBuilder();
 
-            for (int i=0; i < patternsToUse; i++) {
+            for (int i = 0; i < patternsToUse; i++) {
                 sb.append(subPatterns.get(i));
             }
 
-            final String regex = "^" + sb.toString();
+            final String regex = sb.insert(0, "^").toString();
             final Pattern pattern = Pattern.compile(regex);
             final Matcher matcher = pattern.matcher(text);
             final boolean found = matcher.find();
@@ -75,7 +75,6 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
 
         return "Could not match any part of the pattern";
     }
-
 
     public static class Compiler {
         private final List<String> patterns = new ArrayList<>();
@@ -159,20 +158,17 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
                 }
 
                 try {
-                    switch (c) {
-                        case '\'':
-                            i = copyText(format, i);
-                            break;
-                        default:
-                            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-                                if (c != lastChar) {
-                                    beginPattern(c);
-                                }
-
-                                continue;
+                    if (c == '\'') {
+                        i = copyText(format, i);
+                    } else {
+                        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+                            if (c != lastChar) {
+                                beginPattern(c);
                             }
-                            appendChar(c);
-                            break;
+
+                            continue;
+                        }
+                        appendChar(c);
                     }
                 } finally {
                     lastChar = c;
@@ -190,7 +186,6 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
             final Pattern pattern = Pattern.compile(regex);
             return new RegexDateTimeMatcher(pattern, patterns, range.getMinLength(), range.getMaxLength());
         }
-
 
         private static LengthRange lengthRange(final String[] values) {
             return new LengthRange(minLength(values), maxLength(values));
@@ -265,11 +260,11 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
 
                 return formatString.length();
             } finally {
-                if (textBuilder.length() == 0) {
+                if (textBuilder.isEmpty()) {
                     patterns.add("'");
                 } else {
                     final String text = textBuilder.toString();
-                    if (text.length() > 0) {
+                    if (!text.isEmpty()) {
                         patterns.add(Pattern.quote(textBuilder.toString()));
                     }
                 }
@@ -359,7 +354,7 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
                     addSecondInMinute();
                     break;
                 case 'S':
-                    addMillisecond();
+                    addSubsecond();
                     break;
                 case 'z':
                     addGeneralTimeZone();
@@ -384,7 +379,7 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
         }
 
         private void addShortMonth() {
-            patterns.add("(?:0[1-9]|1[0-2])");
+            patterns.add("(?:0?[1-9]|1[0-2])");
             range = range.plus(1, 2);
         }
 
@@ -468,9 +463,9 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
             range = range.plus(1, 2);
         }
 
-        private void addMillisecond() {
-            patterns.add("\\d{1,3}");
-            range = range.plus(1, 3);
+        private void addSubsecond() {
+            patterns.add("\\d{1," + charCount + "}");
+            range = range.plus(1, charCount);
         }
 
         private void addGeneralTimeZone() {
@@ -487,7 +482,7 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
         }
 
         private String getGMTOffsetTimeZone() {
-            // From SimpleDateFormat JavaDocs, GMTOffsetTimeZone defined as: GMT Sign Hours : Minutes
+            // From Date Format JavaDocs, GMTOffsetTimeZone defined as: GMT Sign Hours : Minutes
             // Sign defined as '-' or '+'
             // Hours defined as 1 or 2 digits, Minutes defined as 1 or 2 digits
             // Digit defined as number between 0-9
@@ -507,7 +502,6 @@ public class RegexDateTimeMatcher implements DateTimeMatcher {
             patterns.add("(?:Z|(?:[-+](?:\\d{2}|\\d{4}|\\d{2}\\:\\d{2})))");
             range = range.plus(1, 6);
         }
-
 
         private static class LengthRange {
             private final int min;

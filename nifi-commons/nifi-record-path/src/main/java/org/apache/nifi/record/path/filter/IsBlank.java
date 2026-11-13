@@ -24,18 +24,17 @@ import org.apache.nifi.serialization.record.util.DataTypeUtils;
 
 public class IsBlank extends FunctionFilter {
 
-
     public IsBlank(RecordPathSegment recordPath) {
         super(recordPath);
     }
 
     @Override
     protected boolean test(final FieldValue fieldValue, final RecordPathEvaluationContext context) {
-        final String fieldVal = DataTypeUtils.toString(fieldValue.getValue(), (String) null);
+        final String fieldVal = DataTypeUtils.toString(fieldValue.getValue(), null);
         if (fieldVal == null) {
             return true;
         }
 
-        return fieldVal.trim().isEmpty();
+        return fieldVal.isBlank();
     }
 }

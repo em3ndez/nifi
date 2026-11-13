@@ -26,7 +26,7 @@ import java.io.IOException;
 
 /**
  * <p>
- * A RowRecordReader is responsible for parsing data and returning a record at a time
+ * A RecordReader is responsible for parsing data and returning a record at a time
  * in order to allow the caller to iterate over the records individually.
  * </p>
  *
@@ -47,7 +47,7 @@ public interface RecordReader extends Closeable {
      * @throws SchemaValidationException if a Record contains a field that violates the schema and cannot be coerced into the appropriate field type.
      */
     default Record nextRecord() throws IOException, MalformedRecordException {
-        return nextRecord(true, false);
+        return nextRecord(true, true);
     }
 
     /**

@@ -17,10 +17,13 @@
 
 package org.apache.nifi.components.state;
 
-import java.io.IOException;
-import java.util.Map;
-
 import org.apache.nifi.components.ConfigurableComponent;
+
+import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Objects;
 
 /**
  * <p>
@@ -65,7 +68,6 @@ public interface StateProvider extends ConfigurableComponent {
      */
     void setState(Map<String, String> state, String componentId) throws IOException;
 
-
     /**
      * Returns the currently configured state for the component. The returned StateMap will never be null.
      * The version of the StateMap will be -1 and the state will contain no key/value pairs if the state has never been set.
@@ -76,7 +78,6 @@ public interface StateProvider extends ConfigurableComponent {
      * @throws IOException if unable to communicate with the underlying storage mechanism
      */
     StateMap getState(String componentId) throws IOException;
-
 
     /**
      * Updates the value of the component's state to the new value if and only if the value currently
@@ -91,6 +92,28 @@ public interface StateProvider extends ConfigurableComponent {
      * @throws IOException if unable to communicate with the underlying storage mechanism
      */
     boolean replace(StateMap oldValue, Map<String, String> newValue, String componentId) throws IOException;
+
+    /**
+     * Updates only the given keys of the component's state, leaving all other keys as they are. Each key with a non-null value is
+     * created or overwritten, and each key with a {@code null} value is removed. An empty map does nothing: no state is written and the
+     * version does not change.
+     *
+     * @param updatedState a map of state keys to their new values. A key that is mapped to {@code null} is removed from the state. The map itself must not be {@code null}.
+     * @param componentId the id of the component for which state is being updated
+     *
+     * @throws IOException if unable to communicate with the underlying storage mechanism
+     */
+    default void patchState(final Map<String, String> updatedState, final String componentId) throws IOException {
+        Objects.requireNonNull(updatedState, "Updated State required");
+        if (updatedState.isEmpty()) {
+            return;
+        }
+
+        StateMap currentState;
+        do {
+            currentState = getState(componentId);
+        } while (!replace(currentState, currentState.toMap(updatedState), componentId));
+    }
 
     /**
      * Removes all values from the component's state that is stored using the given scope
@@ -130,4 +153,23 @@ public interface StateProvider extends ConfigurableComponent {
      * @return the {@link Scope}s supported by the configuration
      */
     Scope[] getSupportedScopes();
+
+    /**
+     * Indicates whether the State Provider supports enumerating component identifiers with stored state information
+     *
+     * @return Component enumeration supported status
+     */
+    default boolean isComponentEnumerationSupported() {
+        return false;
+    }
+
+    /**
+     * Get Component Identifiers with associated state stored in the Provider
+     *
+     * @return Collection of Component Identifiers with stored state defaults to empty
+     * @throws IOException Thrown on failures to retrieve component identifiers
+     */
+    default Collection<String> getStoredComponentIds() throws IOException {
+        return Collections.emptyList();
+    }
 }

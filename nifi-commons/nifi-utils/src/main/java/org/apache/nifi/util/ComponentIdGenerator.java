@@ -16,11 +16,11 @@
  */
 package org.apache.nifi.util;
 
-import java.security.SecureRandom;
-import java.util.UUID;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.security.SecureRandom;
+import java.util.UUID;
 
 /**
  * IMPORTANT: This component is not part of public API!
@@ -56,28 +56,28 @@ public class ComponentIdGenerator {
     public static final Object lock = new Object();
 
     private static long lastTime;
-    private static long clockSequence = 0;
-    private static final SecureRandom randomGenerator = new SecureRandom();
+    private static final long CLOCK_SEQUENCE = 0;
+    private static final SecureRandom RANDOM_GENERATOR = new SecureRandom();
 
     /**
      * Will generate unique time based UUID where the next UUID is always
      * greater then the previous.
      */
-    public final static UUID generateId() {
+    public static final UUID generateId() {
         return generateId(System.currentTimeMillis());
     }
 
     /**
      *
      */
-    public final static UUID generateId(long currentTime) {
-        return generateId(currentTime, randomGenerator.nextLong(), true);
+    public static final UUID generateId(long currentTime) {
+        return generateId(currentTime, RANDOM_GENERATOR.nextLong(), true);
     }
 
     /**
      *
      */
-    public final static UUID generateId(long msb, long lsb, boolean ensureUnique) {
+    public static final UUID generateId(long msb, long lsb, boolean ensureUnique) {
         long time;
 
         synchronized (lock) {
@@ -98,7 +98,7 @@ public class ComponentIdGenerator {
         // hi Time
         time |= 0x1000 | ((msb >> 48) & 0x0FFF);
 
-        long clockSequenceHi = clockSequence;
+        long clockSequenceHi = CLOCK_SEQUENCE;
         clockSequenceHi <<= 48;
         lsb = clockSequenceHi | lsb;
         final UUID uuid = new UUID(time, lsb);

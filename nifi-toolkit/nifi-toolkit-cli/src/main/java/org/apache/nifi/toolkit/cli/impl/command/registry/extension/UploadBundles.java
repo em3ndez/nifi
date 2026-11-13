@@ -66,7 +66,7 @@ public class UploadBundles extends AbstractNiFiRegistryCommand<StringResult> {
         final String bucketId = getRequiredArg(properties, CommandOption.BUCKET_ID);
         final String bundleDir = getRequiredArg(properties, CommandOption.EXT_BUNDLE_DIR);
         final String fileExtension = getArg(properties, CommandOption.FILE_EXTENSION);
-        final boolean recursive = properties.containsKey(CommandOption.RECURSIVE);
+        final boolean recursive = properties.containsKey(CommandOption.RECURSIVE.getLongName());
         final boolean skipSha256 = properties.containsKey(CommandOption.SKIP_SHA_256.getLongName());
         final boolean verbose = isVerbose(properties);
 
@@ -74,8 +74,7 @@ public class UploadBundles extends AbstractNiFiRegistryCommand<StringResult> {
         try {
             bundleType = BundleType.fromString(getRequiredArg(properties, CommandOption.EXT_BUNDLE_TYPE));
         } catch (IllegalArgumentException e) {
-            throw new NiFiRegistryException("Invalid bundle type, should be one of "
-                    + BundleType.NIFI_NAR.toString() + " or " + BundleType.MINIFI_CPP.toString());
+            throw new NiFiRegistryException(String.format("Invalid bundle type, should be one of %s or %s", BundleType.NIFI_NAR, BundleType.MINIFI_CPP));
         }
 
         final BundleVersionClient bundleVersionClient = client.getBundleVersionClient();

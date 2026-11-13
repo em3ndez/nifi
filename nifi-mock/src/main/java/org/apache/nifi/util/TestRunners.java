@@ -28,17 +28,17 @@ public class TestRunners {
      * @return a {@code TestRunner}
      */
     public static TestRunner newTestRunner(final Processor processor) {
-        return newTestRunner(processor,processor.getClass().getName());
+        return newTestRunner(processor, processor.getClass().getName());
     }
 
     /**
      * Returns a {@code TestRunner} for the given {@code Processor} which uses the given {@code KerberosContext}.
      * @param processor the {@code Processor} under test
      * @param kerberosContext the {@code KerberosContext} used during the test
-     * @return
+     * @return a {@code TestRunner}
      */
     public static TestRunner newTestRunner(final Processor processor, KerberosContext kerberosContext) {
-        return newTestRunner(processor,processor.getClass().getName(), kerberosContext);
+        return newTestRunner(processor, processor.getClass().getName(), kerberosContext);
     }
 
     /**
@@ -49,7 +49,7 @@ public class TestRunners {
      * @return a {@code TestRunner}
      */
     public static TestRunner newTestRunner(final Processor processor, MockComponentLog logger) {
-        return newTestRunner(processor,processor.getClass().getName(), logger);
+        return newTestRunner(processor, processor.getClass().getName(), logger);
     }
 
     /**
@@ -116,7 +116,7 @@ public class TestRunners {
      */
     public static TestRunner newTestRunner(final Class<? extends Processor> processorClass, String name) {
         try {
-            return newTestRunner(processorClass.newInstance(), name);
+            return newTestRunner(processorClass.getDeclaredConstructor().newInstance(), name);
         } catch (final Exception e) {
             System.err.println("Could not instantiate instance of class " + processorClass.getName() + " due to: " + e);
             throw new RuntimeException(e);
@@ -133,7 +133,7 @@ public class TestRunners {
      */
     public static TestRunner newTestRunner(final Class<? extends Processor> processorClass, String name, MockComponentLog logger) {
         try {
-            return newTestRunner(processorClass.newInstance(), name, logger);
+            return newTestRunner(processorClass.getDeclaredConstructor().newInstance(), name, logger);
         } catch (final Exception e) {
             System.err.println("Could not instantiate instance of class " + processorClass.getName() + " due to: " + e);
             throw new RuntimeException(e);

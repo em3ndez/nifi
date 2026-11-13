@@ -18,6 +18,7 @@
 Apache NiFi Team <dev@nifi.apache.org>
 :homepage: http://nifi.apache.org
 :linkattrs:
+:imagesdir: images
 
 [[overview]]
 == Overview
@@ -38,7 +39,7 @@ reflected the name of the file on the file system. Additionally, the FlowFile wi
 have a `path` attribute that reflects the directory on the file system that this
 file lived in. The FlowFile will also have an attribute named `uuid`, which is a
 unique identifier for this FlowFile. For complete listing of the core attributes
-check out the FlowFile section of the link:developer-guide.html#flowfile[Developer's Guide].
+check out the FlowFile section of the <<developer-guide.adoc#flowfile,Developer's Guide>>.
 
 However, placing these attributes on a FlowFile do not provide much benefit
 if the user is unable to make use of them. The NiFi Expression Language provides
@@ -138,10 +139,8 @@ will search for the value.
 The current hierarchy in NiFi is as follows:
 
 1. Search FlowFile for attribute/key
-2. Search Process Group Variables for attribute/key
-3. Search File Registry file for attribute/key
-4. Search NiFi JVM Properties for attribute/key
-5. Search System Environment Variables for attribute/key
+2. Search NiFi JVM Properties for attribute/key
+3. Search System Environment Variables for attribute/key
 
 NiFi will search for, and return, the first occurrence of a matching property. If no matching property is found, `null` is returned.
 
@@ -161,17 +160,12 @@ image:iconInfo.png["Info"]
 provides helpful information about the Property. This information includes a description of the Property,
 the default value (if any), historically configured values (if any), and the evaluation scope of this
 property for expression language. There are three values and the evaluation scope of the expression
-language is hierarchical: NONE -> VARIABLE_REGISTRY -> FLOWFILE_ATTRIBUTES.
+language is hierarchical: NONE -> ENVIRONMENT -> FLOWFILE_ATTRIBUTES.
 
 * NONE - expression language is not supported for this property
-* VARIABLE_REGISTRY is hierarchically constructed as below:
-** Variables defined at process group level and then, recursively, up to the higher process group until
-the root process group.
-** Variables defined in custom properties files through the nifi.variable.registry.properties property
-in nifi.properties file.
-** Environment variables defined at JVM level and system properties.
+* ENVIRONMENT - will use environment variables defined at JVM level and system properties.
 * FLOWFILE_ATTRIBUTES - will use attributes of each individual flow file, as well as those variables defined
-by the Variable Registry, as described above.
+by the Environment, as described above.
 
 [[escaping]]
 === Escaping Expression Language
@@ -227,6 +221,12 @@ and then press Ctrl+Space, we are provided a pop-up that lists six different fun
 which functions are shown, or we can select one of the functions from the list by double-clicking
 it with the mouse or using the arrow keys to highlight the desired function and pressing Enter.
 
+[[system-properties]]
+=== Framework System Properties
+
+The following system properties are set by the NiFi application, and are available to the Expression Language:
+
+- *nifi.framework.version*: The build version for the NiFi framework. Usage: ${'nifi.framework.version'}
 
 
 [[functions]]
@@ -261,7 +261,7 @@ Language supports four different data types:
 - *Date*: A Date is an object that holds a Date and Time. Utilizing the <<dates>> and <<type_cast>> functions this data
 	type can be converted to/from Strings and numbers. If the whole Expression Language expression is evaluated to be a
 	date then it will be converted to a String with the format: "<Day of Week> <Month> <Day of Month> <Hour>:<Minute>:<Second> <Time Zone> <Year>".
-	Also expressed as "E MMM dd HH:mm:ss z yyyy" in Java SimpleDateFormat format. For example: "Wed Dec 31 12:00:04 UTC 2016".
+	Also expressed as "E MMM dd HH:mm:ss z yyyy" in Java DateTimeFormatter format. For example: "Wed Dec 31 12:00:04 UTC 2016".
 - *Boolean*: A Boolean is one of either `true` or `false`.
 
 After evaluating expression language functions, all attributes are stored as type String.
@@ -569,6 +569,90 @@ the following results:
 | `${filename:isNull():not():ifElse('found', 'not_found')}` | `found`
 |===================================================================
 
+[.function]
+=== isJson
+*Description*: [.description]#The `isJson` function returns `true` if the subject is a JSON array or a JSON object, `false` otherwise. This is typically used to determine whether an attribute is JSON in order to allow for a follow-on JSONPath query. Although technically there are other valid JSON types such as string, number, boolean and null, this method is only concerned with the primary JSON objects queried with JSONPath , arrays and objects. #
+
+*Subject Type*: [.subject]#Any#
+
+*Arguments*: No arguments
+
+*Return Type*: [.returnType]#Boolean#
+
+*Examples*: If the attribute "jsonObj" has the value {"name":"John", "age":30, "car":null}, the attribute jsonObjMissingStartingBrace has the value "name":"John", "age":30, "car":null}, the attribute jsonObjMissingEndingBrace has the value {"name":"John", "age":30, "car":null, the attribute "jsonArray" has the value ["Ford", "BMW", "Fiat"], the attribute jsonArrayMissingStartingBracket has the value "Ford", "BMW", "Fiat"], the attribute jsonArrayMissingEndingBracket has the value ["Ford", "BMW", "Fiat", the "someAttribute" attribute does not exist, the "emptyQuotedString" attribute value is "", the attribute "quotedString" has the value "someString", the attribute "integer" has the value 1234, the attribute "decimal" has the value 18.36, the attribute "trueAttr" has the value true, the attribute "falseAttr" has the value false and the "nullAttr" attribute has the value null, then the following expressions will provide the following results:
+
+
+
+.isJson Examples
+|===================================================================
+| Expression | Value
+| `${jsonObj:isJson()}` | `true`
+| `${jsonObjMissingStartingBrace:isJson()}` | `false`
+| `${jsonObjMissingEndingBrace:isJson()}` | `false`
+| `${jsonArray:isJson()}` | `true`
+| `${jsonArrayMissingStartingBracket:isJson()}` | `false`
+| `${jsonArrayMissingEndingBracket:isJson()}` | `false`
+| `${someAttribute:isJson()}` | `false`
+| `${emptyQuotedString:isJson())` | `false`
+| `${quotedString:isJson()}` | `false`
+| `${integer:isJson()}` | `false`
+| `${decimal:isJson()}` | `false`
+| `${trueAttr:isJson()}` | `false`
+| `${falseAttr:isJson()}` | `false`
+| `${nullAttr:isJson()}` | `false`
+|===================================================================
+
+
+
+
+[.function]
+=== isValidInstant
+
+*Description*: [.description]#The `isValidInstant` function returns `true` when the Subject can be parsed as a valid ISO-8601 instant or RFC-1123 date-time, and `false` otherwise.
+This function is useful for validating values before calling `toInstant()`. Unlike `toInstant()`, this function does not throw an error when parsing fails.#
+
+*Subject Type*: [.subject]#String#
+
+*Arguments*: No arguments
+
+*Return Type*: [.returnType]#Boolean#
+
+.isValidInstant Examples
+|===================================================================
+| Expression | Value
+| `${eventTime:isValidInstant()}` where `eventTime` = `2026-08-04T10:15:30Z` | `true`
+| `${eventTime:isValidInstant()}` where `eventTime` = `2026-08-04T10:15:30+05:30` | `true`
+| `${eventTime:isValidInstant()}` where `eventTime` = `Tue, 04 Aug 2026 10:15:30 GMT` | `true`
+| `${eventTime:isValidInstant()}` where `eventTime` = `not-a-date` | `false`
+| `${eventTime:isValidInstant():ifElse('valid-instant', 'invalid-instant')}` where `eventTime` = `2026-08-04T10:15:30Z` | `valid-instant`
+|===================================================================
+
+
+[.function]
+=== isValidDate
+
+*Description*: [.description]#The `isValidDate` function returns `true` when the Subject can be parsed as a valid date using the specified format and optional timezone, and `false` otherwise.
+Validation is calendar-aware, so values that match the format pattern but do not represent a real date, such as `31-02-2026`, return `false`.
+This function is useful for validating values before calling `toDate()`. Unlike `toDate()`, this function does not throw an error when parsing fails.#
+
+*Subject Type*: [.subject]#String#
+
+*Arguments*:
+
+- *format* (required): The date format to use for parsing. The format must be a valid `java.time.format.DateTimeFormatter` pattern, such as `dd-MM-yyyy`.
+- *timezone* (optional): The timezone to apply when resolving date-time fields, such as `UTC` or `America/New_York`. When not provided, the system default timezone is used.
+
+*Return Type*: [.returnType]#Boolean#
+
+.isValidDate Examples
+|===================================================================
+| Expression | Value
+| `${myDate:isValidDate('dd-MM-yyyy')}` where `myDate` = `04-08-2026` | `true`
+| `${myDate:isValidDate('dd-MM-yyyy')}` where `myDate` = `31-02-2026` | `false`
+| `${myDate:isValidDate('dd-MM-yyyy')}` where `myDate` = `not-a-date` | `false`
+| `${myDate:isValidDate('yyyy-MM-dd HH:mm:ss', 'UTC')}` where `myDate` = `2026-08-04 10:15:30` | `true`
+| `${myDate:isValidDate('dd-MM-yyyy'):ifElse('valid', 'invalid')}` where `myDate` = `04-08-2026` | `valid`
+|===================================================================
 
 
 
@@ -847,6 +931,109 @@ then the following Expressions will result in the following values:
 
 
 
+
+[.function]
+=== compactDelimitedList
+
+*Description*: [.description]#Splits the Subject using the specified delimiter, removes all empty tokens, and rejoins the remaining tokens using the same delimiter.
+The order of non-empty tokens is preserved. This is useful for normalizing
+delimited attributes that contain leading, trailing, or repeated delimiters.#
+
+*Subject Type*: [.subject]#String#
+
+*Arguments*:
+
+- [.argName]#_delimiter_# : [.argDesc]#The delimiter used to split and rejoin the Subject.
+This may be a single character or a multi-character string.#
+
+*Return Type*: [.returnType]#String#
+
+*Examples*: If the "my_list" attribute contains the value `,,a,,b,,c,`, the "tags"
+attribute contains the value `|alpha||beta|||gamma|`, and the "messy" attribute
+contains the value ` ,,a,,b,, `, then the following Expressions will result in
+the following values:
+
+.CompactDelimitedList Examples
+|======================================================================
+| Expression | Value
+| `${my_list:compactDelimitedList(',')}` | `a,b,c`
+| `${tags:compactDelimitedList('\|')}` | `alpha\|beta\|gamma`
+| `${messy:trim():compactDelimitedList(',')}` | `a,b`
+|======================================================================
+
+
+
+
+[.function]
+=== trimDelimitedList
+
+*Description*: [.description]#Splits the Subject using the specified delimiter, removes leading
+and trailing empty tokens, and rejoins the remaining tokens using
+the same delimiter. Empty tokens between non-empty tokens are preserved. This
+behaves similarly to `trim()`, but operates on delimited token boundaries rather
+than whitespace characters.#
+
+*Subject Type*: [.subject]#String#
+
+*Arguments*:
+
+- [.argName]#_delimiter_# : [.argDesc]#The delimiter used to split and rejoin the Subject.
+This may be a single character or a multi-character string.#
+
+*Return Type*: [.returnType]#String#
+
+*Examples*: If the "my_list" attribute contains the value `,,a,,b,,c,,`, the
+"path_parts" attribute contains the value `;;alpha;;beta;;`, and the "messy"
+attribute contains the value ` ,,a,,b,, `, then the following Expressions will
+result in the following values:
+
+.TrimDelimitedList Examples
+|======================================================================
+| Expression | Value
+| `${my_list:trimDelimitedList(',')}` | `a,,b,,c`
+| `${path_parts:trimDelimitedList(';')}` | `alpha;;beta`
+| `${messy:trim():trimDelimitedList(',')}` | `a,,b`
+|======================================================================
+
+
+
+
+
+[.function]
+=== unique
+
+*Description*: [.description]#Returns the unique values from a delimited string while preserving the order of first occurrence. The function takes a delimiter as an argument and returns the deduplicated values joined by the same delimiter.#
+
+*Subject Type*: [.subject]#String#
+
+*Arguments*:
+
+- [.argName]#_delimiter_# : [.argDesc]#The delimiter used to split and join the subject string#
+
+*Return Type*: [.returnType]#String#
+
+*Examples*: If the "tags" attribute has the value "red,blue,red,green,blue,yellow", then the following
+Expressions will result in the following values:
+
+.Unique Examples
+|===================================================================
+| Expression | Value
+| `${tags:unique(',')}` | `red,blue,green,yellow`
+| `${tags:unique(';')}` | `red,blue,red,green,blue,yellow`
+|===================================================================
+
+If the "paths" attribute has the value "C:\Users\test;D:\Data;C:\Users\test;E:\Backup", then:
+
+.Path Deduplication
+|===================================================================
+| Expression | Value
+| `${paths:unique(';')}` | `C:\Users\test;D:\Data;E:\Backup`
+|===================================================================
+
+*Special Cases*: If the subject is null, returns an empty string. If the delimiter is null or empty, returns the original subject unchanged. Empty values are preserved (e.g., "a,,b,,c" becomes "a,,b,c").
+
+
+
 [.function]
 === append
 
@@ -1046,13 +1233,13 @@ Expressions will provide the following results:
 
 
 
-.PadLeft Examples
+.PadRight Examples
 |=======================================================================================
 | Expression | Value
 | `${greetings:padRight(10)}` | `hello\_____`
 | `${greetings:padRight(10, '@')}` | `hello@@@@@`
 | `${greetings:padRight(10, 'xy')}` | `helloxyxyx`
-| `${greetings:padLeft(10, 'aVeryLongPaddingString')}` | `helloaVery`
+| `${greetings:padRight(10, 'aVeryLongPaddingString')}` | `helloaVery`
 |=======================================================================================
 
 
@@ -1172,7 +1359,42 @@ then the following Expressions will result in the following values:
 | `${str:repeat(1)}` | `abc`
 | `${str:repeat(2)}` | `abcabc`
 | `${str:repeat(1,2)}` | `abc` or `abcabc` (at random)
-| `${str:repeat( ${str:length()} )}` | `abc` or `abcabc` or `abcabcabc` (at random)
+| `${str:repeat(${str:length()})}` | `abcabcabc`
+| `${str:repeat(1, ${str:length()})}` | `abc` or `abcabc` or `abcabcabc` (at random)
+|================================================================
+
+
+
+
+[.function]
+=== replaceByPattern
+
+*Description*:
+[.description]#Returns a string based on the provided mapping rule in order to replace the subject by another string. If
+the subject is not covered by the mapping rule, then the subject is returned.#
+
+
+*Subject Type*: [.subject]#String#
+
+*Argument*:
+
+- [.argName]#_mapping rule_# : [.argDesc]#The mapping rule is a comma separated list of K:V where K may be a regular
+expression and V is the string to return in case K matches the subject. Examples: 'abc:xyz,foo:poo' and
+'att[0-4]:low_range,att[5-9]:high_range,.*:other'#
+
+*Return Type*: [.returnType]#String#
+
+*Examples*:
+
+If we have an attribute named "str" with the value "abc",
+then the following Expressions will result in the following values:
+
+.ReplaceByPattern Examples
+|================================================================
+| Expression | Value
+| `${str:replaceByPattern('abc:xyz,foo:poo')}` | `xyz`
+| `${str:replaceByPattern('foo:poo')}` | `abc`
+| `${str:replaceByPattern('a.c:xyz,.*:foo')}` | `xyz`
 |================================================================
 
 
@@ -2170,7 +2392,7 @@ Divide. This is to preserve backwards compatibility and to not force rounding er
 [.function]
 === math
 
-*Description*: [.description]#ADVANCED FEATURE. This expression is designed to be used by advanced users only. It utilizes Java Reflection to run arbitrary java.lang.Math static methods. The exact API will depend on the version of Java you are running. The Java 8 API can be found here: link:https://docs.oracle.com/javase/8/docs/api/java/lang/Math.html[https://docs.oracle.com/javase/8/docs/api/java/lang/Math.html^]
+*Description*: [.description]#ADVANCED FEATURE. This expression is designed to be used by advanced users only. It utilizes Java Reflection to run arbitrary java.lang.Math static methods. The exact API will depend on the version of Java you are running. The Java API can be found here: link:https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Math.html[https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Math.html^]
  +
 In order to run the correct method, the parameter types must be correct. The Expression Language "Number" (whole number) type is interpreted as a Java "long". The "Decimal" type is interpreted as a Java "double". Running the desired method may require calling "toNumber()" or "toDecimal()" in order to "cast" the value to the desired type. This also is important to remember when cascading "math()" calls since the return type depends on the method that was run.#
 
@@ -2189,7 +2411,7 @@ In order to run the correct method, the parameter types must be correct. The Exp
 
 	- ${literal(2):toDecimal:math("pow", 2.5)} runs Math.pow(2D,2.5D).
 
-	- ${literal(64):toDouble():math("cbrt"):toNumber():math("max", 5)} runs Math.max((Double.valueOf(Math.cbrt(64D))).longValue(), 5L). Note that the toDecimal() is needed because "cbrt" takes a "double" as input and the "64" will get interpreted as a long. The "toDecimal()" call is necessary to correctly call the method. that the "toNumber()" call is necessary because "cbrt" returns a double and the "max" method is must have parameters of the same type and "5" is interpreted as a long.
+	- ${literal(64):toDecimal():math("cbrt"):toNumber():math("max", 5)} runs Math.max((Double.valueOf(Math.cbrt(64D))).longValue(), 5L). Note that the toDecimal() is needed because "cbrt" takes a "double" as input and the "64" will get interpreted as a long. The "toDecimal()" call is necessary to correctly call the method. that the "toNumber()" call is necessary because "cbrt" returns a double and the "max" method is must have parameters of the same type and "5" is interpreted as a long.
 
 	- ${literal(5.4):math("scalb", 2)} runs Math.scalb(5.4, 2). This example is important because NiFi EL treats all whole numbers as "longs" and there is no concept of an "int". "scalb" takes a second parameter of an "int" and it is not overloaded to accept longs so it could not be run without special type handling. In the instance where the Java method cannot be found using parameters of type "double" and "long" the "math()" EL function will attempt to find a Java method with the same name but parameters of "double" and "int".
 
@@ -2205,7 +2427,7 @@ In order to run the correct method, the parameter types must be correct. The Exp
 === format
 
 *Description*: [.description]#Formats a number as a date/time according to the format specified by the argument. The argument
-	must be a String that is a valid Java SimpleDateFormat format. The Subject is expected to be a Number that
+	must be a String that is a valid Java DateTimeFormatter format. The Subject is expected to be a Number that
 	represents the number of milliseconds since Midnight GMT on January 1, 1970. The number will be evaluated using the local
 	time zone unless specified in the second optional argument.#
 
@@ -2213,7 +2435,7 @@ In order to run the correct method, the parameter types must be correct. The Exp
 
 *Arguments*:
 
-	- [.argName]#_format_# : [.argDesc]#The format to use in the Java SimpleDateFormat syntax#
+	- [.argName]#_format_# : [.argDesc]#The format to use in the Java DateTimeFormatter syntax#
 	- [.argName]#_time zone_# : [.argDesc]#Optional argument that specifies the time zone to use (in the Java TimeZone syntax)#
 
 *Return Type*: [.returnType]#String#
@@ -2233,21 +2455,56 @@ In order to run the correct method, the parameter types must be correct. The Exp
 |============================================================================
 
 
+[[formatInstant]]
+[.function]
+=== formatInstant
 
+*Description*: [.description]#Formats an Instant, number or string according to the format specified by the argument.
 
+The first argument must be a String that is a valid Java DateTimeFormatter format.
+The second argument must be a String that is a valid time zone.
+The Subject is expected to be an Instant, String or Number that represents the number of milliseconds since Midnight GMT on January 1, 1970 or a String with one of the following
+
+DateTimeFormatter syntaxes:#
+
+- _ISO_OFFSET_ such as '2011-12-03T10:15:30+01:00'
+- _ISO_INSTANT_ such as '2011-12-03T10:15:30Z'
+- _RFC_1123_ such as 'Thu, 01 Dec 1994 16:00:00 GMT'
+
+*Subject Type*: [.subject]#Instant or Number or String#
+
+*Arguments*:
+
+- [.argName]#_format_# : [.argDesc]#The format to use in the Java DateTimeFormatter syntax#
+- [.argName]#_time zone_# : [.argDesc]#Optional argument that specifies the time zone to use (in the Java TimeZone syntax)#
+
+*Return Type*: [.returnType]#String#
+
+*Examples*: If the attribute "time" has the value "1647884009479", timeIsoOffset has the value "2022-12-03T10:15:30+01:00",
+timeIsoInstant has the value "2022-12-03T10:15:30Z" and "timeRFC1123" has the value "Thu, 01 Dec 2022 16:00:00 GMT",
+then the following Expressions will yield the following results:
+
+.format Examples
+|============================================================================
+| Expression | Value
+| `${time:formatInstant("yyyy/MM/dd HH:mm:ss.SSS\'Z'", "GMT")}` | `2022/03/21 17:33:29.479Z`
+| `${timeIsoOffset:formatInstant("yyyy/MM/dd HH:mm:ss.SSS\'Z'", "Asia/Tokyo")}` | `2022/12/03 18:15:30.000Z`
+| `${timeIsoInstant:formatInstant("yyyy/MM/dd", "Asia/Tokyo")}` | `2022/12/03 19:15:30.000Z`
+| `${timeRFC1123:formatInstant("yyyy/MM/dd HH:mm:ss.SSS\'Z'", "GMT")}` | `2022/12/01 16:00:00.000Z`
+|============================================================================
 
 [.function]
 === toDate
 
 *Description*: [.description]#Converts a String into a Date data type, based on the format specified by the argument. The argument
-	must be a String that is a valid Java SimpleDateFormat syntax. The Subject is expected to be a String that is formatted
+	must be a String that is a valid Java DateTimeFormatter syntax. The Subject is expected to be a String that is formatted
 	according the argument. The date will be evaluated using the local time zone unless specified in the second optional argument.#
 
 *Subject Type*: [.subject]#String#
 
 *Arguments*:
 
-		- [.argName]#_format_# : [.argDesc]#The current format to use when parsing the Subject, in the Java SimpleDateFormat syntax.#
+		- [.argName]#_format_# : [.argDesc]#The current format to use when parsing the Subject, in the Java DateTimeFormatter syntax.#
 		- [.argName]#_time zone_# : [.argDesc]#Optional argument that specifies the time zone to use when parsing the Subject, in the Java TimeZone syntax.#
 
 
@@ -2263,6 +2520,217 @@ if the attribute "date" has the value "12-24-2014" and we want to change the for
 chaining together the two functions: `${date:toDate('MM-dd-yyyy'):format('yyyy/MM/dd')}`.
 
 
+
+[.function]
+=== toInstant
+
+*Description*: [.description]#Converts a String or Number into an Instant data type, based on the format specified by the argument. In case of
+String format nanosecond precision date parsing is supported. The argument
+must be a String that is a valid Java DateTimeFormatter syntax. The Subject is expected to be a String that is formatted
+according the argument or a number which represents the datetime in milliseconds. The datetime will be evaluated using the
+time zone specified in the second argument.#
+
+*Subject Type*: [.subject]#String or Number#
+
+*Arguments*:
+
+- [.argName]#_format_# : [.argDesc]#The current format to use when parsing the Subject, in the Java DateTimeFormatter syntax.#
+- [.argName]#_time zone_# : [.argDesc]#Required argument that specifies the time zone to use when parsing the Subject, in the Java TimeZone syntax.#
+
+
+*Return Type*: [.returnType]#Instant#
+
+*Examples*: If the attribute "time" has the value "2014/12/31 15:36:03.264Z" then the expression `${time:toInstant("yyyy/MM/dd HH:mm:ss.SSS'Z'", "GMT")}` will result in an Instant data type for
+15:36:03.264 GMT on December 31, 2014.
+
+Often, this function is used in conjunction with the <<formatInstant>> function to change the format of a date/time. For example,
+if the attribute "dateTime" has the value "12-24-2014 12:06:59" and we want to change the format to "2014/12/24", we can do so by
+chaining together the two functions: `${dateTime:toInstant('MM-dd-yyyy HH:mm:ss', 'GMT'):formatInstant('yyyy/MM/dd', 'GMT')}`.
+
+[.function]
+=== toMicros
+
+*Description*: [.description]#Converts an Instant Subject into a Number with microsecond precision#
+
+*Subject Type*: [.subject]#Instant#
+
+*Arguments*: No arguments
+
+*Return Type*: [.returnType]#Number#
+
+*Examples*: If the "dateTime" attribute has the value of "2022/03/18 10:22:27.678234567", then the Expression
+`${dateTime:toInstant('yyyy/MM/dd HH:mm:ss.SSSSSSSSS', 'America/New_York'):toMicros()}` converts the Instant value of
+the attribute to 1647613347678234 microseconds since epoch.
+
+[.function]
+=== toNanos
+
+*Description*: [.description]#Converts an Instant Subject into a Number with nanosecond precision#
+
+*Subject Type*: [.subject]#Instant#
+
+*Arguments*: No arguments
+
+*Return Type*: [.returnType]#Number#
+
+*Examples*: If the "dateTime" attribute has the value of "2022/03/18 10:22:27.678234567", then the Expression
+`${dateTime:toInstant('yyyy/MM/dd HH:mm:ss.SSSSSSSSS', 'America/New_York'):toNanos()}` converts the Instant value of
+the attribute to 1647613347678234567 nanoseconds since epoch.
+
+
+[.function]
+=== plusDuration
+
+*Description*: [.description]#Adds a specified amount of time to a Date value using a human-readable expression such as `"1 week"` or `"3 months"`. Month and year adjustments follow calendar rules.#
+
+If the subject is null, the function returns null.
+
+*Subject Type*: [.subject]#Date#
+
+*Arguments*:
+
+- [.argName]#_amount_# : [.argDesc]#A string in the form `"<number> <unit>"`. A space between the number and unit is required.#
+- [.argName]#_timezone_# (optional) : [.argDesc]#A timezone ID string (e.g. `"America/New_York"`, `"Europe/Vienna"`). When provided, calendar-unit arithmetic (days, weeks, months, years) is performed in the specified timezone so that wall-clock time is preserved across DST boundaries. When omitted, the JVM system default timezone is used.#
+
+*Supported Units*: nanosecond(s), second(s), minute(s), hour(s), day(s), week(s), month(s), year(s)
+
+Units are case-insensitive.
+
+NOTE: Nanoseconds are accepted but have no effect on a `Date` subject because `java.util.Date` has millisecond precision. Use `plusInstantDuration` if nanosecond precision is required.
+
+*Return Type*: [.returnType]#Date#
+
+*Examples*: If the "date" attribute has the value `"04-08-2026"` (August 4, 2026), then the following Expressions will result in the following values:
+
+.plusDuration Examples
+|============================================================================
+| Expression | Value
+| `${date:toDate('dd-MM-yyyy'):plusDuration('1 week'):format('dd-MM-yyyy')}` | `11-08-2026`
+| `${date:toDate('dd-MM-yyyy'):plusDuration('2 years'):format('dd-MM-yyyy')}` | `04-08-2028`
+| `${date:toDate('dd-MM-yyyy'):plusDuration('3 months'):format('dd-MM-yyyy')}` | `04-11-2026`
+| `${date:toDate('dd-MM-yyyy'):plusDuration('2 hours'):format('dd-MM-yyyy HH:mm:ss')}` | `04-08-2026 02:00:00`
+| `${date:toDate('dd-MM-yyyy'):plusDuration('1 day')}` | Returns the epoch milliseconds for the resulting Date.
+| `${date:toDate('yyyy-MM-dd HH:mm:ss', 'Europe/Vienna'):plusDuration('1 day', 'Europe/Vienna'):format('yyyy-MM-dd HH:mm:ssXXX', 'Europe/Vienna')}` (where date = `"2026-03-29 00:00:00"`) | `2026-03-30 00:00:00+02:00` (DST-aware: wall-clock time preserved across spring-forward)
+|============================================================================
+
+.Calendar-Aware Behavior
+|============================================================================
+| Scenario | Example | Result
+| Month-end clamping | Jan 31 + 1 month | Feb 28 (or Feb 29 in a leap year)
+| Leap year clamping | Feb 29, 2024 + 1 year | Feb 28, 2025
+| Crossing a day boundary | Aug 4 00:00:00 + 25 hours | Aug 5 01:00:00
+| DST spring-forward (with timezone) | Mar 29 00:00:00 CET + 1 day (Europe/Vienna) | Mar 30 00:00:00 CEST
+|============================================================================
+
+
+[.function]
+=== minusDuration
+
+*Description*: [.description]#Subtracts a specified amount of time from a Date value using a human-readable expression such as `"1 week"` or `"3 months"`. Month and year adjustments follow calendar rules.#
+
+If the subject is null, the function returns null.
+
+*Subject Type*: [.subject]#Date#
+
+*Arguments*:
+
+- [.argName]#_amount_# : [.argDesc]#A string in the form `"<number> <unit>"`. A space between the number and unit is required.#
+- [.argName]#_timezone_# (optional) : [.argDesc]#A timezone ID string (e.g. `"America/New_York"`, `"Europe/Vienna"`). When provided, calendar-unit arithmetic (days, weeks, months, years) is performed in the specified timezone so that wall-clock time is preserved across DST boundaries. When omitted, the JVM system default timezone is used.#
+
+*Supported Units*: nanosecond(s), second(s), minute(s), hour(s), day(s), week(s), month(s), year(s)
+
+Units are case-insensitive.
+
+NOTE: Nanoseconds are accepted but have no effect on a `Date` subject because `java.util.Date` has millisecond precision. Use `minusInstantDuration` if nanosecond precision is required.
+
+*Return Type*: [.returnType]#Date#
+
+*Examples*: If the "date" attribute has the value `"04-08-2026"` (August 4, 2026), then the following Expressions will result in the following values:
+
+.minusDuration Examples
+|============================================================================
+| Expression | Value
+| `${date:toDate('dd-MM-yyyy'):minusDuration('1 month'):format('dd-MM-yyyy')}` | `04-07-2026`
+| `${date:toDate('dd-MM-yyyy'):minusDuration('2 weeks'):format('dd-MM-yyyy')}` | `21-07-2026`
+| `${date:toDate('dd-MM-yyyy'):minusDuration('1 year'):format('dd-MM-yyyy')}` | `04-08-2025`
+| `${date:toDate('dd-MM-yyyy'):minusDuration('1 second'):format('dd-MM-yyyy HH:mm:ss')}` | `03-08-2026 23:59:59`
+| `${date:toDate('dd-MM-yyyy'):minusDuration('1 day')}` | Returns the epoch milliseconds for the resulting Date.
+| `${date:toDate('yyyy-MM-dd HH:mm:ss', 'America/New_York'):minusDuration('1 day', 'America/New_York'):format('yyyy-MM-dd HH:mm:ssXXX', 'America/New_York')}` (where date = `"2026-11-02 00:00:00"`) | `2026-11-01 00:00:00-04:00` (DST-aware: wall-clock time preserved across fall-back)
+|============================================================================
+
+.Calendar-Aware Behavior
+|============================================================================
+| Scenario | Example | Result
+| Month-end clamping | Mar 31 - 1 month | Feb 28 (or Feb 29 in a leap year)
+| Leap year clamping | Feb 29, 2024 - 1 year | Feb 28, 2023
+| Crossing a day boundary | Aug 4 00:00:00 - 1 second | Aug 3 23:59:59
+| DST fall-back (with timezone) | Nov 2 00:00:00 EDT - 1 day (America/New_York) | Nov 1 00:00:00 EDT
+|============================================================================
+
+
+[.function]
+=== plusInstantDuration
+
+*Description*: [.description]#Adds a specified amount of time to an Instant value using a human-readable expression such as `"1 week"` or `"3 months"`. Arithmetic is evaluated in UTC.#
+
+If the subject is null, the function returns null.
+
+*Subject Type*: [.subject]#Instant#
+
+*Arguments*:
+
+- [.argName]#_amount_# : [.argDesc]#A string in the form `"<number> <unit>"`. A space between the number and unit is required.#
+
+*Supported Units*: nanosecond(s), second(s), minute(s), hour(s), day(s), week(s), month(s), year(s)
+
+Units are case-insensitive.
+
+*Return Type*: [.returnType]#Instant#
+
+*Examples*: If the "date" attribute has the value `"04-08-2026 00:00:00"`, then the following Expressions will result in the following values:
+
+.plusInstantDuration Examples
+|============================================================================
+| Expression | Value
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('1 week'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}` | `11-08-2026 00:00:00`
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('2 years'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}` | `04-08-2028 00:00:00`
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):plusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}` | `04-11-2026 00:00:00`
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney'):plusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney')}` | `04-11-2026 01:00:00`
+|============================================================================
+
+*Notes*:
+- Arithmetic is evaluated in UTC.
+
+
+[.function]
+=== minusInstantDuration
+
+*Description*: [.description]#Subtracts a specified amount of time from an Instant value using a human-readable expression such as `"1 week"` or `"3 months"`. Arithmetic is evaluated in UTC.#
+
+If the subject is null, the function returns null.
+
+*Subject Type*: [.subject]#Instant#
+
+*Arguments*:
+
+- [.argName]#_amount_# : [.argDesc]#A string in the form `"<number> <unit>"`. A space between the number and unit is required.#
+
+*Supported Units*: nanosecond(s), second(s), minute(s), hour(s), day(s), week(s), month(s), year(s)
+
+Units are case-insensitive.
+
+*Return Type*: [.returnType]#Instant#
+
+*Examples*: If the "date" attribute has the value `"04-08-2026 00:00:00"`, then the following Expressions will result in the following values:
+
+.minusInstantDuration Examples
+|============================================================================
+| Expression | Value
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('1 week'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}` | `28-07-2026 00:00:00`
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('2 years'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}` | `04-08-2024 00:00:00`
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'UTC'):minusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'UTC')}` | `04-05-2026 00:00:00`
+| `${date:toInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney'):minusInstantDuration('3 months'):formatInstant('dd-MM-yyyy HH:mm:ss', 'Australia/Sydney')}` | `04-05-2026 00:00:00`
+|============================================================================
 
 
 [.function]
@@ -2493,6 +2961,47 @@ names begin with the letter `a`.
 
 
 
+
+[.function]
+=== getUri
+
+*Description*: [.description]#Returns a URI compliant with RFC 2396. This includes encoding non-US-ASCII characters and
+quoting illegal characters with octets. This expression utilizes the
+link:https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/net/URI.html[java.net.URI^] class to build a URI.
+As described in the API, a hierarchical URI consists of seven components represented with the following types:#
+|============================================================================
+| Component   | Type
+| `scheme`    | `String`
+| `user-info` | `String`
+| `host`      | `String`
+| `port`      | `int`
+| `path`      | `String`
+| `query`     | `String`
+| `fragment`  | `String`
+|============================================================================
+
+See the API for more details on character categories, encoding and quoting.
+
+*Subject Type*: [.subjectless]#No Subject#
+
+*Arguments*: This expression takes seven arguments.
+
+- [.argName]#_scheme_#, [.argName]#_userinfo_#, [.argName]#_host_#, [.argName]#_port_#, [.argName]#_path_#, [.argName]#_query_#, [.argName]#_fragment_#
+
+*NOTE:* Any component of the new URI may be left undefined by passing [.argName]#_null_# for the corresponding parameter or, in the case of the port parameter, by passing [.argName]#_-1_#.
+
+*Return Type*: [.returnType]#String#
+
+*Examples*
+The following examples detail how this expression can be invoked:
+
+|============================================================================
+| Expression | Value
+|`${getUri('https', 'admin:admin', 'nifi.apache.org', '1234', '/path/data ', 'key=value &key2=value2', 'frag1')}` | `https://admin:admin@nifi.apache.org:1234/path/data%20?key=value%20&key2=value2#frag1`
+|`${getUri('https', null, 'nifi.apache.org', 8443, '/docs.html', null, null)}`                                    | `https://nifi.apache.org:8443/docs.html`
+|`${getUri('http', null, 'nifi.apache.org', -1, '/docs.html', null, null)}`                                       | `http://nifi.apache.org/docs.html`
+|============================================================================
+
 [[multi]]
 == Evaluating Multiple Attributes
 
@@ -2679,7 +3188,7 @@ provides several functions for evaluating the same conditions against groups of 
 |===============================================================================
 | Expression | Value
 | `${allDelineatedValues("${word_list}", ","):contains("o")}` | `true`
-| `${allDelineatedValues("${number_list}", ","):count()}` | `4`
+| `${allDelineatedValues("${number_list}", ","):count()}` | `5`
 | `${allDelineatedValues("${number_list}", ","):matches("[0-9]+")}` | `true`
 | `${allDelineatedValues("${word_list}", ","):matches('e')}` | `false`
 |===============================================================================
@@ -2702,14 +3211,14 @@ provides several functions for evaluating the same conditions against groups of 
 
 *Return Type*: [.returnType]#String#
 
-*Examples*: Given that the "abc" attribute contains the value "hello world", "xyz" contains "good bye world",
-	and "filename" contains "file.txt" consider the following examples:
+*Examples*: Given that the "abc" attribute contains the value "hello world", "xyz" contains "goodbye world",
+	consider the following examples:
 
 .join Examples
 |=======================================================================================
 | Expression | Value
-| `${allMatchingAttributes("[ax].*"):substringBefore(" "):join("-")}` | `hello-good`
-| `${allAttributes("abc", "xyz"):join(" now")}` | `hello world nowgood bye world now`
+| `${allMatchingAttributes("[ax].*"):substringBefore(" "):join("-")}` | `hello-goodbye`
+| `${allAttributes("abc", "xyz"):join(" now ")}` | `hello world now goodbye world`
 |=======================================================================================
 
 

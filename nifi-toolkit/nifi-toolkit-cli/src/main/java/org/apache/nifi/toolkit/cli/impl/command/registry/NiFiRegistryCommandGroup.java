@@ -37,16 +37,18 @@ import org.apache.nifi.toolkit.cli.impl.command.registry.extension.UploadBundles
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.CreateFlow;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.DeleteFlow;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.DiffFlowVersions;
+import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ExportAllFlows;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ExportFlowVersion;
+import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ImportAllFlows;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ImportFlowVersion;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ListFlowVersions;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.ListFlows;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.SyncFlowVersions;
 import org.apache.nifi.toolkit.cli.impl.command.registry.flow.TransferFlowVersion;
+import org.apache.nifi.toolkit.cli.impl.command.registry.policy.CreateOrUpdateAccessPolicy;
 import org.apache.nifi.toolkit.cli.impl.command.registry.policy.GetAccessPolicy;
 import org.apache.nifi.toolkit.cli.impl.command.registry.tenant.CreateUser;
 import org.apache.nifi.toolkit.cli.impl.command.registry.tenant.CreateUserGroup;
-import org.apache.nifi.toolkit.cli.impl.command.registry.policy.CreateOrUpdateAccessPolicy;
 import org.apache.nifi.toolkit.cli.impl.command.registry.tenant.ListUserGroups;
 import org.apache.nifi.toolkit.cli.impl.command.registry.tenant.ListUsers;
 import org.apache.nifi.toolkit.cli.impl.command.registry.tenant.UpdateUser;
@@ -61,7 +63,7 @@ import java.util.List;
  */
 public class NiFiRegistryCommandGroup extends AbstractCommandGroup {
 
-    public static String REGISTRY_COMMAND_GROUP = "registry";
+    public static final String REGISTRY_COMMAND_GROUP = "registry";
 
     public NiFiRegistryCommandGroup() {
         super(REGISTRY_COMMAND_GROUP);
@@ -104,6 +106,8 @@ public class NiFiRegistryCommandGroup extends AbstractCommandGroup {
         commandList.add(new GetAccessToken());
         commandList.add(new GetAccessTokenSpnego());
         commandList.add(new LogoutAccessToken());
+        commandList.add(new ExportAllFlows());
+        commandList.add(new ImportAllFlows());
         return new ArrayList<>(commandList);
     }
 }

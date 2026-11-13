@@ -20,6 +20,7 @@ import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.attribute.expression.language.Query;
 import org.apache.nifi.attribute.expression.language.Query.Range;
 import org.apache.nifi.components.ConfigurableComponent;
+import org.apache.nifi.components.PropertyDependency;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.components.ValidationContext;
@@ -28,13 +29,14 @@ import org.apache.nifi.components.state.StateManager;
 import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.controller.ControllerServiceLookup;
 import org.apache.nifi.controller.NodeTypeProvider;
+import org.apache.nifi.expression.ExpressionLanguageScope;
+import org.apache.nifi.parameter.ParameterLookup;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.registry.VariableRegistry;
 import org.apache.nifi.scheduling.ExecutionNode;
 import org.apache.nifi.state.MockStateManager;
-import org.junit.Assert;
+import org.junit.jupiter.api.Assertions;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -46,8 +48,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
-import static java.util.Objects.requireNonNull;
+import static java.util.function.Predicate.not;
 
 public class MockProcessContext extends MockControllerServiceLookup implements ProcessContext, ControllerServiceLookup, NodeTypeProvider {
 
@@ -55,11 +58,9 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
     private final String componentName;
     private final Map<PropertyDescriptor, String> properties = new HashMap<>();
     private final StateManager stateManager;
-    private final VariableRegistry variableRegistry;
 
     private String annotationData = null;
     private boolean yieldCalled = false;
-    private boolean enableExpressionValidation = false;
     private boolean allowExpressionValidation = true;
     private volatile boolean incomingConnection = true;
     private volatile boolean nonLoopConnection = true;
@@ -74,38 +75,43 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
     private volatile boolean isPrimaryNode;
     private volatile boolean isConnected = true;
 
+    // This is only for testing purposes as we don't want to set env/sys variables in the tests
+    private final Map<String, String> environmentVariables;
+    private final Map<String, String> contextParameters;
+
+    private final ParameterLookup parameterLookup;
+
     public MockProcessContext(final ConfigurableComponent component) {
-        this(component, null);
+        this(component, null, new MockStateManager(component), null);
     }
 
     public MockProcessContext(final ConfigurableComponent component, final String componentName) {
-        this(component, componentName, new MockStateManager(component), VariableRegistry.EMPTY_REGISTRY);
+        this(component, componentName, new MockStateManager(component), null);
     }
 
     /**
      * Creates a new MockProcessContext for the given Processor
      *
-     * @param component being mocked
+     * @param component    being mocked
      * @param stateManager state manager
-     * @param variableRegistry variableRegistry
      */
-    public MockProcessContext(final ConfigurableComponent component, final StateManager stateManager, final VariableRegistry variableRegistry) {
-        this(component,null,stateManager,variableRegistry);
+    public MockProcessContext(final ConfigurableComponent component, final StateManager stateManager) {
+        this(component, null, stateManager, null);
     }
 
     public MockProcessContext(final ControllerService component,
                               final MockProcessContext context,
                               final StateManager stateManager,
-                              final VariableRegistry variableRegistry) {
-        this(component, null, context, stateManager, variableRegistry);
+                              final Map<String, String> environmentVariables) {
+        this(component, null, context, stateManager, environmentVariables);
     }
 
     public MockProcessContext(final ControllerService component,
                               final String componentName,
                               final MockProcessContext context,
                               final StateManager stateManager,
-                              final VariableRegistry variableRegistry) {
-        this(component, componentName, stateManager, variableRegistry);
+                              final Map<String, String> environmentVariables) {
+        this(component, componentName, stateManager, environmentVariables);
 
         try {
             annotationData = context.getControllerServiceAnnotationData(component);
@@ -114,7 +120,7 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
             properties.putAll(props);
 
             super.addControllerServices(context);
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
             // do nothing...the service is being loaded
         }
     }
@@ -122,23 +128,47 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
     /**
      * Creates a new MockProcessContext for the given Processor with given name
      *
-     * @param component being mocked
+     * @param component     being mocked
      * @param componentName the name to be given the component;
-     * @param stateManager state manager
-     * @param variableRegistry variableRegistry
+     * @param stateManager  state manager
      */
     public MockProcessContext(final ConfigurableComponent component,
                               final String componentName,
                               final StateManager stateManager,
-                              final VariableRegistry variableRegistry) {
+                              final Map<String, String> environmentVariables) {
+        this(component, componentName, stateManager, environmentVariables, null);
+    }
+
+    /**
+     * Creates a new MockProcessContext for the given Processor with given name
+     *
+     * @param component     being mocked
+     * @param componentName the name to be given the component;
+     * @param stateManager  state manager
+     * @param environmentVariables the environment variables
+     * @param contextParameters the context parameters
+     */
+    public MockProcessContext(final ConfigurableComponent component,
+                              final String componentName,
+                              final StateManager stateManager,
+                              final Map<String, String> environmentVariables,
+                              final Map<String, String> contextParameters) {
         this.component = Objects.requireNonNull(component);
         this.componentName = componentName == null ? "" : componentName;
         this.inputRequirement = component.getClass().getAnnotation(InputRequirement.class);
         this.stateManager = stateManager;
-        this.variableRegistry = variableRegistry;
+        this.environmentVariables = environmentVariables;
+        this.contextParameters = contextParameters == null ? Collections.emptyMap() : contextParameters;
+        this.parameterLookup = contextParameters != null ? new MockParameterLookup(contextParameters) : ParameterLookup.EMPTY;
     }
 
+    Map<String, String> getContextParameters() {
+        return contextParameters;
+    }
 
+    ParameterLookup getParameterLookup() {
+        return parameterLookup;
+    }
 
     @Override
     public PropertyValue getProperty(final PropertyDescriptor descriptor) {
@@ -154,8 +184,7 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
         final String setPropertyValue = properties.get(canonicalDescriptor);
         final String propValue = (setPropertyValue == null) ? canonicalDescriptor.getDefaultValue() : setPropertyValue;
 
-        final MockPropertyValue propertyValue = new MockPropertyValue(propValue, this, canonicalDescriptor, true, variableRegistry);
-        return propertyValue;
+        return new MockPropertyValue(propValue, this, canonicalDescriptor, true, environmentVariables);
     }
 
     @Override
@@ -165,17 +194,72 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
             return null;
         }
 
+        final List<ValidatedPropertyDependency> unsatisfiedDependencies = determineUnsatisfiedDependencies(descriptor);
+        if (!unsatisfiedDependencies.isEmpty()) {
+            throw new AssertionError("Attempted to use property \"%s\" whose dependencies are not satisfied:\n%s\n\n%s".formatted(
+                    descriptor.getName(),
+                    unsatisfiedDependencies.stream().map(ValidatedPropertyDependency::toString).collect(Collectors.joining("\n")),
+                    """
+                        Properties whose dependencies are not satisfied are not shown to the user,
+                        their values should be ignored by the implementation if the necessary dependencies are not fulfilled.
+                        This precaution is crucial to prevent potentially confusing and unpredictable side effects for the user.
+                        See NIFI-14400 (https://issues.apache.org/jira/browse/NIFI-14400) for more background."""
+            ));
+        }
+
         final String setPropertyValue = properties.get(descriptor);
         final String propValue = (setPropertyValue == null) ? descriptor.getDefaultValue() : setPropertyValue;
 
         final boolean alreadyEvaluated = !this.allowExpressionValidation;
-        final MockPropertyValue propertyValue = new MockPropertyValue(propValue, this, descriptor, alreadyEvaluated, variableRegistry);
-        return propertyValue;
+        return new MockPropertyValue(propValue, this, descriptor, alreadyEvaluated, environmentVariables, parameterLookup);
+    }
+
+    private List<ValidatedPropertyDependency> determineUnsatisfiedDependencies(PropertyDescriptor descriptor) {
+        return validatedDependencies(descriptor).stream().filter(not(ValidatedPropertyDependency::isSatisfied)).toList();
+    }
+
+    private List<ValidatedPropertyDependency> validatedDependencies(final PropertyDescriptor descriptor) {
+        return descriptor.getDependencies().stream().map(dependency -> {
+            final PropertyDescriptor dependencyDescriptor =
+                    component.getPropertyDescriptor(dependency.getPropertyName());
+
+            if (dependencyDescriptor == null) {
+                return new ValidatedPropertyDependency(dependency, null);
+            }
+            component.getPropertyDescriptor(dependency.getPropertyName());
+
+            if (!determineUnsatisfiedDependencies(dependencyDescriptor).isEmpty()) {
+                return new ValidatedPropertyDependency(dependency, null);
+            }
+
+            final String dependencyPropertyValue =
+                    properties.getOrDefault(dependencyDescriptor, dependencyDescriptor.getDefaultValue());
+
+            return new ValidatedPropertyDependency(dependency, dependencyPropertyValue);
+        }
+                ).toList();
+    }
+
+    record ValidatedPropertyDependency(PropertyDependency dependency, String value) {
+        public boolean isSatisfied() {
+            Set<String> dependentValues = dependency.getDependentValues();
+
+            return dependentValues == null ? value != null : dependentValues.contains(value);
+        }
+
+        @Override
+        public String toString() {
+            String result = isSatisfied() ? "satisfied" : "not satisfied";
+            Set<String> dependentValues = dependency.getDependentValues();
+            String reason = dependentValues == null
+                    ? "requires any value" : "requires one of the values %s".formatted(dependentValues);
+            return "Dependency \"%s\" is %s with value of %s; %s".formatted(dependency.getPropertyName(), result, value, reason);
+        }
     }
 
     @Override
     public PropertyValue newPropertyValue(final String rawValue) {
-        return new MockPropertyValue(rawValue, this, variableRegistry);
+        return new MockPropertyValue(rawValue, this, environmentVariables, parameterLookup);
     }
 
     public ValidationResult setProperty(final String propertyName, final String propertyValue) {
@@ -194,21 +278,21 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
      * the property is valid
      *
      * @param descriptor of property to modify
-     * @param value new value
+     * @param value      new value
      * @return result
      */
     public ValidationResult setProperty(final PropertyDescriptor descriptor, final String value) {
-        requireNonNull(descriptor);
-        requireNonNull(value, "Cannot set property to null value; if the intent is to remove the property, call removeProperty instead");
+        Objects.requireNonNull(descriptor, "Cannot set property for null descriptor");
+        Objects.requireNonNull(value, "Cannot set property " + descriptor.getName() + " to null value; if the intent is to remove the property, call removeProperty instead");
         final PropertyDescriptor fullyPopulatedDescriptor = component.getPropertyDescriptor(descriptor.getName());
 
-        final ValidationResult result = fullyPopulatedDescriptor.validate(value, new MockValidationContext(this, stateManager, variableRegistry));
+        final ValidationResult result = fullyPopulatedDescriptor.validate(value, new MockValidationContext(this, stateManager));
         String oldValue = properties.put(fullyPopulatedDescriptor, value);
         if (oldValue == null) {
             oldValue = fullyPopulatedDescriptor.getDefaultValue();
         }
 
-        if ((value == null && oldValue != null) || (value != null && !value.equals(oldValue))) {
+        if (!Objects.equals(value, oldValue)) {
             component.onPropertyModified(fullyPopulatedDescriptor, oldValue, value);
         }
 
@@ -223,9 +307,9 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
     public boolean removeProperty(final String property) {
         Objects.requireNonNull(property);
         final PropertyDescriptor fullyPopulatedDescriptor = component.getPropertyDescriptor(property);
-        String value = null;
+        final String value = properties.remove(fullyPopulatedDescriptor);
 
-        if ((value = properties.remove(fullyPopulatedDescriptor)) != null) {
+        if (value != null) {
             if (!value.equals(fullyPopulatedDescriptor.getDefaultValue())) {
                 component.onPropertyModified(fullyPopulatedDescriptor, value, null);
             }
@@ -236,8 +320,8 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
     }
 
     public void clearProperties() {
-        Map<PropertyDescriptor, String> properties = getProperties();
-        for (Map.Entry<PropertyDescriptor, String> e : properties.entrySet()) {
+        final Map<PropertyDescriptor, String> props = getProperties();
+        for (final Map.Entry<PropertyDescriptor, String> e : props.entrySet()) {
             removeProperty(e.getKey());
         }
     }
@@ -251,8 +335,8 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
         return yieldCalled;
     }
 
-    public void addControllerService(final String serviceIdentifier, final ControllerService controllerService, final Map<PropertyDescriptor, String> properties, final String annotationData) {
-        requireNonNull(controllerService);
+    public void addControllerService(final ControllerService controllerService, final Map<PropertyDescriptor, String> properties, final String annotationData) {
+        Objects.requireNonNull(controllerService);
         final ControllerServiceConfiguration config = addControllerService(controllerService);
         config.setProperties(properties);
         config.setAnnotationData(annotationData);
@@ -294,7 +378,7 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
 
     @Override
     public Map<String, String> getAllProperties() {
-        final Map<String,String> propValueMap = new LinkedHashMap<>();
+        final Map<String, String> propValueMap = new LinkedHashMap<>();
         for (final Map.Entry<PropertyDescriptor, String> entry : getProperties().entrySet()) {
             propValueMap.put(entry.getKey().getName(), entry.getValue());
         }
@@ -312,10 +396,9 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
      * non-null
      */
     public Collection<ValidationResult> validate() {
-        final List<ValidationResult> results = new ArrayList<>();
-        final ValidationContext validationContext = new MockValidationContext(this, stateManager, variableRegistry);
+        final ValidationContext validationContext = new MockValidationContext(this, stateManager);
         final Collection<ValidationResult> componentResults = component.validate(validationContext);
-        results.addAll(componentResults);
+        final List<ValidationResult> results = new ArrayList<>(componentResults);
 
         final Collection<ValidationResult> serviceResults = validateReferencedControllerServices(validationContext);
         results.addAll(serviceResults);
@@ -353,11 +436,11 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
             final ControllerService controllerService = getControllerService(controllerServiceId);
             if (controllerService == null) {
                 final ValidationResult result = new ValidationResult.Builder()
-                    .valid(false)
-                    .subject(descriptor.getDisplayName())
-                    .input(controllerServiceId)
-                    .explanation("Invalid Controller Service: " + controllerServiceId + " is not a valid Controller Service Identifier")
-                    .build();
+                        .valid(false)
+                        .subject(descriptor.getDisplayName())
+                        .input(controllerServiceId)
+                        .explanation("Invalid Controller Service: " + controllerServiceId + " is not a valid Controller Service Identifier")
+                        .build();
 
                 validationResults.add(result);
                 continue;
@@ -366,11 +449,11 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
             final Class<? extends ControllerService> requiredServiceClass = descriptor.getControllerServiceDefinition();
             if (!requiredServiceClass.isAssignableFrom(controllerService.getClass())) {
                 final ValidationResult result = new ValidationResult.Builder()
-                    .valid(false)
-                    .subject(descriptor.getDisplayName())
-                    .input(controllerServiceId)
-                    .explanation("Invalid Controller Service: " + controllerServiceId + " does not implement interface " + requiredServiceClass)
-                    .build();
+                        .valid(false)
+                        .subject(descriptor.getDisplayName())
+                        .input(controllerServiceId)
+                        .explanation("Invalid Controller Service: " + controllerServiceId + " does not implement interface " + requiredServiceClass)
+                        .build();
 
                 validationResults.add(result);
                 continue;
@@ -379,11 +462,11 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
             final boolean enabled = isControllerServiceEnabled(controllerServiceId);
             if (!enabled) {
                 validationResults.add(new ValidationResult.Builder()
-                    .input(controllerServiceId)
-                    .subject(descriptor.getDisplayName())
-                    .explanation("Controller Service with ID " + controllerServiceId + " is not enabled")
-                    .valid(false)
-                    .build());
+                        .input(controllerServiceId)
+                        .subject(descriptor.getDisplayName())
+                        .explanation("Controller Service with ID " + controllerServiceId + " is not enabled")
+                        .valid(false)
+                        .build());
             }
         }
 
@@ -406,39 +489,18 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
 
         for (final ValidationResult result : validate()) {
             if (!result.isValid()) {
-                sb.append(result.toString()).append("\n");
+                sb.append(result).append("\n");
                 failureCount++;
             }
         }
 
         if (failureCount > 0) {
-            Assert.fail("Processor has " + failureCount + " validation failures:\n" + sb.toString());
+            Assertions.fail("Processor has " + failureCount + " validation failures:\n" + sb);
         }
-    }
-
-    @Override
-    public String encrypt(final String unencrypted) {
-        return "enc{" + unencrypted + "}";
-    }
-
-    @Override
-    public String decrypt(final String encrypted) {
-        if (encrypted.startsWith("enc{") && encrypted.endsWith("}")) {
-            return encrypted.substring(4, encrypted.length() - 1);
-        }
-        return encrypted;
     }
 
     public void setValidateExpressionUsage(final boolean validate) {
         allowExpressionValidation = validate;
-    }
-
-    public void enableExpressionValidation() {
-        enableExpressionValidation = true;
-    }
-
-    public void disableExpressionValidation() {
-        enableExpressionValidation = false;
     }
 
     Map<PropertyDescriptor, String> getControllerServiceProperties(final ControllerService controllerService) {
@@ -454,15 +516,24 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
         return this;
     }
 
-    @Override
-    public Set<Relationship> getAvailableRelationships() {
+    public Set<Relationship> getAllRelationships() {
         if (!(component instanceof Processor)) {
             return Collections.emptySet();
         }
 
-        final Set<Relationship> relationships = new HashSet<>(((Processor) component).getRelationships());
+        return new HashSet<>(((Processor) component).getRelationships());
+    }
+
+    @Override
+    public Set<Relationship> getAvailableRelationships() {
+        final Set<Relationship> relationships = getAllRelationships();
         relationships.removeAll(unavailableRelationships);
         return relationships;
+    }
+
+    @Override
+    public boolean isAutoTerminated(final Relationship relationship) {
+        return false;
     }
 
     public void setUnavailableRelationships(final Set<Relationship> relationships) {
@@ -504,6 +575,10 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
         this.connections.remove(relationship);
     }
 
+    public void clearConnections() {
+        this.connections = new HashSet<>();
+    }
+
     public void setConnections(final Set<Relationship> connections) {
         if (connections == null) {
             this.connections = Collections.emptySet();
@@ -514,12 +589,12 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
 
     @Override
     public boolean isExpressionLanguagePresent(final PropertyDescriptor property) {
-        if (property == null || !property.isExpressionLanguageSupported()) {
+        if (property == null || property.getExpressionLanguageScope().equals(ExpressionLanguageScope.NONE)) {
             return false;
         }
 
         final List<Range> elRanges = Query.extractExpressionRanges(getProperty(property).getValue());
-        return (elRanges != null && !elRanges.isEmpty());
+        return !elRanges.isEmpty();
     }
 
     @Override
@@ -532,7 +607,7 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
         return componentName;
     }
 
-    protected void setMaxConcurrentTasks(int maxConcurrentTasks) {
+    public void setMaxConcurrentTasks(int maxConcurrentTasks) {
         this.maxConcurrentTasks = maxConcurrentTasks;
     }
 
@@ -578,5 +653,19 @@ public class MockProcessContext extends MockControllerServiceLookup implements P
     @Override
     public boolean isConnectedToCluster() {
         return isConnected;
+    }
+
+    @Override
+    public int getRetryCount() {
+        return 0;
+    }
+
+    @Override
+    public boolean isRelationshipRetried(Relationship relationship) {
+        return false;
+    }
+
+    public Map<String, String> getEnvironmentVariables() {
+        return environmentVariables;
     }
 }

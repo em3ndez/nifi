@@ -1,0 +1,369 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.amqp.processors;
+
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Connection;
+import com.rabbitmq.client.GetResponse;
+import org.apache.nifi.amqp.processors.PublishAMQP.InputHeaderSource;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.util.PropertyMigrationResult;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class PublishAMQPTest {
+
+    private final LocalPublishAMQP pubProc = new LocalPublishAMQP();
+    private final TestRunner runner = TestRunners.newTestRunner(pubProc);
+
+    @Test
+    public void validateSuccessfulPublishAndTransferToSuccess() throws Exception {
+        setConnectionProperties(runner);
+
+        final Map<String, String> expectedHeaders = new HashMap<>();
+        expectedHeaders.put("foo", "bar");
+        expectedHeaders.put("foo2", "bar2");
+        expectedHeaders.put("foo3", null);
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("foo", "bar");
+        attributes.put(AbstractAMQPProcessor.AMQP_CONTENT_TYPE_ATTRIBUTE, "foo/bar");
+        attributes.put(AbstractAMQPProcessor.AMQP_CONTENT_ENCODING_ATTRIBUTE, "foobar123");
+        attributes.put(AbstractAMQPProcessor.AMQP_HEADERS_ATTRIBUTE, "foo=bar,foo2=bar2,foo3");
+        attributes.put(AbstractAMQPProcessor.AMQP_DELIVERY_MODE_ATTRIBUTE, "1");
+        attributes.put(AbstractAMQPProcessor.AMQP_PRIORITY_ATTRIBUTE, "2");
+        attributes.put(AbstractAMQPProcessor.AMQP_CORRELATION_ID_ATTRIBUTE, "correlationId123");
+        attributes.put(AbstractAMQPProcessor.AMQP_REPLY_TO_ATTRIBUTE, "replyTo123");
+        attributes.put(AbstractAMQPProcessor.AMQP_EXPIRATION_ATTRIBUTE, "expiration123");
+        attributes.put(AbstractAMQPProcessor.AMQP_MESSAGE_ID_ATTRIBUTE, "messageId123");
+        attributes.put(AbstractAMQPProcessor.AMQP_TIMESTAMP_ATTRIBUTE, "123456789");
+        attributes.put(AbstractAMQPProcessor.AMQP_TYPE_ATTRIBUTE, "type123");
+        attributes.put(AbstractAMQPProcessor.AMQP_USER_ID_ATTRIBUTE, "userId123");
+        attributes.put(AbstractAMQPProcessor.AMQP_APPID_ATTRIBUTE, "appId123");
+        attributes.put(AbstractAMQPProcessor.AMQP_CLUSTER_ID_ATTRIBUTE, "clusterId123");
+
+        runner.enqueue("Hello Joe".getBytes(), attributes);
+
+        runner.run();
+
+        final MockFlowFile successFF = runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).getFirst();
+        assertNotNull(successFF);
+
+        final Channel channel = pubProc.getConnection().createChannel();
+        final GetResponse msg1 = channel.basicGet("queue1", true);
+        assertNotNull(msg1);
+        assertEquals("foo/bar", msg1.getProps().getContentType());
+        assertEquals("foobar123", msg1.getProps().getContentEncoding());
+
+        final Map<String, Object> headerMap = msg1.getProps().getHeaders();
+
+        assertEquals(expectedHeaders, headerMap);
+
+        assertEquals((Integer) 1, msg1.getProps().getDeliveryMode());
+        assertEquals((Integer) 2, msg1.getProps().getPriority());
+        assertEquals("correlationId123", msg1.getProps().getCorrelationId());
+        assertEquals("replyTo123", msg1.getProps().getReplyTo());
+        assertEquals("expiration123", msg1.getProps().getExpiration());
+        assertEquals("messageId123", msg1.getProps().getMessageId());
+        assertEquals(new Date(123456789L), msg1.getProps().getTimestamp());
+        assertEquals("type123", msg1.getProps().getType());
+        assertEquals("userId123", msg1.getProps().getUserId());
+        assertEquals("appId123", msg1.getProps().getAppId());
+        assertEquals("clusterId123", msg1.getProps().getClusterId());
+
+        assertNotNull(channel.basicGet("queue2", true));
+    }
+
+    @Test
+    public void validateSuccessWithHeaderWithCommaPublishToSuccess() throws Exception {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.HEADER_SEPARATOR, "|");
+
+        final Map<String, String> expectedHeaders = new HashMap<>();
+        expectedHeaders.put("foo", "(bar,bar)");
+        expectedHeaders.put("foo2", "bar2");
+        expectedHeaders.put("foo3", null);
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put(AbstractAMQPProcessor.AMQP_HEADERS_ATTRIBUTE, "foo=(bar,bar)|foo2=bar2|foo3");
+
+        runner.enqueue("Hello Joe".getBytes(), attributes);
+
+        runner.run();
+
+        final MockFlowFile successFF = runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).getFirst();
+        assertNotNull(successFF);
+
+        final Channel channel = pubProc.getConnection().createChannel();
+        final GetResponse msg1 = channel.basicGet("queue1", true);
+        assertNotNull(msg1);
+
+        final Map<String, Object> headerMap = msg1.getProps().getHeaders();
+
+        assertEquals(expectedHeaders, headerMap);
+
+        assertNotNull(channel.basicGet("queue2", true));
+    }
+
+    @Test
+    public void validateWithNotValidHeaderSeparatorParameter() {
+        runner.setProperty(PublishAMQP.HEADER_SEPARATOR, "|,");
+        runner.assertNotValid();
+    }
+
+    @Test
+    public void validateMalformedHeaderIgnoredAndPublishToSuccess() throws Exception {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.HEADER_SEPARATOR, "|");
+
+        final Map<String, String> expectedHeaders = new HashMap<>();
+        expectedHeaders.put("foo", "(bar,bar)");
+        expectedHeaders.put("foo2", "bar2");
+        expectedHeaders.put("foo3", null);
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put(AbstractAMQPProcessor.AMQP_HEADERS_ATTRIBUTE, "foo=(bar,bar)|foo2=bar2|foo3|foo4=malformed=|foo5=mal=formed||=ignored");
+
+        runner.enqueue("Hello Joe".getBytes(), attributes);
+
+        runner.run();
+
+        final MockFlowFile successFF = runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).getFirst();
+        assertNotNull(successFF);
+
+        final Channel channel = pubProc.getConnection().createChannel();
+        final GetResponse msg1 = channel.basicGet("queue1", true);
+        assertNotNull(msg1);
+
+        final Map<String, Object> headerMap = msg1.getProps().getHeaders();
+
+        assertEquals(expectedHeaders, headerMap);
+
+        assertNotNull(channel.basicGet("queue2", true));
+    }
+
+    @Test
+    public void validateEmptyHeaderKeysIgnoredAndPublishToSuccess() throws Exception {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.HEADER_SEPARATOR, "|");
+
+        final Map<String, Object> expectedHeaders = new HashMap<>();
+        expectedHeaders.put("foo", "bar");
+        expectedHeaders.put("foo2", null);
+        expectedHeaders.put("foo3", "");
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put(AbstractAMQPProcessor.AMQP_HEADERS_ATTRIBUTE, "foo=bar|=missing|   |foo2| foo3 = ");
+
+        runner.enqueue("Hello Joe".getBytes(), attributes);
+
+        runner.run();
+
+        final MockFlowFile successFF = runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).getFirst();
+        assertNotNull(successFF);
+
+        final Channel channel = pubProc.getConnection().createChannel();
+        final GetResponse msg1 = channel.basicGet("queue1", true);
+        assertNotNull(msg1);
+
+        assertEquals(expectedHeaders, msg1.getProps().getHeaders());
+    }
+
+    @Test
+    public void validateFailedPublishAndTransferToFailure() {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.EXCHANGE, "nonExistentExchange");
+
+        runner.enqueue("Hello Joe".getBytes());
+
+        runner.run();
+
+        assertTrue(runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).isEmpty());
+        final MockFlowFile failureFlowFile = runner.getFlowFilesForRelationship(PublishAMQP.REL_FAILURE).getFirst();
+        assertNotNull(failureFlowFile);
+        assertFalse(failureFlowFile.isPenalized());
+        runner.assertPenalizeCount(0);
+    }
+
+    @Test
+    public void validateOversizedFlowFileTransferredToFailureWithoutPublishing() throws Exception {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.MAXIMUM_INPUT_FLOWFILE_SIZE, "4 B");
+
+        runner.enqueue("Hello".getBytes());
+
+        runner.run();
+
+        assertTrue(runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).isEmpty());
+        final MockFlowFile failureFlowFile = runner.getFlowFilesForRelationship(PublishAMQP.REL_FAILURE).getFirst();
+        assertNotNull(failureFlowFile);
+        assertFalse(failureFlowFile.isPenalized());
+        runner.assertPenalizeCount(0);
+
+        final Channel channel = pubProc.getConnection().createChannel();
+        assertNull(channel.basicGet("queue1", true));
+    }
+
+    @Test
+    public void validateSuccessWithHeaderFromAttributeRegexToSuccess() throws Exception {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.HEADERS_SOURCE, InputHeaderSource.FLOWFILE_ATTRIBUTES);
+        runner.setProperty(PublishAMQP.HEADERS_PATTERN, "test.*|tmp\\..*|foo2|foo3");
+
+        final Map<String, String> expectedHeaders = new HashMap<>();
+        expectedHeaders.put("test1", "value1");
+        expectedHeaders.put("test2", "value2");
+        expectedHeaders.put("foo2", "");
+        expectedHeaders.put("foo3", null);
+        expectedHeaders.put("tmp.test1", "tmp1");
+        expectedHeaders.put("tmp.test2.key", "tmp2");
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put(AbstractAMQPProcessor.AMQP_HEADERS_ATTRIBUTE, "foo=(bar,bar)|foo2=bar2|foo3");
+        attributes.put("test1", "value1");
+        attributes.put("test2", "value2");
+        attributes.put("foo4", "value4");
+        attributes.put("foo2", "");
+        attributes.put("foo3", null);
+        attributes.put("tmp.test1", "tmp1");
+        attributes.put("tmp.test2.key", "tmp2");
+
+        runner.enqueue("Hello Joe".getBytes(), attributes);
+
+        runner.run();
+
+        final MockFlowFile successFF = runner.getFlowFilesForRelationship(PublishAMQP.REL_SUCCESS).getFirst();
+        assertNotNull(successFF);
+
+        final Channel channel = pubProc.getConnection().createChannel();
+        final GetResponse msg1 = channel.basicGet("queue1", true);
+        assertNotNull(msg1);
+
+        final Map<String, Object> headerMap = msg1.getProps().getHeaders();
+
+        assertEquals(expectedHeaders, headerMap);
+
+        assertNotNull(channel.basicGet("queue2", true));
+    }
+
+    @Test
+    public void validateWithNotValidRegexForAttributeMatch() {
+        setConnectionProperties(runner);
+        runner.setProperty(PublishAMQP.HEADERS_SOURCE, InputHeaderSource.FLOWFILE_ATTRIBUTES);
+        runner.setProperty(PublishAMQP.HEADERS_PATTERN, "*");
+        runner.assertNotValid();
+    }
+
+    @Test
+    void testMigration() {
+        final TestRunner runner = TestRunners.newTestRunner(PublishAMQP.class);
+        setConnectionProperties(runner);
+        final Map<String, String> expectedRenamed = Map.ofEntries(
+                Map.entry("User Name", AbstractAMQPProcessor.USER.getName()),
+                Map.entry("ssl-context-service", AbstractAMQPProcessor.SSL_CONTEXT_SERVICE.getName()),
+                Map.entry("cert-authentication", AbstractAMQPProcessor.CLIENT_CERTIFICATE_AUTHENTICATION_ENABLED.getName()),
+                Map.entry("header.separator", PublishAMQP.HEADER_SEPARATOR.getName())
+        );
+
+        final PropertyMigrationResult propertyMigrationResult = runner.migrateProperties();
+        assertEquals(expectedRenamed, propertyMigrationResult.getPropertiesRenamed());
+
+        final Set<String> expectedRemoved = Set.of("ssl-client-auth");
+        assertEquals(expectedRemoved, propertyMigrationResult.getPropertiesRemoved());
+    }
+
+    /**
+     * When the broker closes the channel with a 404 (exchange not found), the FlowFile
+     * must route to REL_FAILURE — not cause an unhandled processor exception.
+     */
+    @Test
+    public void validateFlowFileRoutedToFailureWhenBrokerClosesChannel() {
+        final LocalPublishAMQP proc = new LocalPublishAMQP();
+        final TestRunner testRunner = TestRunners.newTestRunner(proc);
+        setConnectionProperties(testRunner);
+        testRunner.setProperty(PublishAMQP.DELIVERY_GUARANTEE, PublishAMQP.DeliveryGuarantee.AT_LEAST_ONCE);
+        proc.getTestChannel().setSimulateShutdownOnConfirm(true);
+
+        testRunner.enqueue("Hello Joe".getBytes());
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PublishAMQP.REL_FAILURE);
+    }
+
+    @Test
+    public void validateFlowFileRoutedToFailureOnBrokerNack() {
+        final LocalPublishAMQP proc = new LocalPublishAMQP();
+        final TestRunner testRunner = TestRunners.newTestRunner(proc);
+        setConnectionProperties(testRunner);
+        testRunner.setProperty(PublishAMQP.DELIVERY_GUARANTEE, PublishAMQP.DeliveryGuarantee.AT_LEAST_ONCE);
+        proc.getTestChannel().setSimulateNackOnConfirm(true);
+
+        testRunner.enqueue("Hello Joe".getBytes());
+        testRunner.run();
+
+        testRunner.assertAllFlowFilesTransferred(PublishAMQP.REL_FAILURE);
+    }
+
+    private void setConnectionProperties(TestRunner runner) {
+        runner.setProperty(PublishAMQP.BROKERS, "injvm:5672");
+        runner.setProperty(PublishAMQP.USER, "user");
+        runner.setProperty(PublishAMQP.PASSWORD, "password");
+        runner.setProperty(PublishAMQP.EXCHANGE, "myExchange");
+        runner.setProperty(PublishAMQP.ROUTING_KEY, "key1");
+    }
+
+    public static class LocalPublishAMQP extends PublishAMQP {
+        private final TestConnection connection;
+
+        public LocalPublishAMQP() {
+            final Map<String, List<String>> routingMap = Collections.singletonMap("key1", Arrays.asList("queue1", "queue2"));
+            final Map<String, String> exchangeToRoutingKeymap = Collections.singletonMap("myExchange", "key1");
+
+            connection = new TestConnection(exchangeToRoutingKeymap, routingMap);
+        }
+
+        @Override
+        protected Connection createConnection(ProcessContext context, ExecutorService executor) {
+            return connection;
+        }
+
+        public Connection getConnection() {
+            return connection;
+        }
+
+        public TestChannel getTestChannel() {
+            return connection.getTestChannel();
+        }
+    }
+}

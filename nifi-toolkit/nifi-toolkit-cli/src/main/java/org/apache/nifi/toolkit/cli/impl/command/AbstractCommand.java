@@ -16,13 +16,13 @@
  */
 package org.apache.nifi.toolkit.cli.impl.command;
 
-import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.MissingOptionException;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
+import org.apache.commons.cli.help.HelpFormatter;
+import org.apache.commons.cli.help.TextHelpAppendable;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.Validate;
 import org.apache.nifi.toolkit.cli.api.Command;
 import org.apache.nifi.toolkit.cli.api.Context;
 import org.apache.nifi.toolkit.cli.api.Result;
@@ -33,9 +33,9 @@ import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.net.MalformedURLException;
 import java.net.URI;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
+import java.util.Objects;
 import java.util.Properties;
 
 /**
@@ -51,13 +51,9 @@ public abstract class AbstractCommand<R extends Result> implements Command<R> {
     private PrintStream output;
 
     public AbstractCommand(final String name, final Class<R> resultClass) {
-        this.name = name;
-        this.resultClass = resultClass;
-        Validate.notNull(this.name);
-        Validate.notNull(this.resultClass);
-
+        this.name = Objects.requireNonNull(name);
+        this.resultClass = Objects.requireNonNull(resultClass);
         this.options = createBaseOptions();
-        Validate.notNull(this.options);
     }
 
     protected Options createBaseOptions() {
@@ -94,15 +90,13 @@ public abstract class AbstractCommand<R extends Result> implements Command<R> {
 
     @Override
     public final void initialize(final Context context) {
-        Validate.notNull(context);
-        Validate.notNull(context.getOutput());
-        this.context = context;
-        this.output = context.getOutput();
+        this.context = Objects.requireNonNull(context);
+        this.output = Objects.requireNonNull(context.getOutput());
         this.doInitialize(context);
     }
 
     protected void doInitialize(final Context context) {
-        // sub-classes can override to do additional things like add options
+        // subclasses can override to do additional things like add options
     }
 
     protected void addOption(final Option option) {
@@ -137,27 +131,29 @@ public abstract class AbstractCommand<R extends Result> implements Command<R> {
             output.println();
         }
 
-        final PrintWriter printWriter = new PrintWriter(output);
+        try {
+            final PrintWriter printWriter = new PrintWriter(output);
+            final TextHelpAppendable appendable = new TextHelpAppendable(printWriter);
+            appendable.setMaxWidth(80);
 
-        final int width = 80;
-        final HelpFormatter hf = new HelpFormatter();
-        hf.setWidth(width);
+            appendable.appendParagraph(getDescription());
 
-        hf.printWrapped(printWriter, width, getDescription());
-        hf.printWrapped(printWriter, width, "");
+            if (isReferencable()) {
+                appendable.appendParagraph("PRODUCES BACK-REFERENCES");
+            }
 
-        if (isReferencable()) {
-            hf.printWrapped(printWriter, width, "PRODUCES BACK-REFERENCES");
-            hf.printWrapped(printWriter, width, "");
+            HelpFormatter.builder()
+                    .setHelpAppendable(appendable)
+                    .setShowSince(false)
+                    .get()
+                    .printHelp(getName(), null, getOptions(), null, false);
+
+            printWriter.println();
+            printWriter.flush();
+        } catch (IOException e) {
+            throw new RuntimeException("Unable to print command usage for " + getName(), e);
         }
-
-        hf.printHelp(printWriter, hf.getWidth(), getName(), null, getOptions(),
-                hf.getLeftPadding(), hf.getDescPadding(), null, false);
-
-        printWriter.println();
-        printWriter.flush();
     }
-
 
     protected void print(final String val) {
         output.print(val);
@@ -232,12 +228,6 @@ public abstract class AbstractCommand<R extends Result> implements Command<R> {
         return getContext().isInteractive();
     }
 
-    protected void printIfInteractive(final String val) {
-        if (isInteractive()) {
-            print(val);
-        }
-    }
-
     protected void printlnIfInteractive(final String val) {
         if (isInteractive()) {
             println(val);
@@ -248,9 +238,8 @@ public abstract class AbstractCommand<R extends Result> implements Command<R> {
         String contents;
         try {
             // try a public resource URL
-            URL url = new URL(inputFile);
-            contents = IOUtils.toString(url, StandardCharsets.UTF_8);
-        } catch (MalformedURLException e) {
+            contents = IOUtils.toString(URI.create(inputFile).toURL(), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException | MalformedURLException e) {
             // assume a local file then
             URI uri = Paths.get(inputFile).toAbsolutePath().toUri();
             contents = IOUtils.toString(uri, StandardCharsets.UTF_8);

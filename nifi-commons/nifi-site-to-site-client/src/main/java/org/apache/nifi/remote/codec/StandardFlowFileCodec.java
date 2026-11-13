@@ -16,22 +16,23 @@
  */
 package org.apache.nifi.remote.codec;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.EOFException;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
 import org.apache.nifi.remote.StandardVersionNegotiator;
 import org.apache.nifi.remote.VersionNegotiator;
 import org.apache.nifi.remote.exception.ProtocolException;
 import org.apache.nifi.remote.protocol.DataPacket;
 import org.apache.nifi.remote.util.StandardDataPacket;
 import org.apache.nifi.stream.io.StreamUtils;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class StandardFlowFileCodec implements FlowFileCodec {
 
@@ -59,8 +60,7 @@ public class StandardFlowFileCodec implements FlowFileCodec {
         out.writeLong(dataPacket.getSize());
 
         final InputStream in = dataPacket.getData();
-        StreamUtils.copy(in, encodedOut);
-        encodedOut.flush();
+        in.transferTo(encodedOut);
     }
 
     @Override
@@ -94,7 +94,7 @@ public class StandardFlowFileCodec implements FlowFileCodec {
     }
 
     private void writeString(final String val, final DataOutputStream out) throws IOException {
-        final byte[] bytes = val.getBytes("UTF-8");
+        final byte[] bytes = val.getBytes(StandardCharsets.UTF_8);
         out.writeInt(bytes.length);
         out.write(bytes);
     }
@@ -103,7 +103,7 @@ public class StandardFlowFileCodec implements FlowFileCodec {
         final int numBytes = in.readInt();
         final byte[] bytes = new byte[numBytes];
         StreamUtils.fillBuffer(in, bytes, true);
-        return new String(bytes, "UTF-8");
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
     @Override

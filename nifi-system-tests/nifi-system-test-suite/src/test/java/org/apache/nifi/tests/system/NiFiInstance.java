@@ -19,7 +19,9 @@ package org.apache.nifi.tests.system;
 import java.io.File;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import javax.net.ssl.SSLContext;
 
 public interface NiFiInstance {
 
@@ -73,6 +75,13 @@ public interface NiFiInstance {
     NiFiInstance getNodeInstance(int nodeIndex);
 
     /**
+     * Get SSLContext from configured properties
+     *
+     * @return SSLContext or empty when not configured
+     */
+    Optional<SSLContext> getSslContext();
+
+    /**
      * Returns the NiFiProperties for the node
      *
      * @return the nifi properties for the node
@@ -98,16 +107,25 @@ public interface NiFiInstance {
     void setProperty(String propertyName, String propertyValue) throws IOException;
 
     /**
-     * Change the value of the flow that should be loaded on startup
-     * @param flowXmlGz the file that contains the flow that should be loaded on startup
-     */
-    void setFlowXmlGz(final File flowXmlGz) throws IOException;
-
-    /**
      * Change the values of the given properties in nifi.properties. Any property that is not present in the given map will remain unchanged. If the node is already running, this change will not take
      * effect until the instance is stopped and started again.
      *
      * @param properties the properties to change
      */
     void setProperties(Map<String, String> properties) throws IOException;
+
+    /**
+     * Copies instance configuration, logs, etc. to the given directory
+     * @param directory directory to write quarantine info to
+     * @param failureCause the reason for the test failure
+     * @throws IOException if unable to write the information
+     */
+    void quarantineTroubleshootingInfo(final File directory, final Throwable failureCause) throws IOException;
+
+    /**
+     * Checks if able to communicate with the instance
+     *
+     * @return <code>true</code> if the instance is started and the REST API can be accessed, false otherwise
+     */
+    boolean isAccessible();
 }
